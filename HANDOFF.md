@@ -289,7 +289,7 @@ quit** — that runs packSetup's teardown and unlinks the assets, which must hap
 py -m pytest tests/ -q
 ```
 
-508 passing. **16 pre-existing failures** in `tests/test_seeded_run.py` and
+510 passing. **16 pre-existing failures** in `tests/test_seeded_run.py` and
 `tests/test_world_mailbox.py` — they cover the world mailbox deleted in dev44 and are
 unrelated to anything here.
 
