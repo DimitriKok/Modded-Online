@@ -1,5 +1,85 @@
 # Changelog
 
+## 2.0.0-dev55
+
+hdmod's tutorial door puts the party in the tutorial. **Both players need dev55, and
+the SERVER needs 1.0.11** — this is half a server fix and it does nothing without it.
+
+### The server was throwing the answer away
+
+dev54 already had the whole client-side mechanism: the camp door's destination rides
+along in `run_start`, and each machine matches it against its own
+`camplib.DOOR_TUTORIAL_UID` and sets `HD_WORLDSTATE_STATE = TUTORIAL`. Ten unit tests
+covered it. It never worked once in game, and nothing said why.
+
+`parse_start_dest` in `server/server.py`:
+
+```python
+if world == 1 and level == 1:
+    return None  # the main door: the default start, nothing to carry
+```
+
+hdmod spawns its tutorial door with `spawn_door(x, y, l, 1, 1, THEME.DWELLING)`. Its
+destination **is** 1-1 — so of every door in the game, the one door this feature
+exists for was the one the server discarded. `run_start` carried no `start`, every
+machine's adapter was handed `nil`, and it correctly did nothing. The adapter, the
+dispatch and the tests were all right; the field was empty before any of them ran.
+
+Dropping the collapse is safe because the client never sends a destination for the
+main exit: `pollCampDoor` records `false` for `FLOOR_DOOR_MAIN_EXIT` and only reads
+`get_target()` for `FLOOR_DOOR_STARTING_EXIT`. "The main door" arrives as an absent
+field, not as `[1, 1, theme]`. A present 1-1 is a real door that leads to 1-1, which
+is a different thing and is now kept.
+
+### Recognising the door and acting on it are now two steps
+
+`startDoor` has to run at `run_start`: it matches on the camp door, and the door is
+gone the moment we warp. But the mod's own load and reset callbacks run between that
+and generation, and hdmod's camp setup writes `HD_WORLDSTATE_STATE = NORMAL`. So
+recognition happens where the evidence is, and the *consequence* is re-applied at
+`PRE_LEVEL_GENERATION` while `levelOrdinal` is 0 — the last write before the world is
+built, gated exactly like the fresh-run kit reset and for the same reason. It never
+re-runs the door match: by then the camp is gone and the door's uid may have been
+recycled by another entity. The hits are dropped in `clearRunState`, so a recognised
+tutorial cannot leak into the next run.
+
+### It is no longer possible for this to fail silently
+
+The three things that made a whole session of work produce no evidence:
+
+* **`runStartedFromDoor` logged only a hit.** A dispatch that found nothing was
+  indistinguishable from one that never happened. Every outcome now reaches the
+  desync log, naming the destination that arrived and why each adapter said no.
+* **`pollCampDoor` never said what it hooked.** Now one line per camp listing each
+  door and its target — the other half of the pair, so "the door was never hooked"
+  and "the destination was lost on the way" can be told apart.
+* **An out-of-date server looks exactly like this bug.** A machine that readied at a
+  door and gets a `run_start` with no destination now says so, in a toast and in the
+  log, and names the server. It is deliberately NOT worked around by substituting our
+  own door: only the machine that pressed it knows it, so the peers would build a
+  different world. A wrong-but-identical run beats a right-for-one-player one.
+
+### Restarting inside the tutorial stays in the tutorial
+
+An instant restart re-sends the door the run began at — the server keeps it on the
+room so a restart returns to the same shortcut — but by then the camp is gone and
+`DOOR_TUTORIAL_UID` names a dead entity, so the match failed and the restart landed
+in an ordinary run. Reading the door's target is only possible while the camp is up;
+comparing against it is not, so the two are separated and the target is remembered
+per sandbox. It is a target, not a licence: a normal run started afterwards still
+sends no destination and is still left alone.
+
+### Two smaller things found on the way
+
+* **The adapter required `camplib` to be detected.** Detection runs once, right after
+  the mod's main chunk, so a global assigned any later made the adapter invisible for
+  the rest of the session. `worldlib.HD_WORLDSTATE_STATUS` already names hdmod;
+  `camplib` is what the adapter works on, not what identifies it, and is now looked up
+  where it is used.
+* **The main exit and a door leading to 1-1 shared the "1-1" label.** So
+  `everyoneSameDest` called them agreement, and pressing one while readied at the
+  other read as un-readying instead of moving your vote. The main exit is now `main`.
+
 ## 2.0.0-dev54
 
 The pack goes back to a WORKING state, not an empty one. **Both players need dev54.**

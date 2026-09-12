@@ -55,6 +55,29 @@ function module.envFor(packDir)
     return module.envs[packDir]
 end
 
+--- The adapters that recognised the door this run began at: { env, adapter, packDir }.
+--- Rebuilt by every runStartedFromDoor, which is once per run start.
+--- @type table[]
+module.startDoorHits = {}
+
+--- Say, in one line, what happened the last time a run start was dispatched.
+--- Read by the desync log; kept as a plain string so nothing has to be recomputed.
+--- @type string?
+module.startDoorNote = nil
+
+--- A start destination as one readable token for the log: "1-1(theme 1)", or
+--- "none (the main exit)". `nil` and `{1,1,1}` are DIFFERENT things here and the log has to
+--- show which one arrived -- confusing the two is the bug this whole path exists for.
+--- @param dest table?
+--- @return string
+local function describeDest(dest)
+    if type(dest) ~= "table" or dest[1] == nil then
+        return "none (the main exit)"
+    end
+    return string.format("%s-%s(theme %s)", tostring(dest[1]), tostring(dest[2]),
+        tostring(dest[3]))
+end
+
 --- Tell every hosted mod which camp door the run was started from.
 ---
 --- Online a camp door is inert: Modded Online detects the press and starts the run
@@ -66,30 +89,114 @@ end
 ---
 --- Called on EVERY machine, so each one sets the mod's state for itself and the
 --- world still generates identically everywhere.
+---
+--- EVERY outcome is logged, not just a hit. This ran silent for a whole debugging
+--- session: the door was being dispatched correctly and the destination never
+--- arrived (the server discarded a 1-1 door as "the main exit"), and from the
+--- outside that is indistinguishable from a dispatch that never happened or an
+--- adapter that never matched. A miss now says which of those it was.
 --- @param dest table? # { world, level, theme } of the door, or nil for the main exit
 --- @return integer # how many adapters recognised it
 function module.runStartedFromDoor(dest)
     local applied = 0
+    local hits = {}
+    local notes = {}
     for packDir, control in pairs(module.controls) do
         local env = module.envs[packDir]
-        if env ~= nil and control ~= nil and control.matched ~= nil then
+        if env == nil or control == nil or control.matched == nil then
+            notes[#notes + 1] = string.format("%s: not hosted", tostring(packDir))
+        else
             local ok, matched = pcall(control.matched)
-            if ok and type(matched) == "table" then
+            if not ok or type(matched) ~= "table" then
+                notes[#notes + 1] = string.format("%s: no adapters matched this mod",
+                    tostring(packDir))
+            else
+                local asked = 0
                 for _, adapter in ipairs(matched) do
                     if adapter.startDoor ~= nil then
-                        local fired, hit = pcall(adapter.startDoor, env, dest)
+                        asked = asked + 1
+                        local fired, hit, why = pcall(adapter.startDoor, env, dest)
                         if fired and hit then
                             applied = applied + 1
+                            hits[#hits + 1] =
+                                { env = env, adapter = adapter, packDir = packDir }
+                            notes[#notes + 1] = string.format("%s/%s: RECOGNISED",
+                                tostring(packDir), tostring(adapter.name))
                             dbg(string.format(
                                 "mod host: %s recognised the start door (%s)",
                                 packDir, tostring(adapter.name)))
+                        else
+                            notes[#notes + 1] = string.format("%s/%s: no (%s)",
+                                tostring(packDir), tostring(adapter.name),
+                                fired and tostring(why or "did not match")
+                                    or "ERROR: " .. tostring(hit))
                         end
                     end
+                end
+                if asked == 0 then
+                    notes[#notes + 1] = string.format(
+                        "%s: none of this mod's adapters cares about start doors",
+                        tostring(packDir))
                 end
             end
         end
     end
+    module.startDoorHits = hits
+    module.startDoorNote = string.format("start door %s -> %d recognised | %s",
+        describeDest(dest), applied,
+        #notes > 0 and table.concat(notes, "; ") or "no mods are hosted")
+    if DesyncLog ~= nil then
+        pcall(DesyncLog.earlyEvent, "mod host: %s", module.startDoorNote)
+        pcall(DesyncLog.traceNote, "mod host: %s", module.startDoorNote)
+    end
     return applied
+end
+
+--- Re-apply what the recognised adapters did, at the last moment before the world
+--- is built.
+---
+--- `runStartedFromDoor` has to run at run_start: it matches on the camp door, which
+--- only exists until the warp. But the mod's own load and reset callbacks run
+--- between that and generation, and hdmod's camp setup sets HD_WORLDSTATE_STATE
+--- back to NORMAL -- so recognising the door was never enough on its own to
+--- guarantee the state was still set when generation read it. Splitting it in two
+--- means the recognition happens where the evidence is and the consequence happens
+--- where it counts.
+---
+--- Identical on every machine (the hit list was built from the same ordered
+--- run_start event everywhere), so it cannot desync generation.
+--- @return integer # how many adapters re-applied
+function module.reassertStartDoor()
+    local applied = 0
+    local notes = {}
+    for _, hit in ipairs(module.startDoorHits) do
+        if hit.adapter.reassert ~= nil then
+            local ok, note = pcall(hit.adapter.reassert, hit.env)
+            if ok then
+                applied = applied + 1
+                notes[#notes + 1] = string.format("%s/%s: %s", tostring(hit.packDir),
+                    tostring(hit.adapter.name), tostring(note or "re-applied"))
+            else
+                notes[#notes + 1] = string.format("%s/%s: ERROR %s",
+                    tostring(hit.packDir), tostring(hit.adapter.name), tostring(note))
+            end
+        end
+    end
+    if #notes > 0 and DesyncLog ~= nil then
+        pcall(DesyncLog.earlyEvent, "mod host: start door re-asserted | %s",
+            table.concat(notes, "; "))
+        pcall(DesyncLog.traceNote, "mod host: start door re-asserted | %s",
+            table.concat(notes, "; "))
+    end
+    return applied
+end
+
+--- Drop the recognised adapters. The run is over, so nothing may re-apply into the
+--- next one -- a tutorial that leaked into the following run would be this bug
+--- again with the sign flipped.
+function module.forgetStartDoor()
+    module.startDoorHits = {}
+    module.startDoorNote = nil
 end
 
 --- Record the engine state a hosted mod's journal-chapter decision reads.

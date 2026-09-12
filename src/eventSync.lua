@@ -152,13 +152,20 @@ local function myChosenChar()
     return math.floor(char)
 end
 
---- A camp door's destination as a short comparable label ("1-1", "2-1", ...).
---- nil/absent means the main exit, i.e. a normal 1-1 start.
+--- A camp door's destination as a short comparable label ("2-1", "4-1", ...).
+--- nil/absent means the MAIN EXIT, which is its own label and not "1-1".
+---
+--- The main exit used to share the "1-1" label with any door leading there, on the
+--- reasoning that both start the run at 1-1 so they are the same choice. They are
+--- not: hdmod's tutorial door leads to 1-1 and starts the TUTORIAL. Merging them
+--- let one player ready at the tutorial door and another at the main exit while
+--- everyoneSameDest said they agreed, and made pressing the main exit while readied
+--- at the tutorial door read as un-readying (same label) instead of moving the vote.
 --- @param dest integer[]?
 --- @return string
 local function destLabel(dest)
     if type(dest) ~= "table" or dest[1] == nil then
-        return "1-1"
+        return "main"
     end
     return string.format("%d-%d", math.floor(dest[1]), math.floor(dest[2] or 1))
 end
@@ -259,6 +266,13 @@ local function clearRunState(reason)
     -- with. There is no version of that which is correct.
     if module.forgetSaveSync ~= nil then
         module.forgetSaveSync()
+    end
+    -- ...and forget which camp door this run began at. The adapters that recognised
+    -- it re-apply their state on every generation while levelOrdinal is 0, so a hit
+    -- left behind here would put the NEXT run into hdmod's tutorial -- this bug
+    -- again with the sign flipped.
+    if ModHost ~= nil and ModHost.forgetStartDoor ~= nil then
+        pcall(ModHost.forgetStartDoor)
     end
     pendingRunSeed = nil
     rosterChars = nil
@@ -1942,6 +1956,26 @@ local function onRunStart(payload)
         -- a camp SHORTCUT start rides along on run_start, so every machine warps
         -- to the same world; absent (or the main exit) means the usual 1-1
         local startAt = payload.start
+        -- An OUT-OF-DATE SERVER is the one thing that can silently undo all of the
+        -- below, and it looks exactly like the bug it used to cause. Servers before
+        -- 1.0.11 discarded a door whose target is 1-1 as "the main exit", which is
+        -- precisely hdmod's tutorial door -- so `start` came back absent, the
+        -- adapters were handed nil and correctly did nothing, and the tutorial door
+        -- built an ordinary run. Say so rather than letting it read as "the fix
+        -- doesn't work". NOT worked around by substituting our own door: only the
+        -- machine that pressed it knows it, so the peers would build a different
+        -- world and the whole party would desync. A wrong-but-identical run beats a
+        -- right-for-one-player one.
+        if startAt == nil and type(myReadyDest) == "table" and myReadyDest[1] ~= nil then
+            toast("This server is out of date — the camp door you started at was ignored")
+            if DesyncLog ~= nil then
+                pcall(DesyncLog.earlyEvent,
+                    "start door: we readied at %d-%d but run_start carried none —"
+                    .. " server %s is older than 1.0.11 and drops 1-1 doors",
+                    math.floor(myReadyDest[1]), math.floor(myReadyDest[2] or 1),
+                    Network.serverDescribe ~= nil and Network.serverDescribe() or "?")
+            end
+        end
         -- ...and tell the hosted mods WHICH door that was, before anything
         -- generates. Online the door is inert, so a mod that keys behaviour off a
         -- player physically entering it never finds out on its own: hdmod's tutorial
@@ -2303,6 +2337,19 @@ local function onPreLevelGeneration()
     -- identical, LIVING spelunkers with an even kit (the same reset the host's
     -- Quick Restart already applied).
     applyFreshRunReset()
+    -- Re-apply whatever a hosted mod's adapter did when it recognised the camp door
+    -- this run began at. That recognition happens back at run_start, because it
+    -- matches on the camp door and the door is gone once we warp -- but the mod's
+    -- own load and reset callbacks run in between, and hdmod's camp setup puts
+    -- HD_WORLDSTATE_STATE back to NORMAL. This is the last point before the world is
+    -- built, so whatever ran in between loses. Gated the same way applyFreshRunReset
+    -- is (levelOrdinal == 0, the window before the first floor engages) and for the
+    -- same reason: generation can run more than once in it, so the LAST write before
+    -- the level is built has to be ours. A no-op when no adapter recognised a door,
+    -- and identical on every machine, so it cannot desync generation.
+    if levelOrdinal == 0 and ModHost ~= nil and ModHost.reassertStartDoor ~= nil then
+        SafeCall("eventSync:reassertStartDoor", ModHost.reassertStartDoor)
+    end
     -- MID-RUN JOIN: give the just-added late-joiner a clean, IDENTICAL body on
     -- every machine — alive but EMPTY-HANDED. Identify the joiner the same way
     -- everywhere: the roster slot with NO entry in the host's snapshot (they
@@ -3582,6 +3629,24 @@ local function pollCampDoor()
     if hooked then
         doorReadyHeld = false
         doorHookPending = false
+        -- What this camp actually offers, once per camp. The other half of the start
+        -- door evidence: runStartedFromDoor logs the destination that ARRIVED, and
+        -- without this there is no way to tell "the door was never hooked" from "it
+        -- was hooked and the destination was lost on the way". A mod's custom door
+        -- (hdmod's tutorial door is one) only reaches the party if it is a
+        -- FLOOR_DOOR_STARTING_EXIT and its target reads back here.
+        if DesyncLog ~= nil then
+            local seen = {}
+            for uid, dest in pairs(campDoors) do
+                seen[#seen + 1] = string.format("%s=%s", tostring(uid),
+                    type(dest) == "table"
+                        and string.format("%d-%d(theme %d)", dest[1], dest[2], dest[3])
+                        or "main exit")
+            end
+            table.sort(seen)
+            pcall(DesyncLog.earlyEvent, "camp doors hooked: %s",
+                table.concat(seen, ", "))
+        end
     end
 end
 
