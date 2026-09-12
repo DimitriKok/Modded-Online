@@ -32,7 +32,11 @@ NL = chr(10)
 def _block():
     """The save-sync section, lifted out of eventSync so it can run standalone."""
     start = EVENT_SYNC.index("local SAVE_SYNC_FIELDS")
-    marker = "function module.releaseSaveSync()"
+    # forgetSaveSync is the LAST function in the section, so slicing to the end of
+    # it takes releaseSaveSync along with it. Extending this marker is the price of
+    # adding anything below it -- which is deliberate: a mechanism outside the slice
+    # is a mechanism with no tests.
+    marker = "function module.forgetSaveSync()"
     end = EVENT_SYNC.index(NL + "end" + NL, EVENT_SYNC.index(marker)) + len(NL + "end" + NL)
     # The exports MUST be part of the same chunk: these are `local function`s,
     # and a separate lua execute() cannot see another chunk's locals.
@@ -168,3 +172,36 @@ def test_the_hold_is_wired_above_the_screen_next_check():
 def test_the_release_runs_every_frame_not_only_on_a_hook():
     assert 'SafeCall("eventSync:pollSaveSync", pollSaveSync)' in EVENT_SYNC
     assert "module.releaseSaveSync()" in _block()
+
+
+def test_the_hosts_values_are_forgotten_when_the_run_ends():
+    """Releasing gives this player their own values back. It does NOT answer the
+    other question -- whose values were being held -- and leaving that standing
+    meant the FIRST load of the next run, in a different room, held the player to
+    the progression of somebody they are no longer playing with."""
+    rt = peer_holding(rt=runtime(), mine_shortcuts=1, host_shortcuts=7)
+    rt.execute("module.releaseSaveSync()")
+    rt.execute("module.forgetSaveSync()")
+    # a fresh load, with no host having broadcast anything yet
+    rt.execute("loadingValue = 2")
+    rt.execute("hold()")
+    assert rt.globals().savegame.shortcuts == 1
+
+
+def test_forgetting_without_releasing_still_gives_the_value_back():
+    """The two are called together and in that order, but a teardown path that
+    only forgot would strand the override with nothing left to restore it from."""
+    rt = peer_holding(rt=runtime(), mine_shortcuts=3, host_shortcuts=9)
+    assert rt.globals().savegame.shortcuts == 9
+    rt.execute("module.forgetSaveSync()")
+    rt.execute("module.releaseSaveSync()")
+    assert rt.globals().savegame.shortcuts == 3
+
+
+def test_clear_run_state_both_releases_and_forgets():
+    """Wired in eventSync itself, where the test harness cannot reach: both calls
+    have to be on the teardown path or neither mechanism above matters."""
+    teardown = EVENT_SYNC[EVENT_SYNC.index("local function clearRunState"):]
+    teardown = teardown[:teardown.index(NL + "end" + NL)]
+    assert "releaseSaveSync()" in teardown
+    assert "forgetSaveSync()" in teardown

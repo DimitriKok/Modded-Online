@@ -57,6 +57,26 @@
 
 local module = {}
 
+--- Every line this module raises, routed so it can actually be read.
+---
+--- The whole save-share exchange happens in the LOBBY -- publish, adopt, and the
+--- restore a peer does on backing out -- and `DesyncLog.line` drops everything until
+--- a RUN opens the log file. So none of it has ever reached disk: two captures from
+--- a failing session contain the string "save share" zero times, on both machines.
+--- `earlyEvent` holds lobby lines and flushes them under the next run's header.
+---
+--- Falls back to `event` so a build (or a test stub) without earlyEvent still logs.
+--- @param fmt string
+local function logEvent(fmt, ...)
+    if DesyncLog == nil then
+        return
+    end
+    local sink = DesyncLog.earlyEvent or DesyncLog.event
+    if sink ~= nil then
+        sink(fmt, ...)
+    end
+end
+
 --- The two files, in our own pack.
 local FILES = { "save.dat", "savegame.sav" }
 
@@ -102,6 +122,11 @@ local outbox = {}          -- chunks still to send (host)
 local generation = 0       -- bumped per publish, so a stale chunk cannot be mixed in
 local incoming = nil       -- { g, count, parts = { name -> { n, got, [i] = text } } }
 local borrowed = false     -- are the host's files currently in place of ours?
+--- A restore that could not write a file back. The parked copies are kept and the
+--- next launch tries again -- but `poll()` runs every GUI frame, so without this it
+--- would re-attempt (and re-fail) the same locked file forever, several times a
+--- second, for as long as the player sat on the main menu.
+local stalled = false
 local asked = false        -- have we asked this room for its save yet?
 local lastResult = nil     -- what the SYNC SAVE DATA button did last
 
@@ -308,10 +333,8 @@ function module.publish()
     -- The live half, and small enough to go in one event: the same values the
     -- files carry, but where a mod reads them THIS session.
     Network.sendEvent("savefields", readFields())
-    if DesyncLog ~= nil then
-        DesyncLog.event("save share: publishing %d file(s) as %d chunk(s), generation %d",
-            count, #outbox, generation)
-    end
+    logEvent("save share: publishing %d file(s) as %d chunk(s), generation %d",
+        count, #outbox, generation)
 end
 
 --- A peer that has just arrived asks for the room's save.
@@ -337,10 +360,8 @@ local function adopt(files)
             if not fileExists(kept) then
                 local data = readBinary(mine)
                 if data == nil or not writeBinary(kept, data) then
-                    if DesyncLog ~= nil then
-                        DesyncLog.event("save share: REFUSED -- could not set %s"
-                            .. " aside, so it was left alone", name)
-                    end
+                    logEvent("save share: REFUSED -- could not set %s"
+                        .. " aside, so it was left alone", name)
                     return false
                 end
             end
@@ -356,6 +377,7 @@ local function adopt(files)
         end
     end
     borrowed = true
+    stalled = false -- a fresh borrow: whatever could not be written last time, retry
     -- ...and hand the mod its new save data WITHOUT a restart. Playlunky reads
     -- save.dat once at script load; because the mod runs in our state, its ON.LOAD
     -- handler is a function we can simply call again. See ModHost.reloadSaveData.
@@ -363,11 +385,9 @@ local function adopt(files)
     if ModHost ~= nil and ModHost.reloadSaveData ~= nil then
         ran = ModHost.reloadSaveData(files["save.dat"] or "")
     end
-    if DesyncLog ~= nil then
-        DesyncLog.event("save share: now on the room host's save (%d file(s) adopted,"
-            .. " %d mod loader(s) re-run; yours comes back when you leave)",
-            written, ran)
-    end
+    logEvent("save share: now on the room host's save (%d file(s) adopted,"
+        .. " %d mod loader(s) re-run; yours comes back when you leave)",
+        written, ran)
     return true
 end
 
@@ -391,6 +411,28 @@ function module.onSaveFields(payload, originSlot)
     end
     -- ONCE, and before the first override: after it, "ours" would be the host's
     if ownFields == nil then
+        -- ...and eventSync's override counts as "after it".
+        --
+        -- eventSync runs a SECOND mechanism over two of these same fields
+        -- (SAVE_SYNC_FIELDS = shortcuts, characters). It holds the host's values
+        -- across a load and puts the player's own back when the screen settles.
+        -- `holdSaveSync` already stands down while we are borrowing -- but only in
+        -- that direction. Nothing stopped US capturing while ITS override was up,
+        -- and then `readFields()` reads the HOST's values and records them as this
+        -- player's own, on disk, in mo_own_fields.txt.
+        --
+        -- After that the borrow is not a borrow. Leaving "restores" the host's
+        -- unlocks, the parked file says the same thing, and a relaunch restores them
+        -- again -- the peer keeps somebody else's progression permanently, which is
+        -- the exact failure this module exists to prevent.
+        --
+        -- The window is real whenever `savefields` lands after the run has started:
+        -- a mid-run join (which has no lobby phase at all), or a reliable event that
+        -- simply arrived late. Releasing first is cheap, idempotent, and a no-op in
+        -- the ordinary lobby case where nothing is held.
+        if EventSync ~= nil and EventSync.releaseSaveSync ~= nil then
+            pcall(EventSync.releaseSaveSync)
+        end
         ownFields = readFields()
         local lines = {}
         for name, v in pairs(ownFields) do
@@ -403,10 +445,8 @@ function module.onSaveFields(payload, originSlot)
     end
     local written = writeFields(values)
     borrowed = true
-    if DesyncLog ~= nil then
-        DesyncLog.event("save share: adopted %d of the host's savegame field(s) live",
-            written)
-    end
+    logEvent("save share: adopted %d of the host's savegame field(s) live",
+        written)
 end
 
 --- @param payload table
@@ -514,10 +554,8 @@ function module.finishStartupRestore()
         ran = ModHost.reloadSaveData(readBinary(PackPath("save.dat")) or "")
     end
     clearParked()
-    if DesyncLog ~= nil then
-        DesyncLog.event("save share: finished restoring your own save from the last"
-            .. " session (%d mod loader(s) re-run)", ran)
-    end
+    logEvent("save share: finished restoring your own save from the last"
+        .. " session (%d mod loader(s) re-run)", ran)
     return true
 end
 
@@ -546,10 +584,18 @@ function module.restoreOwn()
     asked = false
     outbox = {}
 
+    -- The MEMORY half is attempted whatever happens to the files. It cannot fail
+    -- destructively (it only writes engine memory we already read out of), and it
+    -- is the half the player actually SEES this session -- the files do not take
+    -- effect until the next launch. A file that could not be written must not also
+    -- cost them their live unlocks.
+    --
+    -- `ownFields` is NOT given up here. It is the only in-memory record of what
+    -- this player's values were, and a restore that did not complete is going to
+    -- be retried; retiring it on the way past left the retry with nothing.
     local fieldsBack = 0
     if ownFields ~= nil then
         fieldsBack = writeFields(ownFields)
-        ownFields = nil
     end
 
     -- Is the mod hosted yet? At LOAD it is not -- saveShare is required before
@@ -562,10 +608,14 @@ function module.restoreOwn()
     local ran = 0
     if failed > 0 then
         pendingReload = restored > 0
-        if DesyncLog ~= nil then
-            DesyncLog.event("save share: %d file(s) could NOT be put back and are still"
-                .. " parked -- they will be restored on the next launch", failed)
-        end
+        -- A restore that did not finish is NOT a restore. Leaving `borrowed` set
+        -- keeps three things honest: the `saveshare=` log header still says whose
+        -- save this is, SYNC SAVE DATA still refuses to write the host's
+        -- progression into the mod's own folder, and poll() does not treat the
+        -- loan as closed.
+        stalled = true
+        logEvent("save share: %d file(s) could NOT be put back and are still"
+            .. " parked -- they will be restored on the next launch", failed)
     elseif hosted then
         -- A file we just DELETED (it did not exist before the borrow) leaves the
         -- pack without something the mod needs. Put the mod's own copy back
@@ -574,20 +624,33 @@ function module.restoreOwn()
         if borrowed or restored > 0 then
             ran = ModHost.reloadSaveData(readBinary(PackPath("save.dat")) or "")
         end
+        ownFields = nil
         clearParked()
     elseif restored > 0 then
         pendingReload = true -- finishStartupRestore picks this up after hosting
     else
+        ownFields = nil
         clearParked()
     end
 
-    if borrowed or restored > 0 then
+    if failed == 0 then
         borrowed = false
-        if DesyncLog ~= nil then
-            DesyncLog.event("save share: your own save is back (%d file(s), %d field(s),"
-                .. " %d mod loader(s) re-run)", restored, fieldsBack, ran)
-        end
+        stalled = false
     end
+
+    -- Said EVERY time, not only when there was something to put back.
+    --
+    -- The restore path used to log nothing at all when nothing was parked, and
+    -- dev53's own post-mortem is that two rounds of fixes were spent on the wrong
+    -- mechanisms because of it. `saveshare=` in the header says what the pack holds
+    -- at run start; this says what LEAVING actually did, which is the moment that
+    -- is being reported as broken. A zero here is the diagnosis: 0 files back means
+    -- nothing was ever parked, 0 fields means the host's `savefields` never landed,
+    -- 0 loaders re-run means the mod's ON.LOAD was never captured.
+    logEvent("save share: restore -> %s | %d file(s) back, %d failed,"
+        .. " %d field(s), %d mod loader(s) re-run, hosted=%s",
+        failed == 0 and "your own save is back" or "INCOMPLETE, still borrowing",
+        restored, failed, fieldsBack, ran, tostring(hosted))
 end
 
 -- ---------------------------------------------------------------- per frame
@@ -597,7 +660,7 @@ end
 --- told about, and asking twice is harmless while never asking is not.
 function module.poll()
     if not Network.isActive() then
-        if borrowed or asked then
+        if (borrowed or asked) and not stalled then
             module.restoreOwn()
         end
         return
@@ -659,9 +722,7 @@ function module.syncToMod()
         end
     end
     lastResult = copied > 0 and (copied .. " file(s) synced") or "nothing to sync"
-    if DesyncLog ~= nil then
-        DesyncLog.event("save share: SYNC SAVE DATA -> %s", lastResult)
-    end
+    logEvent("save share: SYNC SAVE DATA -> %s", lastResult)
     return lastResult
 end
 
@@ -728,7 +789,7 @@ function module.seedHosted()
         seeded = seeded + module.seedFrom(packName)
     end
     if seeded > 0 and DesyncLog ~= nil then
-        DesyncLog.event("save share: seeded %d save file(s) the pack was missing", seeded)
+        logEvent("save share: seeded %d save file(s) the pack was missing", seeded)
     end
     return seeded
 end

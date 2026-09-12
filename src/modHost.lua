@@ -274,6 +274,30 @@ function module.newSandbox(report, opts)
 
     env._G = env -- a mod that reaches for _G should get its own, not ours
 
+    -- `meta` has to be the mod's OWN table, and this is the one global where the
+    -- sandbox's read-through leaks.
+    --
+    -- Both Playlunky idioms look the same from here and are not. `meta = { ... }`
+    -- is a write, so it lands in the sandbox and never reaches us. `meta.name =
+    -- "HDMod"` is a READ of `meta` -- which __index answers with the real _G.meta
+    -- -- followed by a field write on that table, which mutates OURS in place.
+    -- hdmod (main.lua:67-70) and crossoverlunky (main.lua:1-4) both use the second
+    -- form, and the proof is in the log header: a session hosting crossoverlunky
+    -- opens `=== Modded Online 1.0 ===`, which is crossoverlunky's version written
+    -- over ours.
+    --
+    -- It is not cosmetic. netCore builds the lobby compatibility handshake out of
+    -- these two fields (`helloMsg.mod = meta.name`, `helloMsg.modv = meta.version
+    -- .. " + " .. loadOrderSignature()`), so a hosted mod rewriting them disables
+    -- the check that stops two DIFFERENT Modded Online builds sharing a room --
+    -- every build reports the hosted mod's version instead of its own. And the
+    -- desync-log header, which is how every save and desync fix in this build has
+    -- been verified, then names the wrong version.
+    --
+    -- Seeded with the pack name so a mod that reads `meta.name` before setting it
+    -- gets something true rather than "Modded Online (loader build)".
+    env.meta = { name = tostring(opts.packDir or "hosted mod") }
+
     -- Which callback ids this mod registered. Under Playlunky a script can only
     -- ever clear its own callbacks, because a script IS the unit of ownership.
     -- Hosting breaks that: the mod's callbacks and ours now live in one script, and
