@@ -789,3 +789,63 @@ def test_a_skipped_texture_is_not_reported_as_missing(fake_pack):
                        rt.eval("ModHost.summarize")(report).values())
     assert "NOT FOUND" not in summary, summary
     assert "skipped on purpose" in summary, summary
+
+
+# ------------------------------------------------------------------- meta
+
+
+def test_a_hosted_mods_meta_writes_do_not_reach_ours(fake_pack):
+    """`meta` is the one global where the sandbox's read-through leaked.
+
+    Both Playlunky idioms look identical and are not. `meta = { ... }` is a write and
+    lands in the sandbox. `meta.name = "HDMod"` is a READ -- answered with the real
+    _G.meta -- followed by a field write on that table, which mutates OURS. hdmod
+    (main.lua:67-70) and crossoverlunky (main.lua:1-4) both use the second form, and a
+    session hosting crossoverlunky opened its desync log `=== Modded Online 1.0 ===`.
+
+    netCore builds the lobby compatibility handshake from these two fields, so a mod
+    rewriting them turns off the check that stops two different Modded Online builds
+    sharing a room.
+    """
+    fake_pack("main.lua", """
+        meta.name = "HDMod"
+        meta.version = "2.0.0"
+    """)
+    rt = runtime()
+    rt.execute('meta = { name = "Modded Online (loader build)", version = "2.0.0-dev54" }')
+    report = rt.eval("ModHost.host")("fake.mod", rt.table_from({"inert": False}))
+    assert report["ok"] is True, report["err"]
+    assert str(rt.eval("meta.version")) == "2.0.0-dev54", (
+        "a hosted mod rewrote Modded Online's own version -- the lobby version gate "
+        "compares this, and the desync log header names it")
+    assert str(rt.eval("meta.name")) == "Modded Online (loader build)"
+
+
+def test_a_hosted_mod_reads_back_the_meta_it_wrote(fake_pack):
+    """Giving it a private table is only correct if the mod still sees its own
+    values: hdmod stamps `mod_version = meta.version` into its save data, and 2.5
+    reads meta.name for its crash diagnostics."""
+    fake_pack("main.lua", """
+        meta.version = "2.0.0"
+        probe.seen = meta.version
+    """)
+    rt = runtime()
+    rt.execute('meta = { name = "Modded Online (loader build)", version = "2.0.0-dev54" }')
+    rt.execute("probe = {}")
+    report = rt.eval("ModHost.host")("fake.mod", rt.table_from({"inert": False}))
+    assert report["ok"] is True, report["err"]
+    assert str(rt.eval("probe.seen")) == "2.0.0", (
+        "the mod could not read back its own meta")
+
+
+def test_the_wholesale_meta_idiom_still_works(fake_pack):
+    """2.5 writes `meta = { ... }`. That always landed in the sandbox; it must keep
+    landing there now that a table is waiting for it."""
+    fake_pack("main.lua", """
+        meta = { name = "Spelunky 2.5", version = "9.9" }
+    """)
+    rt = runtime()
+    rt.execute('meta = { name = "Modded Online (loader build)", version = "2.0.0-dev54" }')
+    report = rt.eval("ModHost.host")("fake.mod", rt.table_from({"inert": False}))
+    assert report["ok"] is True, report["err"]
+    assert str(rt.eval("meta.version")) == "2.0.0-dev54"

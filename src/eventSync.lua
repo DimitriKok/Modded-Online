@@ -251,6 +251,15 @@ local function clearRunState(reason)
     if module.releaseSaveSync ~= nil then
         module.releaseSaveSync()
     end
+    -- Forget whose values those WERE, as well as putting ours back. Releasing
+    -- without clearing left the previous host's `shortcuts`/`characters` sitting in
+    -- `saveSyncHost` for the rest of the session, so the first load of the NEXT run
+    -- -- in a different room, before that host's first broadcast arrives -- held a
+    -- player who has left to the progression of a player they are no longer playing
+    -- with. There is no version of that which is correct.
+    if module.forgetSaveSync ~= nil then
+        module.forgetSaveSync()
+    end
     pendingRunSeed = nil
     rosterChars = nil
     hostSeeds = {}
@@ -735,6 +744,15 @@ function module.releaseSaveSync()
         writeSaveField(name, mine)
     end
     saveSyncOwn = nil
+end
+
+--- Drop the host's values entirely. Separate from releaseSaveSync because the two
+--- answer different questions: release is "give this player their own values back
+--- NOW", forget is "there is no host any more, so there is nothing to hold". A run
+--- ending is both. Declared on the module for the same reason releaseSaveSync is --
+--- clearRunState is defined above it.
+function module.forgetSaveSync()
+    saveSyncHost = nil
 end
 
 --- Keep `player_inventory[].time_of_death` consistent with `.health`.

@@ -20,6 +20,10 @@ local PRIMARY_PATH = PackPath("desync_log.txt")
 local FALLBACK_PATH = "modded_online_desync_log.txt"
 
 local logPath = nil     -- the path we actually opened (nil = logging off/failed)
+--- Lines raised before any run session opened the file, held until one does.
+--- See module.earlyEvent for why this has to exist.
+local early = {}
+local EARLY_MAX = 60    -- a player who never starts a run must not accumulate forever
 local everInit = false  -- first run of a game launch truncates; later runs append
 local entNameById = nil -- lazy reverse map of ENT_TYPE: id -> "NAME"
 
@@ -434,6 +438,38 @@ function module.event(fmt, ...)
     module.line(fmt, ...)
 end
 
+--- An event that happens BEFORE a run session exists.
+---
+--- `line` drops everything while `logPath` is nil, and for the hot per-frame paths
+--- that is right — on the menu there is nothing there worth a `string.format`. But
+--- the save-share exchange runs ENTIRELY IN THE LOBBY: the host publishes, every
+--- peer adopts, and a peer that backs out restores, all before any run has opened
+--- the file. Every one of those lines has always gone in the bin.
+---
+--- That is why four rounds of fixes for one bug could each be, in the dev53
+--- post-mortem's own words, "correct and invisible". The `saveshare=` header line
+--- added to answer it is a snapshot taken at run start — it says what the pack holds
+--- once a run begins, never what leaving the lobby actually did. Two captures from a
+--- failing session contain the string "save share" exactly zero times, on both
+--- machines, for this reason and not because nothing ran.
+---
+--- So: write it now if the file is open, and otherwise hold it until one opens.
+--- Bounded, and stamped `lobby` because the seq:offset columns mean nothing there.
+function module.earlyEvent(fmt, ...)
+    if not MO_LOG then
+        return
+    end
+    if logPath ~= nil then
+        module.line(fmt, ...)
+        return
+    end
+    local ok, s = pcall(string.format, fmt, ...)
+    if #early >= EARLY_MAX then
+        table.remove(early, 1)
+    end
+    early[#early + 1] = "[" .. nowStamp() .. " lobby] " .. (ok and s or tostring(fmt))
+end
+
 --- Open the log for a new run. Truncates on the first run of a game launch,
 --- appends (with a banner) on later runs, so all runs of one launch are kept
 --- but the file never grows across launches. Called from beginSession.
@@ -651,6 +687,14 @@ function module.init()
                     f:write("*** PREVIOUS SESSION's last per-frame callback: "
                         .. frameMark .. "\n")
                 end
+                -- Everything that happened in the LOBBY, where there was no file to
+                -- put it in: the save-share exchange in full. Directly under the
+                -- header, because that is where `saveshare=` is and the two are read
+                -- together. See module.earlyEvent.
+                for i = 1, #early do
+                    f:write(early[i] .. "\n")
+                end
+                early = {}
             end)
             f:close()
             break

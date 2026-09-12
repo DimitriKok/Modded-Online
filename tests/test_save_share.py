@@ -788,3 +788,162 @@ def test_boot_seeds_after_hosting():
     assert "SaveShare.seedHosted" in main
     assert main.index("ModHost.hostOne") < main.index("SaveShare.seedHosted"), (
         "seeding runs before the packs are known")
+
+
+# ------------------------------------------- a restore that did not actually happen
+
+
+def test_a_blocked_file_leaves_the_peer_still_borrowing():
+    """The module used to clear `borrowed` whether or not the restore worked, so a
+    peer holding the host's files reported "on your own save". Three things go wrong
+    behind that one lie: the `saveshare=` log header -- the only instrument for this
+    bug -- says the wrong thing, SYNC SAVE DATA becomes willing to write the host's
+    progression into the mod's own folder, and poll() treats the loan as closed."""
+    rt = runtime()
+    peer_with_own_save(rt)
+    deliver(rt)
+    rt.globals()["BLOCKED"]["PACK/save.dat"] = True
+    rt.eval("SaveShare.restoreOwn")()
+    assert rt.eval("SaveShare.borrowing()") is True, (
+        "an incomplete restore reported success")
+    assert fs_get(rt, "PACK/save.dat.mo_mine") == "MINE-dat", "the parked copy was lost"
+    assert "not while borrowing" in rt.eval("SaveShare.syncToMod")()
+
+
+def test_a_blocked_file_does_not_cost_the_live_fields_too():
+    """The files land at the next launch; the `savegame` fields are what the player
+    SEES this session. A file that could not be written must not also leave the
+    host's unlocks live in engine memory."""
+    rt = runtime()
+    peer_with_own_save(rt)
+    send_fields(rt)
+    assert int(field(rt, "shortcuts")) == 7
+    deliver(rt)
+    rt.globals()["BLOCKED"]["PACK/save.dat"] = True
+    rt.eval("SaveShare.restoreOwn")()
+    assert int(field(rt, "shortcuts")) == 1, (
+        "the host's unlocks were left live because a FILE could not be written")
+
+
+def test_an_incomplete_restore_keeps_what_it_needs_to_try_again():
+    """`ownFields` was retired on the way past, so the retry -- the whole point of
+    keeping the parked copies -- had nothing left to put back."""
+    rt = runtime()
+    peer_with_own_save(rt)
+    send_fields(rt)
+    deliver(rt)
+    rt.globals()["BLOCKED"]["PACK/save.dat"] = True
+    rt.eval("SaveShare.restoreOwn")()
+    assert fs_get(rt, "PACK/mo_own_fields.txt") is not None, (
+        "the on-disk record of this player's own values was retired by a restore "
+        "that did not complete")
+    rt.globals()["BLOCKED"]["PACK/save.dat"] = None
+    rt.execute("savegame.shortcuts = 99")   # as if the host's value were live again
+    rt.eval("SaveShare.restoreOwn")()
+    assert fs_get(rt, "PACK/save.dat") == "MINE-dat"
+    assert int(field(rt, "shortcuts")) == 1
+    assert rt.eval("SaveShare.borrowing()") is False
+
+
+def test_poll_does_not_retry_a_blocked_restore_every_frame():
+    """poll() runs on ON.GUIFRAME. Retrying a locked file several times a second for
+    as long as the player sits on the main menu is not a retry strategy."""
+    rt = runtime()
+    peer_with_own_save(rt)
+    deliver(rt)
+    rt.globals()["BLOCKED"]["PACK/save.dat"] = True
+    rt.eval("SaveShare.restoreOwn")()
+    rt.execute("""
+writeAttempts = 0
+local realOpen = io.open
+io.open = function(path, mode)
+    if mode == "wb" then writeAttempts = writeAttempts + 1 end
+    return realOpen(path, mode)
+end
+""")
+    rt.globals()["activeValue"] = False
+    drain(rt, frames=20)
+    assert int(rt.eval("writeAttempts")) == 0, (
+        "poll() kept re-attempting a restore it already knows fails")
+
+
+def test_a_fresh_borrow_re_arms_a_stalled_restore():
+    """The stall is "this file would not open a moment ago", not a permanent verdict.
+    Borrowing again has to clear it or the NEXT leave is skipped as well."""
+    rt = runtime()
+    peer_with_own_save(rt)
+    deliver(rt)
+    rt.globals()["BLOCKED"]["PACK/save.dat"] = True
+    rt.eval("SaveShare.restoreOwn")()
+    rt.globals()["BLOCKED"]["PACK/save.dat"] = None
+    deliver(rt)                    # the room re-publishes; we adopt again
+    rt.globals()["activeValue"] = False
+    drain(rt, frames=5)
+    assert fs_get(rt, "PACK/save.dat") == "MINE-dat"
+    assert rt.eval("SaveShare.borrowing()") is False
+
+
+def test_the_restore_says_what_it_did_every_time():
+    """It used to log only when there was something to put back, so a peer that left
+    holding somebody else's save left no trace of why -- which dev53's own post-mortem
+    names as the reason two rounds of fixes went to the wrong mechanisms."""
+    rt = runtime()
+    logged = []
+    rt.globals()["DesyncLog"] = rt.table_from({
+        "event": lambda fmt, *a: logged.append(str(fmt)),
+    })
+    rt.eval("SaveShare.restoreOwn")()
+    assert any("restore ->" in line for line in logged), (
+        "a restore with nothing to do said nothing at all")
+
+
+# ---------------------------------------- the two mechanisms over the same fields
+
+
+def test_the_capture_is_not_poisoned_by_event_syncs_override():
+    """eventSync runs a second mechanism over `shortcuts` and `characters`: it holds
+    the host's values across a load and gives the player's own back when the screen
+    settles. Its `holdSaveSync` stands down while we are borrowing -- but only in
+    that direction. Nothing stopped US capturing while ITS override was up, and
+    `readFields()` then records the HOST's values as this player's own, on disk.
+
+    After that the borrow is permanent: leaving "restores" the host's unlocks, the
+    parked field file says the same, and a relaunch restores them again. It needs
+    only for `savefields` to land after the run started -- a mid-run join has no
+    lobby phase at all, and a reliable event can simply arrive late.
+    """
+    rt = runtime()
+    rt.execute("savegame.shortcuts = 1; savegame.characters = 2")
+    # eventSync got there first and is holding the host's values
+    rt.execute("""
+heldOwn = {shortcuts = 1, characters = 2}
+savegame.shortcuts = 7
+savegame.characters = 99
+EventSync = { releaseSaveSync = function()
+    savegame.shortcuts = heldOwn.shortcuts
+    savegame.characters = heldOwn.characters
+end }
+""")
+    send_fields(rt)
+    # the on-disk record is written at capture time, and is what a RELAUNCH restores
+    # from -- so a poisoned capture outlives the session that made it
+    parked = fs_get(rt, "PACK/mo_own_fields.txt")
+    assert "shortcuts=1" in parked and "characters=2" in parked, (
+        "the host's values were written to disk as this player's own, so even a "
+        "relaunch hands them back: parked=%r" % parked)
+    rt.eval("SaveShare.restoreOwn")()
+    assert int(field(rt, "shortcuts")) == 1, (
+        "the host's shortcut progress was recorded as this player's own and handed "
+        "back to them as theirs")
+    assert int(field(rt, "characters")) == 2, (
+        "the host's unlocked characters became the peer's, permanently -- "
+        "savegame.characters is where hdmod keeps unlocks, not save.dat")
+
+
+def test_a_build_without_event_sync_still_captures():
+    """The release is a courtesy to a module that may not be loaded."""
+    rt = runtime()
+    rt.execute("EventSync = nil")
+    send_fields(rt)
+    rt.eval("SaveShare.restoreOwn")()
+    assert int(field(rt, "shortcuts")) == 1
