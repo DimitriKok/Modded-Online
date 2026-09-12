@@ -1,11 +1,12 @@
 
-=== Modded Online 2.0.0-dev48 — run start 23:32:21 ===
-slot=2  worldHost=false  room=WKWA  seed=84D4289F-8074D1CC
-shims=fyi.hdmod=hosted
-mods=fyi.hdmod:199:25059218:hosted
-packopts=fyi.modded-online-loader=45 opts/af7524bd
-inputdelay=4 frames
-packsave=fyi.modded-online-loader=e81f718b
+=== Modded Online 1.0 — run start 14:41:41 ===
+slot=1  worldHost=true  room=ELBO  seed=19594459-744117F9
+shims=fyi.crossoverlunky=hosted
+mods=fyi.crossoverlunky:1:3b5b38ba:hosted
+packopts=none
+inputdelay=6 frames
+packsave=none
+saveshare=on your own save | 0/2 file(s) present, 0 parked, 0 marked absent
 lines are [wallclock seq:offset]; align two machines' logs on seq:offset
 >> name / << name bracket Modded Online's risky operations; '.. alive' means loaded and idle (see crash breadcrumbs)
 floordump=off (create mo_dump.on for the full entity list)
@@ -13,249 +14,177 @@ profile=ON (default; reports every 10s -- mo_profile.off disables)
 frametrace=off
 layerdoors=on
 leaksweep=on
-server=26.57.194.40:26000 (v1.0.10)
-*** PREVIOUS SESSION ENDED WITHOUT A CLEAN RUN END while Modded Online was IDLE -- a crash here is NOT ours (another mod or the engine). Last line: [14:39:19 19:5766] << preLoadScreen
-[23:32:21 0:0] applyFreshRunReset count=2 inv_hp_before=4/4/4/4
-[23:32:21 0:0] .. alive
-[23:32:21 0:0] restart flag SEEN on 1-1: IGNORED: inside our own warp window (2999 ms left) | screen=11 screen_next=12 loading=1 voted=false votes=0/2
-[23:32:21 0:0] restart probe: phase=ingame inRun=true reset=true screen=11 screen_next=12 theme_next=1 loading=2 host=false
-[23:32:21 0:0] >> preLoadScreen
-[23:32:21 0:0] applyFreshRunReset count=2 inv_hp_before=4/4/4/4
-[23:32:21 0:0] << preLoadScreen
-[23:32:21 0:0] >> preLevelGeneration
-[23:32:21 0:0] applyFreshRunReset count=2 inv_hp_before=4/4/4/4
-[23:32:21 0:0] gen[pre] w1-1 th1 lc=0 pet=2 seeded=0 adv=84D4289F-8074D1CC prng c0=21FBCF15:EE7DE506 c1=10EF119A:D910170C c2=CA34C3B6:BFCC8E6D c3=30B44A0D:C39C4D80 c4=004FE5E2:BB6176F4 c5=9535D210:3B8C5E2D c6=47ECF1DE:AECC3858 c7=A706205E:88D0E529 c8=49008E34:75FBDA57 c9=BA45F1C2:BFAC317A
-[23:32:21 0:0] << preLevelGeneration
-[23:32:21 0:0] >> postLevelGeneration
-[23:32:21 0:0] gen[post] w1-1 th1 lc=0 pet=2 seeded=0 adv=84D4289F-8074D1CC prng c0=6752E92F:7669237A c1=10EF119A:D910170C c2=69C89E98:301B5F26 c3=19FB021F:3140EAB0 c4=004FE5E2:BB6176F4 c5=6E8E47E3:1E1F0787 c6=A71652E5:38870BD6 c7=AAA7AFCA:D4E37BD9 c8=70F757A7:A13BF353 c9=BA45F1C2:BFAC317A
-[23:32:21 0:0] << postLevelGeneration
-[23:32:22 1:0] >> floorDigest+dump
-[23:32:22 1:0] ---- FLOOR seq=1  world=1 level=1 theme=1  digest seed=371571982 ent=1073513119
-  state: level_count=0 time_total=2 time_level=2 adv_seed=84D4289F-8074D1CC
-  gate: shoppie=0 shoppie_next=0 merchant=0 | kali favor=0 status=0 altars=0 | quest_flags=0x3040200 presence_flags=0x0
-  player 1: hp=4 money=0 bombs=2 ropes=2 mount=0 ovl=none tod=0 pos=8.00,121.05
-  player 2: hp=4 money=0 bombs=2 ropes=2 mount=0 ovl=none tod=0 pos=8.00,121.05
-  player 3: hp=4 money=0 bombs=4 ropes=4 mount=0 ovl=none tod=0 pos=(no entity)
-  player 4: hp=4 money=0 bombs=4 ropes=4 mount=0 ovl=none tod=0 pos=(no entity)
-  entities: 1620 total | FLOOR_BORDERTILE=936 FLOOR_GENERIC=530 FLOOR_LADDER=16 FLOOR_LADDER_PLATFORM=5 FLOOR_DOOR_EXIT=1 FLOOR_SPIKES=3 FLOOR_ARROW_TRAP=4 FLOORSTYLED_MINEWOOD=51 CHAR_GUY_SPELUNKY=2 MONS_SPIDER=3 MONS_PET_HAMSTER=1 ITEM_ROCK=3 ITEM_WEB=4 ITEM_POT=1 ITEM_CURSEDPOT=1 ITEM_SKULL=6 ITEM_BONES=6 ITEM_GOLDBAR=12 ITEM_GOLDBARS=3 ITEM_EMERALD=9 ITEM_SAPPHIRE=3 ITEM_RUBY=7 ACTIVEFLOOR_PUSHBLOCK=13
-[23:32:22 1:0] << floorDigest+dump
-[23:32:27 1:332] PROFILE frames=514 in 10.0s  worst=158ms  over-20ms=59  over-33ms=5
-[23:32:27 1:332] PROFILE  76.7% of window,    4972 calls, worst 7222ms, spikes   5  ours menuUI.lua:701
-[23:32:27 1:332] PROFILE   2.8% of window,    1841 calls, worst   52ms, spikes   1  ours inputSync.lua:2002
-[23:32:27 1:332] PROFILE   2.1% of window,    4972 calls, worst   63ms, spikes   2  ours netCore.lua:1853
-[23:32:27 1:332] PROFILE   1.7% of window,    4972 calls, worst   32ms, spikes   1  ours eventSync.lua:4199
-[23:32:27 1:332] PROFILE   1.0% of window,    4972 calls, worst    1ms, spikes   0  ours inputSync.lua:2050
-[23:32:27 1:332] PROFILE   0.8% of window,    4972 calls, worst    5ms, spikes   0  ours inputSync.lua:2063
-[23:32:27 1:332] PROFILE SPIKE worst   46ms,   1 over 8ms,       1 calls  mod  save.lua:45
-[23:32:27 1:332] PROFILE SPIKE worst   45ms,   1 over 8ms,     227 calls  mod  camp.lua:339
-[23:32:27 1:332] PROFILE SPIKE worst   24ms,   1 over 8ms,    1841 calls  ours eventSync.lua:4261
-[23:32:31 1:559] .. alive
-[23:32:36 1:806] restart probe: phase=ingame inRun=true reset=false screen=12 screen_next=13 theme_next=1 loading=2 host=false
-[23:32:36 1:806] >> preLoadScreen
-[23:32:36 1:806] << preLoadScreen
-[23:32:36 1:806] >> preLevelGeneration
-[23:32:36 1:806] << preLevelGeneration
-[23:32:36 1:806] >> postLevelGeneration
-[23:32:36 1:806] << postLevelGeneration
-[23:32:37 2:79] transition hold: finished transition 1, waiting for the other players before leaving
-[23:32:37 2:83] STALL: waiting on slot 1 for seq 2 offset 83 (0 ms; mine recorded to 87) | theirs for this seq: 24 frames, offsets 59..82 | rx event=243 event_ack=2 joined=1 lobby=2 pong=47 state=1252 world=59
-[23:32:37 2:83] SEND while stalled: seq 2 offsets 76..87 (12 frames)
-[23:32:37 2:83] PROFILE frames=562 in 10.0s  worst=25ms  over-20ms=57  over-33ms=0
-[23:32:37 2:83] PROFILE   3.0% of window,     601 calls, worst    5ms, spikes   0  ours inputSync.lua:2002
-[23:32:37 2:83] PROFILE   0.9% of window,    1645 calls, worst    4ms, spikes   0  ours inputSync.lua:2050
-[23:32:37 2:83] PROFILE   0.8% of window,    1645 calls, worst    4ms, spikes   0  ours netCore.lua:1853
-[23:32:37 2:83] PROFILE   0.3% of window,    1645 calls, worst   11ms, spikes   1  ours chat.lua:376
-[23:32:37 2:83] PROFILE   0.3% of window,     563 calls, worst    4ms, spikes   0  mod  custom_entities.lua:575
-[23:32:37 2:83] PROFILE   0.2% of window,    1645 calls, worst    1ms, spikes   0  mod  custom_music_engine.lua:65
-[23:32:40 2:83] STALL: waiting on slot 1 for seq 2 offset 83 (3000 ms; mine recorded to 87) | theirs for this seq: 24 frames, offsets 59..82 | rx event=250 event_ack=2 joined=1 lobby=2 pong=53 state=1327 world=69
-[23:32:40 2:83] SEND while stalled: seq 2 offsets 76..87 (12 frames)
-[23:32:41 2:83] .. alive
-[23:32:42 11:0] RESYNC WARP -> 1-2 (theme 1) on host seed, rebase seq=11 ord=1
-[23:32:42 11:0] transition hold: released after 5138 ms -- everyone is done with transition 1
-[23:32:43 11:0] restart probe: phase=ingame inRun=true reset=false screen=13 screen_next=12 theme_next=1 loading=2 host=false
-[23:32:43 11:0] >> preLoadScreen
-[23:32:43 11:0] << preLoadScreen
-[23:32:43 11:0] >> preLevelGeneration
-[23:32:43 11:0] gen[pre] w1-2 th1 lc=1 pet=2 seeded=0 adv=84D4289F-0548FA6B prng c0=83586CBD:41EBEADE c1=BD1021C3:FD05CA4A c2=EB5AEAE9:6B50D13C c3=7AD1E3CA:371FF2AD c4=DDFB8F04:266AB4B7 c5=7EDE6478:74E199CF c6=43C1F380:549F2947 c7=6A81548F:5371921A c8=BDEA08CC:F586B68A c9=EE72AEB2:FEB6A343
-[23:32:43 11:0] << preLevelGeneration
-[23:32:43 11:0] >> postLevelGeneration
-[23:32:43 11:0] gen[post] w1-2 th1 lc=1 pet=2 seeded=0 adv=84D4289F-0548FA6B prng c0=6BE13E37:4EAC1CDD c1=BD1021C3:FD05CA4A c2=5DBE0B95:3D2F5C3E c3=6E028874:EDF206A9 c4=DDFB8F04:266AB4B7 c5=92FE112B:97F9E489 c6=C7E820A2:CE470A09 c7=1A0062CF:8F691A88 c8=EE32D87D:6320A7FA c9=EE72AEB2:FEB6A343
-[23:32:43 11:0] << postLevelGeneration
-[23:32:43 12:0] >> floorDigest+dump
-[23:32:43 12:0] ---- FLOOR seq=12  world=1 level=2 theme=1  digest seed=452584877 ent=162831528
-  state: level_count=1 time_total=816 time_level=2 adv_seed=84D4289F-0548FA6B
-  gate: shoppie=0 shoppie_next=0 merchant=0 | kali favor=0 status=0 altars=0 | quest_flags=0x3040210 presence_flags=0x0
-  player 1: hp=4 money=0 bombs=2 ropes=2 mount=0 ovl=none tod=0 pos=17.00,121.05
-  player 2: hp=4 money=0 bombs=2 ropes=2 mount=0 ovl=none tod=0 pos=17.00,121.05
-  player 3: hp=4 money=0 bombs=4 ropes=4 mount=0 ovl=none tod=0 pos=(no entity)
-  player 4: hp=4 money=0 bombs=4 ropes=4 mount=0 ovl=none tod=0 pos=(no entity)
-  entities: 1587 total | FLOOR_BORDERTILE=936 FLOOR_GENERIC=459 FLOOR_LADDER=22 FLOOR_LADDER_PLATFORM=6 FLOOR_DOOR_EXIT=1 FLOOR_ARROW_TRAP=2 FLOOR_IDOL_BLOCK=2 FLOORSTYLED_MINEWOOD=65 FLOORSTYLED_STONE=12 CHAR_GUY_SPELUNKY=2 MONS_SNAKE=2 MONS_SPIDER=1 MONS_HANGSPIDER=1 MONS_BAT=1 MONS_SHOPKEEPER=2 MONS_PET_HAMSTER=1 MONS_CRITTERCRAB=2 ITEM_IDOL=1 ITEM_ROCK=1 ITEM_WEB=9 ITEM_HANGSTRAND=1 ITEM_HANGANCHOR=1 ITEM_VAULTCHEST=2 ITEM_LAMP=1 ITEM_LAMPFLAME=1 ITEM_POT=6 ITEM_CURSEDPOT=1 ITEM_SKULL=3 ITEM_BONES=3 ITEM_GOLDBAR=4 ITEM_GOLDBARS=2 ITEM_EMERALD=3 ITEM_SAPPHIRE=6 ITEM_RUBY=6 ITEM_PICKUP_BOMBBAG=3 ITEM_PICKUP_PASTE=1 ITEM_SHOTGUN=1 ACTIVEFLOOR_PUSHBLOCK=11 ACTIVEFLOOR_POWDERKEG=1 MOUNT_TURKEY=2
-[23:32:43 12:0] << floorDigest+dump
-[23:32:43 12:0] *** FLOOR DESYNC seq=12  seed ok (mine=452584877 host=452584877)  entities DIFFER (mine=162831528 host=128858091)  -> diff this floor's entity dump between the two logs
-[23:32:47 12:241] PROFILE frames=536 in 10.0s  worst=65ms  over-20ms=76  over-33ms=2
-[23:32:47 12:241] PROFILE   2.1% of window,     597 calls, worst   36ms, spikes   1  ours inputSync.lua:2002
-[23:32:47 12:241] PROFILE   1.0% of window,    1600 calls, worst    2ms, spikes   0  ours inputSync.lua:2050
-[23:32:47 12:241] PROFILE   0.9% of window,    1600 calls, worst    4ms, spikes   0  ours netCore.lua:1853
-[23:32:47 12:241] PROFILE   0.5% of window,     300 calls, worst   47ms, spikes   1  ours eventSync.lua:4261
-[23:32:47 12:241] PROFILE   0.4% of window,    1600 calls, worst    1ms, spikes   0  ours eventSync.lua:4199
-[23:32:47 12:241] PROFILE   0.3% of window,     537 calls, worst    5ms, spikes   0  mod  custom_entities.lua:575
-[23:32:47 12:241] PROFILE SPIKE worst   21ms,   1 over 8ms,     537 calls  mod  idol.lua:218
-[23:32:47 12:241] PROFILE SPIKE worst    9ms,   1 over 8ms,       1 calls  mod  main.lua:154
-[23:32:49 12:361] *** POSITION DESYNC at 12:360: local hash 1133175221 vs remote 7101555 (streak 3) — a mod moved a player non-deterministically
-[23:32:49 12:361]     player 1 live pos=13.61,119.05 hp=4 layer=0
-[23:32:49 12:361]     player 2 live pos=17.00,121.05 hp=4 layer=0
-[23:32:51 12:467] .. alive
-[23:32:54 12:645] STALL: waiting on slot 1 for seq 12 offset 645 (0 ms; mine recorded to 649) | theirs for this seq: 24 frames, offsets 621..644 | rx event=271 event_ack=5 joined=1 lobby=2 pong=81 state=2280 world=120
-[23:32:54 12:645] SEND while stalled: seq 12 offsets 638..649 (12 frames)
-[23:32:57 12:645] STALL: waiting on slot 1 for seq 12 offset 645 (3005 ms; mine recorded to 649) | theirs for this seq: 24 frames, offsets 621..644 | rx event=273 event_ack=5 joined=1 lobby=2 pong=87 state=2356 world=130
-[23:32:57 12:645] SEND while stalled: seq 12 offsets 638..649 (12 frames)
-[23:32:57 12:645] PROFILE frames=600 in 10.0s  worst=24ms  over-20ms=72  over-33ms=0
-[23:32:57 12:645] PROFILE   2.4% of window,     600 calls, worst    3ms, spikes   0  ours inputSync.lua:2002
-[23:32:57 12:645] PROFILE   1.2% of window,    1636 calls, worst    2ms, spikes   0  ours inputSync.lua:2050
-[23:32:57 12:645] PROFILE   0.8% of window,    1636 calls, worst    1ms, spikes   0  ours netCore.lua:1853
-[23:32:57 12:645] PROFILE   0.3% of window,    1636 calls, worst    7ms, spikes   0  ours chat.lua:376
-[23:32:57 12:645] PROFILE   0.3% of window,    1636 calls, worst    1ms, spikes   0  ours eventSync.lua:4199
-[23:32:57 12:645] PROFILE   0.2% of window,    1636 calls, worst    1ms, spikes   0  ours menuUI.lua:701
-[23:32:59 21:0] RESYNC WARP -> 1-3 (theme 1) on host seed, rebase seq=21 ord=2
-[23:32:59 21:0] restart probe: phase=ingame inRun=true reset=false screen=12 screen_next=12 theme_next=1 loading=2 host=false
-[23:32:59 21:0] >> preLoadScreen
-[23:32:59 21:0] << preLoadScreen
-[23:32:59 21:0] >> preLevelGeneration
-[23:32:59 21:0] gen[pre] w1-3 th1 lc=2 pet=2 seeded=0 adv=84D4289F-0548FA6B prng c0=83586CBD:41EBEADE c1=BD1021C3:FD05CA4A c2=EB5AEAE9:6B50D13C c3=7AD1E3CA:371FF2AD c4=DDFB8F04:266AB4B7 c5=7EDE6478:74E199CF c6=43C1F380:549F2947 c7=6A81548F:5371921A c8=BDEA08CC:F586B68A c9=EE72AEB2:FEB6A343
-[23:32:59 21:0] << preLevelGeneration
-[23:32:59 21:0] >> postLevelGeneration
-[23:32:59 21:0] gen[post] w1-3 th1 lc=2 pet=2 seeded=0 adv=84D4289F-0548FA6B prng c0=83B2CD45:C299858B c1=BD1021C3:FD05CA4A c2=0F03C60E:9FF3B3DB c3=608A5C5A:424F6DC7 c4=DDFB8F04:266AB4B7 c5=208267FA:01666E4D c6=C7E820A2:CE470A09 c7=0EBF83FF:DB493FD9 c8=9FA50EB2:A41B3812 c9=EE72AEB2:FEB6A343
-[23:32:59 21:0] << postLevelGeneration
-[23:33:00 22:0] >> floorDigest+dump
-[23:33:00 22:0] ---- FLOOR seq=22  world=1 level=3 theme=1  digest seed=452584877 ent=875598710
-  state: level_count=2 time_total=1459 time_level=2 adv_seed=84D4289F-0548FA6B
-  gate: shoppie=0 shoppie_next=0 merchant=0 | kali favor=0 status=0 altars=0 | quest_flags=0x3050214 presence_flags=0x1
-  player 1: hp=4 money=0 bombs=2 ropes=2 mount=0 ovl=none tod=0 pos=18.00,118.05
-  player 2: hp=4 money=0 bombs=2 ropes=2 mount=0 ovl=none tod=0 pos=18.00,118.05
-  player 3: hp=4 money=0 bombs=4 ropes=4 mount=0 ovl=none tod=0 pos=(no entity)
-  player 4: hp=4 money=0 bombs=4 ropes=4 mount=0 ovl=none tod=0 pos=(no entity)
-  entities: 2350 total | FLOOR_BORDERTILE=1656 FLOOR_GENERIC=513 FLOOR_LADDER=16 FLOOR_LADDER_PLATFORM=4 FLOOR_DOOR_EXIT=1 FLOOR_SPIKES=2 FLOOR_ARROW_TRAP=3 FLOOR_DICE_FORCEFIELD=1 FLOOR_FORCEFIELD_TOP=1 FLOORSTYLED_MINEWOOD=52 CHAR_GUY_SPELUNKY=2 MONS_SNAKE=3 MONS_SPIDER=2 MONS_HANGSPIDER=2 MONS_BAT=2 MONS_SCORPION=1 MONS_SHOPKEEPER=1 MONS_PET_HAMSTER=1 MONS_CRITTERCRAB=1 ITEM_ROCK=1 ITEM_WEB=8 ITEM_HANGSTRAND=2 ITEM_HANGANCHOR=2 ITEM_LOCKEDCHEST=1 ITEM_LOCKEDCHEST_KEY=2 ITEM_CRATE=1 ITEM_LAMP=2 ITEM_LAMPFLAME=2 ITEM_DIE=2 ITEM_DICE_BET=1 ITEM_DICE_PRIZE_DISPENSER=1 ITEM_LASERBEAM=2 ITEM_POT=5 ITEM_CURSEDPOT=1 ITEM_SKULL=3 ITEM_BONES=3 ITEM_GOLDBAR=8 ITEM_GOLDBARS=4 ITEM_EMERALD=4 ITEM_SAPPHIRE=7 ITEM_RUBY=7 ITEM_WEBGUN=1 ACTIVEFLOOR_PUSHBLOCK=11 ACTIVEFLOOR_POWDERKEG=5
-[23:33:00 22:0] << floorDigest+dump
-[23:33:00 22:4] STALL: waiting on slot 1 for seq 22 offset 4 (0 ms; mine recorded to 8) | theirs for this seq: 4 frames, offsets 0..3 | rx event=281 event_ack=7 joined=1 lobby=2 pong=92 state=2395 world=135
-[23:33:00 22:4] SEND while stalled: seq 22 offsets 0..8 (9 frames)
-[23:33:01 22:4] .. alive
-[23:33:03 22:4] STALL: waiting on slot 1 for seq 22 offset 4 (3015 ms; mine recorded to 8) | theirs for this seq: 4 frames, offsets 0..3 | rx event=283 event_ack=7 joined=1 lobby=2 pong=98 state=2395 world=135
-[23:33:03 22:4] SEND while stalled: seq 22 offsets 0..8 (9 frames)
-[23:33:06 22:4] STALL: waiting on slot 1 for seq 22 offset 4 (6016 ms; mine recorded to 8) | theirs for this seq: 4 frames, offsets 0..3 | rx event=287 event_ack=7 joined=1 lobby=2 pong=104 state=2395 world=135
-[23:33:06 22:4] SEND while stalled: seq 22 offsets 0..8 (9 frames)
-[23:33:07 22:4] PROFILE frames=554 in 10.0s  worst=119ms  over-20ms=43  over-33ms=1
-[23:33:07 22:4] PROFILE   1.4% of window,    1622 calls, worst    4ms, spikes   0  ours inputSync.lua:2050
-[23:33:07 22:4] PROFILE   0.9% of window,     597 calls, worst    6ms, spikes   0  ours inputSync.lua:2002
-[23:33:07 22:4] PROFILE   0.4% of window,    1622 calls, worst    1ms, spikes   0  ours netCore.lua:1853
-[23:33:07 22:4] PROFILE   0.3% of window,    1622 calls, worst    4ms, spikes   0  ours menuUI.lua:701
-[23:33:07 22:4] PROFILE   0.3% of window,     555 calls, worst    9ms, spikes   1  mod  custom_entities.lua:575
-[23:33:07 22:4] PROFILE   0.3% of window,    1622 calls, worst    1ms, spikes   0  ours eventSync.lua:4199
-[23:33:09 22:4] STALL: waiting on slot 1 for seq 22 offset 4 (9016 ms; mine recorded to 8) | theirs for this seq: 4 frames, offsets 0..3 | rx event=289 event_ack=7 joined=1 lobby=2 pong=110 state=2395 world=135
-[23:33:09 22:4] SEND while stalled: seq 22 offsets 0..8 (9 frames)
-[23:33:11 22:4] .. alive
-[23:33:12 22:4] STALL: waiting on slot 1 for seq 22 offset 4 (12031 ms; mine recorded to 8) | theirs for this seq: 4 frames, offsets 0..3 | rx event=293 event_ack=7 joined=1 lobby=2 pong=116 state=2395 world=135
-[23:33:12 22:4] SEND while stalled: seq 22 offsets 0..8 (9 frames)
-[23:33:15 22:4] STALL: waiting on slot 1 for seq 22 offset 4 (15032 ms; mine recorded to 8) | theirs for this seq: 4 frames, offsets 0..3 | rx event=295 event_ack=7 joined=1 lobby=2 pong=122 state=2395 world=135
-[23:33:15 22:4] SEND while stalled: seq 22 offsets 0..8 (9 frames)
-[23:33:17 22:4] PROFILE frames=601 in 10.0s  worst=23ms  over-20ms=77  over-33ms=0
-[23:33:17 22:4] PROFILE   1.9% of window,    1642 calls, worst    3ms, spikes   0  ours inputSync.lua:2050
-[23:33:17 22:4] PROFILE   0.9% of window,     601 calls, worst    1ms, spikes   0  ours inputSync.lua:2002
-[23:33:17 22:4] PROFILE   0.5% of window,    1642 calls, worst    7ms, spikes   0  ours netCore.lua:1853
-[23:33:17 22:4] PROFILE   0.3% of window,     601 calls, worst    5ms, spikes   0  mod  custom_entities.lua:575
-[23:33:17 22:4] PROFILE   0.3% of window,    1642 calls, worst    1ms, spikes   0  ours eventSync.lua:4199
-[23:33:17 22:4] PROFILE   0.3% of window,    1642 calls, worst    1ms, spikes   0  mod  custom_music_engine.lua:65
-[23:33:18 22:4] STALL: waiting on slot 1 for seq 22 offset 4 (18049 ms; mine recorded to 8) | theirs for this seq: 4 frames, offsets 0..3 | rx event=299 event_ack=7 joined=1 lobby=2 pong=128 state=2395 world=135
-[23:33:18 22:4] SEND while stalled: seq 22 offsets 0..8 (9 frames)
-[23:33:21 22:4] STALL: waiting on slot 1 for seq 22 offset 4 (21049 ms; mine recorded to 8) | theirs for this seq: 4 frames, offsets 0..3 | rx event=301 event_ack=7 joined=1 lobby=2 pong=134 state=2395 world=135
-[23:33:21 22:4] .. alive
-[23:33:21 22:4] SEND while stalled: seq 22 offsets 0..8 (9 frames)
-[23:33:24 22:4] STALL: waiting on slot 1 for seq 22 offset 4 (24049 ms; mine recorded to 8) | theirs for this seq: 4 frames, offsets 0..3 | rx event=305 event_ack=7 joined=1 lobby=2 pong=140 state=2395 world=135
-[23:33:24 22:4] SEND while stalled: seq 22 offsets 0..8 (9 frames)
-[23:33:27 22:4] STALL: waiting on slot 1 for seq 22 offset 4 (27049 ms; mine recorded to 8) | theirs for this seq: 4 frames, offsets 0..3 | rx event=307 event_ack=7 joined=1 lobby=2 pong=146 state=2395 world=135
-[23:33:27 22:4] SEND while stalled: seq 22 offsets 0..8 (9 frames)
-[23:33:27 22:4] PROFILE frames=601 in 10.0s  worst=25ms  over-20ms=96  over-33ms=0
-[23:33:27 22:4] PROFILE   1.9% of window,    1645 calls, worst   17ms, spikes   1  ours inputSync.lua:2050
-[23:33:27 22:4] PROFILE   0.7% of window,     601 calls, worst    2ms, spikes   0  ours inputSync.lua:2002
-[23:33:27 22:4] PROFILE   0.3% of window,    1645 calls, worst    1ms, spikes   0  ours netCore.lua:1853
-[23:33:27 22:4] PROFILE   0.3% of window,    1645 calls, worst    1ms, spikes   0  ours eventSync.lua:4199
-[23:33:27 22:4] PROFILE   0.2% of window,    1645 calls, worst    1ms, spikes   0  ours inputSync.lua:2063
-[23:33:27 22:4] PROFILE   0.2% of window,    1645 calls, worst    1ms, spikes   0  mod  custom_music_engine.lua:65
-[23:33:30 22:4] STALL: waiting on slot 1 for seq 22 offset 4 (30050 ms; mine recorded to 8) | theirs for this seq: 4 frames, offsets 0..3 | rx event=311 event_ack=7 joined=1 lobby=2 pong=151 state=2395 world=135
-[23:33:30 22:4] SEND while stalled: seq 22 offsets 0..8 (9 frames)
-[23:33:31 22:4] .. alive
-[23:33:33 22:4] STALL: waiting on slot 1 for seq 22 offset 4 (33061 ms; mine recorded to 8) | theirs for this seq: 4 frames, offsets 0..3 | rx event=313 event_ack=7 joined=1 lobby=2 pong=157 state=2395 world=135
-[23:33:33 22:4] SEND while stalled: seq 22 offsets 0..8 (9 frames)
-[23:33:36 22:4] STALL: waiting on slot 1 for seq 22 offset 4 (36061 ms; mine recorded to 8) | theirs for this seq: 4 frames, offsets 0..3 | rx event=317 event_ack=7 joined=1 lobby=2 pong=163 state=2395 world=135
-[23:33:36 22:4] SEND while stalled: seq 22 offsets 0..8 (9 frames)
-[23:33:37 22:4] PROFILE frames=601 in 10.0s  worst=24ms  over-20ms=96  over-33ms=0
-[23:33:37 22:4] PROFILE   1.6% of window,    1645 calls, worst    2ms, spikes   0  ours inputSync.lua:2050
-[23:33:37 22:4] PROFILE   0.8% of window,     601 calls, worst    2ms, spikes   0  ours inputSync.lua:2002
-[23:33:37 22:4] PROFILE   0.5% of window,    1645 calls, worst    4ms, spikes   0  ours netCore.lua:1853
-[23:33:37 22:4] PROFILE   0.3% of window,     601 calls, worst    1ms, spikes   0  mod  custom_entities.lua:575
-[23:33:37 22:4] PROFILE   0.3% of window,    1645 calls, worst    5ms, spikes   0  ours menuUI.lua:701
-[23:33:37 22:4] PROFILE   0.3% of window,    1645 calls, worst    1ms, spikes   0  ours eventSync.lua:4199
-[23:33:37 22:4] PROFILE SPIKE worst    9ms,   1 over 8ms,    1645 calls  mod  valid.lua:39
-[23:33:39 22:4] STALL: waiting on slot 1 for seq 22 offset 4 (39061 ms; mine recorded to 8) | theirs for this seq: 4 frames, offsets 0..3 | rx event=319 event_ack=7 joined=1 lobby=2 pong=169 state=2395 world=135
-[23:33:39 22:4] SEND while stalled: seq 22 offsets 0..8 (9 frames)
-[23:33:41 22:4] .. alive
-[23:33:42 22:4] STALL: waiting on slot 1 for seq 22 offset 4 (42062 ms; mine recorded to 8) | theirs for this seq: 4 frames, offsets 0..3 | rx event=323 event_ack=7 joined=1 lobby=2 pong=175 state=2395 world=135
-[23:33:42 22:4] SEND while stalled: seq 22 offsets 0..8 (9 frames)
-[23:33:45 22:4] STALL: waiting on slot 1 for seq 22 offset 4 (45062 ms; mine recorded to 8) | theirs for this seq: 4 frames, offsets 0..3 | rx event=325 event_ack=7 joined=1 lobby=2 pong=181 state=2395 world=135
-[23:33:45 22:4] SEND while stalled: seq 22 offsets 0..8 (9 frames)
-[23:33:47 22:4] PROFILE frames=600 in 10.0s  worst=23ms  over-20ms=72  over-33ms=0
-[23:33:47 22:4] PROFILE   1.4% of window,    1644 calls, worst    1ms, spikes   0  ours inputSync.lua:2050
-[23:33:47 22:4] PROFILE   0.9% of window,     600 calls, worst    5ms, spikes   0  ours inputSync.lua:2002
-[23:33:47 22:4] PROFILE   0.3% of window,     600 calls, worst    9ms, spikes   1  mod  custom_entities.lua:575
-[23:33:47 22:4] PROFILE   0.3% of window,    1644 calls, worst    4ms, spikes   0  ours chat.lua:376
-[23:33:47 22:4] PROFILE   0.3% of window,    1644 calls, worst    1ms, spikes   0  ours eventSync.lua:4199
-[23:33:47 22:4] PROFILE   0.3% of window,     600 calls, worst    1ms, spikes   0  ours inputSync.lua:2039
-[23:33:48 22:4] STALL: waiting on slot 1 for seq 22 offset 4 (48062 ms; mine recorded to 8) | theirs for this seq: 4 frames, offsets 0..3 | rx event=329 event_ack=7 joined=1 lobby=2 pong=187 state=2395 world=135
-[23:33:48 22:4] SEND while stalled: seq 22 offsets 0..8 (9 frames)
-[23:33:51 22:4] STALL: waiting on slot 1 for seq 22 offset 4 (51062 ms; mine recorded to 8) | theirs for this seq: 4 frames, offsets 0..3 | rx event=331 event_ack=7 joined=1 lobby=2 pong=193 state=2395 world=135
-[23:33:51 22:4] .. alive
-[23:33:51 22:4] SEND while stalled: seq 22 offsets 0..8 (9 frames)
-[23:33:54 22:4] STALL: waiting on slot 1 for seq 22 offset 4 (54062 ms; mine recorded to 8) | theirs for this seq: 4 frames, offsets 0..3 | rx event=333 event_ack=7 joined=1 lobby=2 pong=199 state=2395 world=135
-[23:33:54 22:4] SEND while stalled: seq 22 offsets 0..8 (9 frames)
-[23:33:57 22:4] STALL: waiting on slot 1 for seq 22 offset 4 (57063 ms; mine recorded to 8) | theirs for this seq: 4 frames, offsets 0..3 | rx event=337 event_ack=7 joined=1 lobby=2 pong=205 state=2395 world=135
-[23:33:57 22:4] PROFILE frames=600 in 10.0s  worst=24ms  over-20ms=84  over-33ms=0
-[23:33:57 22:4] PROFILE   1.5% of window,    1638 calls, worst    1ms, spikes   0  ours inputSync.lua:2050
-[23:33:57 22:4] PROFILE   0.7% of window,     600 calls, worst    2ms, spikes   0  ours inputSync.lua:2002
-[23:33:57 22:4] PROFILE   0.3% of window,    1638 calls, worst    1ms, spikes   0  ours menuUI.lua:701
-[23:33:57 22:4] PROFILE   0.3% of window,    1638 calls, worst    1ms, spikes   0  ours eventSync.lua:4199
-[23:33:57 22:4] PROFILE   0.3% of window,     600 calls, worst    1ms, spikes   0  ours inputSync.lua:2039
-[23:33:57 22:4] PROFILE   0.3% of window,    1638 calls, worst    1ms, spikes   0  mod  custom_music_engine.lua:65
-[23:33:58 22:4] SEND while stalled: seq 22 offsets 0..8 (9 frames)
-[23:34:00 22:4] STALL: waiting on slot 1 for seq 22 offset 4 (60079 ms; mine recorded to 8) | theirs for this seq: 4 frames, offsets 0..3 | rx event=339 event_ack=7 joined=1 lobby=2 pong=211 state=2395 world=135
-[23:34:01 22:4] SEND while stalled: seq 22 offsets 0..8 (9 frames)
-[23:34:01 22:4] .. alive
-[23:34:03 22:4] STALL: waiting on slot 1 for seq 22 offset 4 (63082 ms; mine recorded to 8) | theirs for this seq: 4 frames, offsets 0..3 | rx event=343 event_ack=7 joined=1 lobby=2 pong=217 state=2395 world=135
-[23:34:04 22:4] SEND while stalled: seq 22 offsets 0..8 (9 frames)
-[23:34:06 22:4] STALL: waiting on slot 1 for seq 22 offset 4 (66082 ms; mine recorded to 8) | theirs for this seq: 4 frames, offsets 0..3 | rx event=347 event_ack=7 joined=1 lobby=2 pong=223 state=2395 world=135
-[23:34:07 22:4] SEND while stalled: seq 22 offsets 0..8 (9 frames)
-[23:34:07 22:4] PROFILE frames=601 in 10.0s  worst=32ms  over-20ms=80  over-33ms=0
-[23:34:07 22:4] PROFILE   1.7% of window,    1639 calls, worst   22ms, spikes   1  ours inputSync.lua:2050
-[23:34:07 22:4] PROFILE   0.8% of window,     601 calls, worst    2ms, spikes   0  ours inputSync.lua:2002
-[23:34:07 22:4] PROFILE   0.4% of window,    1639 calls, worst    1ms, spikes   0  ours netCore.lua:1853
-[23:34:07 22:4] PROFILE   0.4% of window,    1639 calls, worst    1ms, spikes   0  ours eventSync.lua:4199
-[23:34:07 22:4] PROFILE   0.4% of window,    1639 calls, worst    1ms, spikes   0  ours inputSync.lua:2063
-[23:34:07 22:4] PROFILE   0.3% of window,    1639 calls, worst    4ms, spikes   0  ours chat.lua:376
-[23:34:09 22:4] STALL: waiting on slot 1 for seq 22 offset 4 (69099 ms; mine recorded to 8) | theirs for this seq: 4 frames, offsets 0..3 | rx event=349 event_ack=7 joined=1 lobby=2 pong=229 state=2395 world=135
-[23:34:10 22:4] SEND while stalled: seq 22 offsets 0..8 (9 frames)
-[23:34:11 22:4] .. alive
-[23:34:12 22:4] STALL: waiting on slot 1 for seq 22 offset 4 (72099 ms; mine recorded to 8) | theirs for this seq: 4 frames, offsets 0..3 | rx event=353 event_ack=7 joined=1 lobby=2 pong=235 state=2395 world=135
-[23:34:13 22:4] SEND while stalled: seq 22 offsets 0..8 (9 frames)
-[23:34:15 22:4] STALL: waiting on slot 1 for seq 22 offset 4 (75099 ms; mine recorded to 8) | theirs for this seq: 4 frames, offsets 0..3 | rx event=355 event_ack=7 joined=1 lobby=2 pong=241 state=2395 world=135
-[23:34:16 22:4] SEND while stalled: seq 22 offsets 0..8 (9 frames)
-[23:34:17 22:4] PROFILE frames=600 in 10.0s  worst=23ms  over-20ms=85  over-33ms=0
-[23:34:17 22:4] PROFILE   1.8% of window,    1645 calls, worst   10ms, spikes   1  ours inputSync.lua:2050
-[23:34:17 22:4] PROFILE   0.8% of window,     600 calls, worst    2ms, spikes   0  ours inputSync.lua:2002
-[23:34:17 22:4] PROFILE   0.4% of window,     600 calls, worst    5ms, spikes   0  mod  custom_entities.lua:575
-[23:34:17 22:4] PROFILE   0.3% of window,    1645 calls, worst    1ms, spikes   0  ours netCore.lua:1853
-[23:34:17 22:4] PROFILE   0.3% of window,    1645 calls, worst    5ms, spikes   0  ours chat.lua:376
-[23:34:17 22:4] PROFILE   0.3% of window,     600 calls, worst    1ms, spikes   0  mod  ghost.lua:48
-[23:34:18 22:4] STALL: waiting on slot 1 for seq 22 offset 4 (78099 ms; mine recorded to 8) | theirs for this seq: 4 frames, offsets 0..3 | rx event=357 event_ack=7 joined=1 lobby=2 pong=247 state=2395 world=135
-[23:34:19 22:4] SEND while stalled: seq 22 offsets 0..8 (9 frames)
-[23:34:21 22:4] STALL: waiting on slot 1 for seq 22 offset 4 (81099 ms; mine recorded to 8) | theirs for this seq: 4 frames, offsets 0..3 | rx event=359 event_ack=7 joined=1 lobby=2 pong=253 state=2395 world=135
-[23:34:21 22:4] .. alive
-[23:34:22 22:4] SEND while stalled: seq 22 offsets 0..8 (9 frames)
-[23:34:22 22:4] inbound events SILENT 4s: applied to 359, 0 buffered, next cseq out 8. Received: event=359 event_ack=7 joined=1 lobby=2 pong=255 state=2395 world=135
+server=127.0.0.1:26000 (v1.0.10)
+*** PREVIOUS SESSION ENDED WITHOUT A CLEAN RUN END while Modded Online was IDLE -- a crash here is NOT ours (another mod or the engine). Last line: [14:39:33 1:219] PROFILE   0.1% of window,    1900 calls, worst    1ms, spikes   0  ours netCore.lua:1859
+[14:41:41 0:0] applyFreshRunReset count=2 inv_hp_before=4/4/4/4
+[14:41:41 0:0] .. alive
+[14:41:41 0:0] restart flag SEEN on 1-1: IGNORED: inside our own warp window (2994 ms left) | screen=11 screen_next=12 loading=1 voted=false votes=0/2
+[14:41:41 0:0] restart probe: phase=ingame inRun=true reset=true screen=11 screen_next=12 theme_next=1 loading=2 host=true
+[14:41:41 0:0] >> preLoadScreen
+[14:41:41 0:0] applyFreshRunReset count=2 inv_hp_before=4/4/4/4
+[14:41:41 0:0] << preLoadScreen
+[14:41:41 0:0] >> preLevelGeneration
+[14:41:41 0:0] applyFreshRunReset count=2 inv_hp_before=4/4/4/4
+[14:41:41 0:0] gen[pre] w1-1 th1 lc=0 pet=0 seeded=0 adv=19594459-744117F9 prng c0=9D586145:0E98697E c1=F30943D1:C15A9848 c2=A2356AF1:B3A4B180 c3=D32D2384:682BED4E c4=66BE35CB:225E4D44 c5=B3D5DE69:EA50FF9C c6=8A72A682:E93A1276 c7=30EE4621:5DE8A94D c8=30E6E088:B4D9A126 c9=8A9A1CFE:4EA0DBCB
+[14:41:41 0:0] levelseed ord=0 SENT
+[14:41:41 0:0] << preLevelGeneration
+[14:41:41 0:0] >> postLevelGeneration
+[14:41:41 0:0] gen[post] w1-1 th1 lc=0 pet=0 seeded=0 adv=19594459-744117F9 prng c0=5264872C:C52EE4EB c1=F30943D1:C15A9848 c2=CF01D266:1D56CE4C c3=F754A9C4:459E6F49 c4=66BE35CB:225E4D44 c5=BCBCAAA5:5F4C14A2 c6=A6D820EE:C6EC5E7C c7=9544944D:0E7819BC c8=96E05B17:812EE0AE c9=8A9A1CFE:4EA0DBCB
+[14:41:41 0:0] << postLevelGeneration
+[14:41:42 1:0] >> floorDigest+dump
+[14:41:42 1:0] ---- FLOOR seq=1  world=1 level=1 theme=1  digest seed=101736135 ent=667332312
+  state: level_count=0 time_total=2 time_level=2 adv_seed=19594459-744117F9
+  gate: shoppie=0 shoppie_next=0 merchant=0 | kali favor=0 status=0 altars=0 | quest_flags=0x0 presence_flags=0x0
+  player 1: hp=4 money=0 bombs=2 ropes=2 mount=0 ovl=none tod=0 pos=18.00,120.05
+  player 2: hp=4 money=0 bombs=2 ropes=2 mount=0 ovl=none tod=0 pos=18.00,120.05
+  player 3: hp=4 money=0 bombs=0 ropes=0 mount=0 ovl=none tod=0 pos=(no entity)
+  player 4: hp=4 money=0 bombs=0 ropes=0 mount=0 ovl=none tod=0 pos=(no entity)
+  entities: 1637 total | FLOOR_BORDERTILE=936 FLOOR_GENERIC=446 FLOOR_PLATFORM=30 FLOOR_LADDER=8 FLOOR_LADDER_PLATFORM=2 FLOOR_DOOR_ENTRANCE=1 FLOOR_DOOR_EXIT=1 FLOOR_SPIKES=11 FLOOR_ARROW_TRAP=4 FLOOR_TOTEM_TRAP=8 FLOORSTYLED_MINEWOOD=112 CHAR_PILOT=1 CHAR_CLASSIC_GUY=1 MONS_SNAKE=1 MONS_SPIDER=1 MONS_BAT=2 MONS_CAVEMAN=3 MONS_SKELETON=2 MONS_PET_DOG=1 ITEM_ROCK=1 ITEM_WEB=3 ITEM_CHEST=1 ITEM_POT=7 ITEM_CURSEDPOT=1 ITEM_SKULL=2 ITEM_BONES=2 ITEM_GOLDBAR=8 ITEM_GOLDBARS=3 ITEM_EMERALD=7 ITEM_SAPPHIRE=2 ITEM_RUBY=7 ACTIVEFLOOR_PUSHBLOCK=16 ACTIVEFLOOR_BONEBLOCK=6
+[14:41:42 1:0] << floorDigest+dump
+[14:41:42 1:12] PROFILE frames=557 in 10.0s  worst=51ms  over-20ms=2  over-33ms=1
+[14:41:42 1:12] PROFILE   1.0% of window,    1650 calls, worst    3ms, spikes   0  ours eventSync.lua:4233
+[14:41:42 1:12] PROFILE   0.4% of window,    1650 calls, worst    1ms, spikes   0  ours menuUI.lua:724
+[14:41:42 1:12] PROFILE   0.4% of window,    1650 calls, worst    5ms, spikes   0  ours netCore.lua:1859
+[14:41:42 1:12] PROFILE   0.2% of window,    1650 calls, worst    4ms, spikes   0  ours chat.lua:376
+[14:41:42 1:12] PROFILE   0.2% of window,     600 calls, worst    2ms, spikes   0  mod  main.lua:337
+[14:41:42 1:12] PROFILE   0.2% of window,    1650 calls, worst    3ms, spikes   0  ours inputSync.lua:2063
+[14:41:42 1:12] PROFILE SPIKE worst   10ms,   1 over 8ms,     600 calls  ours inputSync.lua:2002
+[14:41:43 1:63] STALL: waiting on slot 2 for seq 1 offset 63 (0 ms; mine recorded to 69) | theirs for this seq: 32 frames, offsets 31..62 | rx event=32 event_ack=29 joined=1 lobby=4 pong=50 state=80
+[14:41:47 1:294] STALL: waiting on slot 2 for seq 1 offset 294 (0 ms; mine recorded to 300) | theirs for this seq: 32 frames, offsets 262..293 | rx event=36 event_ack=33 joined=1 lobby=4 pong=57 state=401 world=2
+[14:41:47 1:294] SEND while stalled: seq 1 offsets 285..300 (16 frames)
+[14:41:51 1:555] .. alive
+[14:41:51 1:564] STALL: waiting on slot 2 for seq 1 offset 564 (0 ms; mine recorded to 570) | theirs for this seq: 32 frames, offsets 532..563 | rx event=40 event_ack=37 joined=1 lobby=4 pong=66 state=777 world=4
+[14:41:51 1:564] SEND while stalled: seq 1 offsets 555..570 (16 frames)
+[14:41:52 1:572] PROFILE frames=600 in 10.0s  worst=22ms  over-20ms=3  over-33ms=0
+[14:41:52 1:572] PROFILE   2.9% of window,     600 calls, worst    4ms, spikes   0  ours inputSync.lua:2002
+[14:41:52 1:572] PROFILE   1.5% of window,    1650 calls, worst    1ms, spikes   0  ours inputSync.lua:2050
+[14:41:52 1:572] PROFILE   0.8% of window,    1650 calls, worst    1ms, spikes   0  ours netCore.lua:1859
+[14:41:52 1:572] PROFILE   0.6% of window,     600 calls, worst    3ms, spikes   0  mod  main.lua:337
+[14:41:52 1:572] PROFILE   0.5% of window,    1650 calls, worst    4ms, spikes   0  ours eventSync.lua:4233
+[14:41:52 1:572] PROFILE   0.3% of window,    1650 calls, worst    1ms, spikes   0  ours chat.lua:376
+[14:41:56 1:845] STALL: waiting on slot 2 for seq 1 offset 845 (0 ms; mine recorded to 851) | theirs for this seq: 32 frames, offsets 813..844 | rx event=46 event_ack=43 joined=1 lobby=4 pong=77 state=1168 world=6
+[14:42:01 1:1117] .. alive
+[14:42:02 1:1171] PROFILE frames=600 in 10.0s  worst=22ms  over-20ms=3  over-33ms=0
+[14:42:02 1:1171] PROFILE   3.1% of window,     600 calls, worst    4ms, spikes   0  ours inputSync.lua:2002
+[14:42:02 1:1171] PROFILE   1.1% of window,    1650 calls, worst    4ms, spikes   0  ours inputSync.lua:2050
+[14:42:02 1:1171] PROFILE   0.9% of window,    1650 calls, worst    4ms, spikes   0  ours netCore.lua:1859
+[14:42:02 1:1171] PROFILE   0.5% of window,    1650 calls, worst    1ms, spikes   0  ours eventSync.lua:4233
+[14:42:02 1:1171] PROFILE   0.3% of window,     600 calls, worst    1ms, spikes   0  mod  main.lua:337
+[14:42:02 1:1171] PROFILE   0.1% of window,     600 calls, worst    1ms, spikes   0  ours inputSync.lua:2039
+[14:42:07 1:1455] STALL: waiting on slot 2 for seq 1 offset 1455 (0 ms; mine recorded to 1461) | theirs for this seq: 32 frames, offsets 1423..1454 | rx event=56 event_ack=53 joined=1 lobby=4 pong=97 state=2018 world=12
+[14:42:07 1:1455] SEND while stalled: seq 1 offsets 1446..1461 (16 frames)
+[14:42:09 1:1622] STALL: waiting on slot 2 for seq 1 offset 1622 (0 ms; mine recorded to 1628) | theirs for this seq: 32 frames, offsets 1590..1621 | rx event=58 event_ack=55 joined=1 lobby=4 pong=103 state=2250 world=13
+[14:42:11 1:1708] .. alive
+[14:42:12 1:1762] PROFILE frames=600 in 10.0s  worst=20ms  over-20ms=4  over-33ms=0
+[14:42:12 1:1762] PROFILE   3.2% of window,     600 calls, worst    4ms, spikes   0  ours inputSync.lua:2002
+[14:42:12 1:1762] PROFILE   1.3% of window,    1650 calls, worst    4ms, spikes   0  ours inputSync.lua:2050
+[14:42:12 1:1762] PROFILE   0.8% of window,    1650 calls, worst    1ms, spikes   0  ours netCore.lua:1859
+[14:42:12 1:1762] PROFILE   0.4% of window,    1650 calls, worst    4ms, spikes   0  ours eventSync.lua:4233
+[14:42:12 1:1762] PROFILE   0.4% of window,     600 calls, worst    1ms, spikes   0  mod  main.lua:337
+[14:42:12 1:1762] PROFILE   0.3% of window,    1650 calls, worst    4ms, spikes   0  ours menuUI.lua:724
+[14:42:17 1:2056] STALL: waiting on slot 2 for seq 1 offset 2056 (0 ms; mine recorded to 2062) | theirs for this seq: 32 frames, offsets 2024..2055 | rx event=66 event_ack=63 joined=1 lobby=4 pong=117 state=2853 world=17
+[14:42:17 1:2056] SEND while stalled: seq 1 offsets 2047..2062 (16 frames)
+[14:42:17 1:2065] STALL: waiting on slot 2 for seq 1 offset 2065 (0 ms; mine recorded to 2071) | theirs for this seq: 32 frames, offsets 2033..2064 | rx event=66 event_ack=63 joined=1 lobby=4 pong=118 state=2867 world=17
+[14:42:17 1:2075] STALL: waiting on slot 2 for seq 1 offset 2075 (0 ms; mine recorded to 2081) | theirs for this seq: 32 frames, offsets 2043..2074 | rx event=66 event_ack=63 joined=1 lobby=4 pong=118 state=2883 world=17
+[14:42:18 1:2087] STALL: waiting on slot 2 for seq 1 offset 2087 (0 ms; mine recorded to 2093) | theirs for this seq: 32 frames, offsets 2055..2086 | rx event=66 event_ack=63 joined=1 lobby=4 pong=119 state=2902 world=17
+[14:42:19 1:2182] restart probe: phase=ingame inRun=true reset=false screen=12 screen_next=13 theme_next=1 loading=2 host=true
+[14:42:19 1:2182] >> preLoadScreen
+[14:42:19 1:2182] << preLoadScreen
+[14:42:19 1:2182] >> preLevelGeneration
+[14:42:19 1:2182] << preLevelGeneration
+[14:42:19 1:2182] >> postLevelGeneration
+[14:42:19 1:2182] << postLevelGeneration
+[14:42:20 2:6] STALL: waiting on slot 2 for seq 2 offset 6 (0 ms; mine recorded to 12) | theirs for this seq: 6 frames, offsets 0..5 | rx event=68 event_ack=65 joined=1 lobby=4 pong=123 state=3046 world=18
+[14:42:20 2:6] SEND while stalled: seq 2 offsets 0..12 (13 frames)
+[14:42:21 2:20] STALL: waiting on slot 2 for seq 2 offset 20 (0 ms; mine recorded to 26) | theirs for this seq: 20 frames, offsets 0..19 | rx event=70 event_ack=67 joined=1 lobby=4 pong=125 state=3076 world=18
+[14:42:21 2:47] .. alive
+[14:42:22 2:75] STALL: waiting on slot 2 for seq 2 offset 75 (0 ms; mine recorded to 81) | theirs for this seq: 32 frames, offsets 43..74 | rx event=70 event_ack=67 joined=1 lobby=4 pong=127 state=3153 world=18
+[14:42:22 2:80] transition hold: finished transition 1, waiting for the other players before leaving
+[14:42:22 2:84] transition hold: released after 68 ms -- everyone is done with transition 1
+[14:42:22 2:84] restart probe: phase=ingame inRun=true reset=false screen=13 screen_next=12 theme_next=1 loading=2 host=true
+[14:42:22 2:84] >> preLoadScreen
+[14:42:22 2:84] << preLoadScreen
+[14:42:22 2:84] >> preLevelGeneration
+[14:42:22 2:84] gen[pre] w1-2 th1 lc=1 pet=0 seeded=0 adv=19594459-8D9A5C52 prng c0=9D586145:0E98697E c1=F30943D1:C15A9848 c2=A2356AF1:B3A4B180 c3=D32D2384:682BED4E c4=66BE35CB:225E4D44 c5=B3D5DE69:EA50FF9C c6=8A72A682:E93A1276 c7=30EE4621:5DE8A94D c8=30E6E088:B4D9A126 c9=8A9A1CFE:4EA0DBCB
+[14:42:22 2:84] levelseed ord=1 SENT
+[14:42:22 2:84] << preLevelGeneration
+[14:42:22 2:84] >> postLevelGeneration
+[14:42:22 2:84] gen[post] w1-2 th1 lc=1 pet=0 seeded=0 adv=19594459-8D9A5C52 prng c0=A89CDACB:2DBEAC79 c1=F30943D1:C15A9848 c2=FA3ECD83:841D487F c3=AD632A9B:63B75F91 c4=66BE35CB:225E4D44 c5=27C6766A:DCD0F2F8 c6=F5518292:A00B280A c7=A08D011A:7A1DE221 c8=C2D5E97F:79244AC6 c9=8A9A1CFE:4EA0DBCB
+[14:42:22 2:84] << postLevelGeneration
+[14:42:23 3:0] >> floorDigest+dump
+[14:42:23 3:0] ---- FLOOR seq=3  world=1 level=2 theme=1  digest seed=527016735 ent=359169343
+  state: level_count=1 time_total=2186 time_level=2 adv_seed=19594459-8D9A5C52
+  gate: shoppie=0 shoppie_next=0 merchant=0 | kali favor=0 status=0 altars=0 | quest_flags=0x10010 presence_flags=0x1
+  player 1: hp=4 money=0 bombs=4 ropes=4 mount=0 ovl=none tod=0 pos=38.00,120.05
+  player 2: hp=0 money=0 bombs=0 ropes=0 mount=0 ovl=none tod=325 pos=(no entity)
+  player 3: hp=4 money=0 bombs=0 ropes=0 mount=0 ovl=none tod=0 pos=(no entity)
+  player 4: hp=4 money=0 bombs=0 ropes=0 mount=0 ovl=none tod=0 pos=(no entity)
+  entities: 2526 total | FLOOR_BORDERTILE=1609 FLOOR_GENERIC=523 FLOOR_PLATFORM=17 FLOOR_LADDER=56 FLOOR_LADDER_PLATFORM=13 FLOOR_DOOR_ENTRANCE=1 FLOOR_DOOR_EXIT=1 FLOOR_DOOR_LAYER=6 FLOOR_SPIKES=3 FLOOR_ARROW_TRAP=2 FLOOR_TOTEM_TRAP=4 FLOOR_IDOL_BLOCK=2 FLOORSTYLED_MINEWOOD=184 CHAR_PILOT=1 MONS_SNAKE=6 MONS_SPIDER=2 MONS_BAT=2 MONS_SKELETON=1 MONS_MOLE=1 MONS_SHOPKEEPER=1 MONS_PET_DOG=1 ITEM_ROCK=2 ITEM_WEB=3 ITEM_LOCKEDCHEST=1 ITEM_LOCKEDCHEST_KEY=1 ITEM_WALLTORCHFLAME=6 ITEM_LITWALLTORCH=6 ITEM_LAMP=1 ITEM_LAMPFLAME=1 ITEM_COFFIN=1 ITEM_PLAYERGHOST=1 ITEM_POT=10 ITEM_CURSEDPOT=1 ITEM_SKULL=2 ITEM_BONES=2 ITEM_COOKFIRE=1 ITEM_GOLDBAR=13 ITEM_GOLDBARS=5 ITEM_EMERALD=5 ITEM_SAPPHIRE=8 ITEM_RUBY=2 ITEM_PICKUP_ROPEPILE=1 ITEM_PICKUP_SPECTACLES=1 ITEM_PICKUP_PITCHERSMITT=1 ITEM_PICKUP_SPIKESHOES=1 ACTIVEFLOOR_PUSHBLOCK=14
+[14:42:23 3:0] << floorDigest+dump
+[14:42:23 3:2] PROFILE frames=545 in 10.8s  worst=19ms  over-20ms=0  over-33ms=0
+[14:42:23 3:2] PROFILE   2.9% of window,     645 calls, worst   32ms, spikes   1  ours inputSync.lua:2002
+[14:42:23 3:2] PROFILE   1.1% of window,    1772 calls, worst    1ms, spikes   0  ours inputSync.lua:2050
+[14:42:23 3:2] PROFILE   0.6% of window,    1772 calls, worst    1ms, spikes   0  ours netCore.lua:1859
+[14:42:23 3:2] PROFILE   0.6% of window,    1772 calls, worst    1ms, spikes   0  ours eventSync.lua:4233
+[14:42:23 3:2] PROFILE   0.4% of window,     645 calls, worst    1ms, spikes   0  mod  main.lua:337
+[14:42:23 3:2] PROFILE   0.3% of window,    1772 calls, worst    1ms, spikes   0  ours chat.lua:376
+[14:42:23 3:6] STALL: waiting on slot 2 for seq 3 offset 6 (0 ms; mine recorded to 12) | theirs for this seq: 6 frames, offsets 0..5 | rx event=77 event_ack=73 joined=1 lobby=4 pong=129 state=3178 world=18
+[14:42:23 3:6] SEND while stalled: seq 3 offsets 0..12 (13 frames)
+[14:42:24 3:14] STALL: waiting on slot 2 for seq 3 offset 14 (0 ms; mine recorded to 20) | theirs for this seq: 14 frames, offsets 0..13 | rx event=78 event_ack=73 joined=1 lobby=4 pong=131 state=3202 world=18
+[14:42:25 3:79] STALL: waiting on slot 2 for seq 3 offset 79 (0 ms; mine recorded to 85) | theirs for this seq: 32 frames, offsets 47..78 | rx event=80 event_ack=75 joined=1 lobby=4 pong=133 state=3293 world=18
+[14:42:25 3:85] STALL: waiting on slot 2 for seq 3 offset 85 (0 ms; mine recorded to 91) | theirs for this seq: 32 frames, offsets 53..84 | rx event=80 event_ack=75 joined=1 lobby=4 pong=134 state=3301 world=18
+[14:42:25 3:89] STALL: waiting on slot 2 for seq 3 offset 89 (0 ms; mine recorded to 95) | theirs for this seq: 32 frames, offsets 57..88 | rx event=80 event_ack=75 joined=1 lobby=4 pong=134 state=3307 world=18
+[14:42:26 3:99] STALL: waiting on slot 2 for seq 3 offset 99 (0 ms; mine recorded to 105) | theirs for this seq: 32 frames, offsets 67..98 | rx event=80 event_ack=75 joined=1 lobby=4 pong=135 state=3324 world=18
+[14:42:26 3:99] SEND while stalled: seq 3 offsets 90..105 (16 frames)
+[14:42:26 3:103] STALL: waiting on slot 2 for seq 3 offset 103 (0 ms; mine recorded to 109) | theirs for this seq: 32 frames, offsets 71..102 | rx event=82 event_ack=77 joined=1 lobby=4 pong=136 state=3334 world=18
+[14:42:26 3:114] STALL: waiting on slot 2 for seq 3 offset 114 (0 ms; mine recorded to 120) | theirs for this seq: 32 frames, offsets 82..113 | rx event=82 event_ack=77 joined=1 lobby=4 pong=137 state=3353 world=18
+[14:42:27 3:118] STALL: waiting on slot 2 for seq 3 offset 118 (0 ms; mine recorded to 124) | theirs for this seq: 32 frames, offsets 86..117 | rx event=82 event_ack=77 joined=1 lobby=4 pong=137 state=3364 world=18
+[14:42:27 3:129] STALL: waiting on slot 2 for seq 3 offset 129 (0 ms; mine recorded to 135) | theirs for this seq: 32 frames, offsets 97..128 | rx event=82 event_ack=77 joined=1 lobby=4 pong=138 state=3383 world=19
+[14:42:27 3:133] STALL: waiting on slot 2 for seq 3 offset 133 (0 ms; mine recorded to 139) | theirs for this seq: 32 frames, offsets 101..132 | rx event=82 event_ack=77 joined=1 lobby=4 pong=138 state=3393 world=19
+[14:42:29 3:212] STALL: waiting on slot 2 for seq 3 offset 212 (0 ms; mine recorded to 218) | theirs for this seq: 32 frames, offsets 180..211 | rx event=84 event_ack=79 joined=1 lobby=4 pong=141 state=3506 world=19
+[14:42:29 3:212] SEND while stalled: seq 3 offsets 203..218 (16 frames)
+[14:42:29 3:215] STALL: waiting on slot 2 for seq 3 offset 215 (0 ms; mine recorded to 221) | theirs for this seq: 32 frames, offsets 183..214 | rx event=84 event_ack=79 joined=1 lobby=4 pong=142 state=3511 world=19
+[14:42:30 3:277] STALL: waiting on slot 2 for seq 3 offset 277 (0 ms; mine recorded to 283) | theirs for this seq: 32 frames, offsets 245..276 | rx event=86 event_ack=81 joined=1 lobby=4 pong=144 state=3598 world=20
+[14:42:31 3:305] .. alive
+[14:42:33 3:403] STALL: waiting on slot 2 for seq 3 offset 403 (0 ms; mine recorded to 409) | theirs for this seq: 32 frames, offsets 371..402 | rx event=88 event_ack=83 joined=1 lobby=4 pong=149 state=3774 world=21
+[14:42:33 3:405] PROFILE frames=602 in 10.0s  worst=20ms  over-20ms=2  over-33ms=0
+[14:42:33 3:405] PROFILE   2.4% of window,     602 calls, worst    1ms, spikes   0  ours inputSync.lua:2002
+[14:42:33 3:405] PROFILE   0.8% of window,    1655 calls, worst    1ms, spikes   0  ours inputSync.lua:2050
+[14:42:33 3:405] PROFILE   0.6% of window,    1655 calls, worst    1ms, spikes   0  ours netCore.lua:1859
+[14:42:33 3:405] PROFILE   0.4% of window,     602 calls, worst    1ms, spikes   0  mod  main.lua:337
+[14:42:33 3:405] PROFILE   0.4% of window,    1655 calls, worst    1ms, spikes   0  ours eventSync.lua:4233
+[14:42:33 3:405] PROFILE   0.3% of window,    1655 calls, worst    1ms, spikes   0  ours menuUI.lua:724
+[14:42:34 3:485] *** POSITION DESYNC at 3:480: local hash 33832529 vs remote 35073035 (streak 3) — a mod moved a player non-deterministically
+[14:42:34 3:485]     player 1 live pos=37.14,109.05 hp=4 layer=0
+[14:42:34 3:495] STALL: waiting on slot 2 for seq 3 offset 495 (0 ms; mine recorded to 501) | theirs for this seq: 32 frames, offsets 463..494 | rx event=90 event_ack=85 joined=1 lobby=4 pong=152 state=3902 world=22
+[14:42:34 3:495] SEND while stalled: seq 3 offsets 486..501 (16 frames)
+[14:42:36 3:629] STALL: waiting on slot 2 for seq 3 offset 629 (0 ms; mine recorded to 635) | theirs for this seq: 32 frames, offsets 597..628 | rx event=92 event_ack=87 joined=1 lobby=4 pong=156 state=4089 world=23
+[14:42:38 3:735] STALL: waiting on slot 2 for seq 3 offset 735 (0 ms; mine recorded to 741) | theirs for this seq: 32 frames, offsets 703..734 | rx event=94 event_ack=89 joined=1 lobby=4 pong=160 state=4238 world=24
+[14:42:38 3:735] SEND while stalled: seq 3 offsets 726..741 (16 frames)
+[14:42:41 3:827] .. alive
+[14:42:43 3:928] PROFILE frames=600 in 10.0s  worst=30ms  over-20ms=6  over-33ms=0
+[14:42:43 3:928] PROFILE   2.9% of window,     600 calls, worst    4ms, spikes   0  ours inputSync.lua:2002
+[14:42:43 3:928] PROFILE   0.8% of window,    1649 calls, worst    1ms, spikes   0  ours inputSync.lua:2050
+[14:42:43 3:928] PROFILE   0.6% of window,    1649 calls, worst    4ms, spikes   0  ours netCore.lua:1859
+[14:42:43 3:928] PROFILE   0.5% of window,     600 calls, worst    1ms, spikes   0  mod  main.lua:337
+[14:42:43 3:928] PROFILE   0.5% of window,    1649 calls, worst    1ms, spikes   0  ours eventSync.lua:4233
+[14:42:43 3:928] PROFILE   0.4% of window,    1649 calls, worst    4ms, spikes   0  ours inputSync.lua:2063
+[14:42:51 3:1427] .. alive
+[14:42:53 3:1528] PROFILE frames=600 in 10.0s  worst=22ms  over-20ms=6  over-33ms=0
+[14:42:53 3:1528] PROFILE   3.6% of window,     600 calls, worst    4ms, spikes   0  ours inputSync.lua:2002
+[14:42:53 3:1528] PROFILE   0.8% of window,    1650 calls, worst    1ms, spikes   0  ours inputSync.lua:2050
+[14:42:53 3:1528] PROFILE   0.8% of window,    1650 calls, worst    4ms, spikes   0  ours inputSync.lua:2063
+[14:42:53 3:1528] PROFILE   0.5% of window,     600 calls, worst    4ms, spikes   0  ours inputSync.lua:2039
+[14:42:53 3:1528] PROFILE   0.5% of window,    1650 calls, worst    4ms, spikes   0  ours eventSync.lua:4233
+[14:42:53 3:1528] PROFILE   0.5% of window,    1650 calls, worst    1ms, spikes   0  ours netCore.lua:1859
+[14:43:00 3:1947] restart probe: phase=ingame inRun=true reset=false screen=12 screen_next=14 theme_next=1 loading=2 host=true
+[14:43:00 3:1947] >> preLoadScreen
+[14:43:00 3:1947] << preLoadScreen
+[14:43:00 3:1947] run ending: endMyAdventure (ON.DEATH / End Adventure)
+[14:43:00 3:1947] run end
+[14:43:01 3:1947] restart probe: phase=lobby inRun=false reset=false screen=14 screen_next=3 theme_next=1 loading=2 host=true
+[14:43:01 3:1947] >> preLoadScreen
+[14:43:01 3:1947] << preLoadScreen
+[14:43:08 3:1947] restart probe: phase=idle inRun=false reset=false screen=3 screen_next=4 theme_next=1 loading=2 host=false
+[14:43:08 3:1947] >> preLoadScreen
+[14:43:08 3:1947] << preLoadScreen
