@@ -4,9 +4,9 @@ Written at the end of a long debugging session so the next person (or the next
 Claude) does not repeat any of it. Read `LOADER.md` first for what the loader build
 is; this file is only about the three things worked on here.
 
-**Short version:** one bug is fixed and shipped. Two are not. The unfixed ones are
-diagnosed a long way down — most of the value in this branch is the *elimination*,
-not the code.
+**Short version:** two of the three are fixed and shipped (1 and 3). The journal
+crash (2) is not, and is diagnosed a long way down — most of the value there is the
+*elimination*, not the code.
 
 ---
 
@@ -138,47 +138,97 @@ fix**.
 
 ---
 
-## 3. The tutorial door starts an ordinary run — FIX ATTEMPTED, STILL BROKEN
+## 3. The tutorial door started an ordinary run — FIXED (needs server 1.0.11)
+
+dev55. **This is half a server fix.** A dev55 client against a server older than
+1.0.11 behaves exactly as before, and now says so in a toast and in the log.
 
 ### The bug
 
 `lib/camp/camp.lua:563` installs `entrance_tutorial` as a per-frame interval watching
 for a player overlapping `DOOR_TUTORIAL_UID` in `CHAR_STATE.ENTERING`, and only then
 sets `HD_WORLDSTATE_STATE = TUTORIAL`. Room generation, spikes, flags and touchups
-all branch on that value.
+all branch on that value. Online every camp door is inert on purpose (`pollCampDoor`)
+— one player walking through would start a solo run — so the interval never fires.
 
-Online, Modded Online makes every camp door inert on purpose (`pollCampDoor`,
-`src/eventSync.lua:3542`) — one player walking through would start a solo run. So the
-interval never fires, the state stays `NORMAL`, and the tutorial door builds an
-ordinary 1-1. The journal probe confirms it: `worldstate=1` where `TUTORIAL` is 2.
+### Why the dev54 fix did nothing
 
-The door is not distinguishable by destination — hdmod spawns it with
-`spawn_door(x, y, l, 1, 1, THEME.DWELLING)`, literally a 1-1 target.
+All three hypotheses in the previous handoff were guesses. It is the first one, and
+it is visible in the source without running the game. `server/server.py`:
 
-### What was tried
+```python
+if world == 1 and level == 1:
+    return None  # the main door: the default start, nothing to carry
+```
 
-A `startDoor(env, dest)` adapter hook (`src/determinism.lua`), dispatched by
-`ModHost.runStartedFromDoor` and called from `run_start` on every machine before the
-warp is booked. Each machine matches the run's start destination against **its own**
-`camplib.DOOR_TUTORIAL_UID` target and sets `HD_WORLDSTATE_STATE = TUTORIAL`.
+hdmod spawns its tutorial door with `spawn_door(x, y, l, 1, 1, THEME.DWELLING)`, so
+its destination **is** 1-1: the one door the feature exists for is the one door the
+server discarded. `payload.start` was absent, `runStartedFromDoor` was called with
+`nil`, and the adapter returned false on its first line. The adapter, the dispatch and
+all ten unit tests were correct — the field was empty before any of them ran.
 
-Unit-tested (`tests/test_tutorial_door.py`, 10 tests) — **and it does not work in
-game.** Untested hypotheses for why:
+Nothing tested the wire. The unit tests call the adapter directly with a destination
+they build themselves, so they passed the entire time the bug was live. There are now
+tests that import `server.py` and assert the round trip
+(`tests/test_tutorial_door.py`, "the wire itself").
 
-* `payload.start` may not actually carry the destination on this path — verify the
-  host's `requestStart(myReadyDest)` really sends `{1,1,DWELLING}` and that
-  `parse_start_dest` on the **server** preserves it. The server is a separate process
-  and a separate deployment; an older server may drop it.
-* Something may reset `HD_WORLDSTATE_STATE` back to `NORMAL` between `run_start` and
-  generation. `camp.lua:564` does exactly that on camp setup.
-* The adapter may not be matching at all — `detect` requires `worldlib` and `camplib`
-  as sandbox globals at the time `detectAdapters` runs.
+### What changed
 
-**Add a `traceNote` inside `runStartedFromDoor` and the adapter before touching
-anything else.** It is currently silent, so there is no evidence which of the three
-it is.
+* **Server:** `parse_start_dest` keeps a 1-1 destination. Safe because the client
+  never sends one for the main exit — `pollCampDoor` records `false` for
+  `FLOOR_DOOR_MAIN_EXIT` and only reads `get_target()` for
+  `FLOOR_DOOR_STARTING_EXIT`, so the main door arrives as an absent field.
+  `SERVER_VERSION` 1.0.11, `EXPECTED_SERVER_VERSION` with it.
+* **Recognition and consequence are now two steps.** `startDoor` still runs at
+  `run_start` (it matches on the camp door, which is gone once we warp) and records
+  the adapters that hit; `ModHost.reassertStartDoor` re-applies their state at
+  `PRE_LEVEL_GENERATION` while `levelOrdinal == 0`, which is the last write before the
+  world is built. That kills hypothesis 2 whether or not it was ever real, and the log
+  line says which — `IT HAD BEEN CLEARED` vs `already set`. It deliberately does not
+  re-run the door match: the camp is gone by then and the door's uid may have been
+  recycled by another entity. `clearRunState` drops the hits so a tutorial cannot leak
+  into the next run.
+* **Hypothesis 3 was half right and is closed.** `detect` required `camplib` as well
+  as `worldlib`, and detection runs ONCE, right after the mod's main chunk — a global
+  assigned later than that made the adapter invisible for the whole session.
+  `worldlib.HD_WORLDSTATE_STATUS` already names hdmod; `camplib` is resolved where it
+  is used.
+* **A restart inside the tutorial stays in the tutorial.** The restart re-sends the
+  same door, but the camp is gone and `DOOR_TUTORIAL_UID` is a dead entity by then,
+  so the match failed. The door's target is now read while the camp is up and
+  remembered per sandbox; the comparison no longer needs the entity.
+* **The main exit is no longer labelled `1-1`.** It shared the label with any door
+  leading there, so `everyoneSameDest` called two different choices agreement and
+  pressing one while readied at the other read as un-readying.
 
----
+### If it still misbehaves, the log now answers it
+
+Three lines, in order, with no flag file needed:
+
+```
+camp doors hooked: 12345=main exit, 12346=1-1(theme 1)
+mod host: start door 1-1(theme 1) -> 1 recognised | fyi.hdmod/hd-tutorial-door: RECOGNISED
+mod host: start door re-asserted | fyi.hdmod/hd-tutorial-door: worldstate 1 -> 2 (IT HAD BEEN CLEARED)
+```
+
+* No `camp doors hooked` line with a 1-1 entry → the tutorial door is not a
+  `FLOOR_DOOR_STARTING_EXIT` and never reached `campDoors`. Nothing downstream can
+  work; that is a different fix (widen the door scan).
+* `start door none (the main exit)` after readying at the tutorial door → the server
+  is older than 1.0.11. The toast says so too.
+* `RECOGNISED` but no `re-asserted` line → generation never ran with `levelOrdinal`
+  at 0.
+* Both lines present and the run is still ordinary → the state is right at
+  generation and something downstream of `HD_WORLDSTATE_STATE` is the problem. That
+  is new territory; nothing above is left to suspect.
+
+### Known gap: a MID-RUN JOIN into a tutorial
+
+The server only attaches `start` to a fresh run (`not isinstance(floor, dict)`), and
+the join branch of `run_start` never reads it. Someone joining a tutorial in progress
+therefore does not get `HD_WORLDSTATE_STATE` set, and their floor generates as an
+ordinary level. Untested and out of scope here — it needs the destination carried on
+the join path and the hits re-established on the joiner.
 
 ## Diagnostic tooling added this session
 
@@ -239,9 +289,18 @@ quit** — that runs packSetup's teardown and unlinks the assets, which must hap
 py -m pytest tests/ -q
 ```
 
-492 passing. **16 pre-existing failures** in `tests/test_seeded_run.py` and
+508 passing. **16 pre-existing failures** in `tests/test_seeded_run.py` and
 `tests/test_world_mailbox.py` — they cover the world mailbox deleted in dev44 and are
 unrelated to anything here.
+
+The server has its own end-to-end suite, and `py -m pytest tests/` DOES NOT RUN IT:
+
+```bash
+cd server && py test_server.py
+```
+
+Run it after every server change. The tutorial-door bug lived entirely on the wire
+and every client-side test passed throughout.
 
 `test_lua_compiles.py` earns its keep: `src/eventSync.lua`'s main chunk is **at Lua's
 hard limit of 200 locals**, so anything added there must hang off `module` instead.
