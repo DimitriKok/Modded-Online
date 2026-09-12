@@ -34,6 +34,249 @@ pcall(function() ON_LOAD = ON.LOAD end)
 --- @type function[]
 module.loadHandlers = {}
 
+--- The sandbox each hosted pack is running in, by pack folder name.
+---
+--- A mod's globals live here, not in `_G` -- `worldlib = require("lib.worldstate")`
+--- in hdmod's main.lua is a WRITE, so it lands in the sandbox. Nothing outside could
+--- read them, which is the gap LOADER.md flags for the 2.5 adapter ("the mod's world
+--- counter is a value in its own module table, in our state, readable directly") and
+--- which nothing actually provided.
+--- @type table<string, table>
+module.envs = {}
+
+--- The determinism control for each hosted pack, which is what knows the adapters
+--- that pack matched.
+--- @type table<string, table>
+module.controls = {}
+
+--- @param packDir string
+--- @return table? # the sandbox, or nil if that pack is not hosted
+function module.envFor(packDir)
+    return module.envs[packDir]
+end
+
+--- Tell every hosted mod which camp door the run was started from.
+---
+--- Online a camp door is inert: Modded Online detects the press and starts the run
+--- for the whole party rather than letting one player walk through, because one
+--- player walking through would start a solo run. A mod that keys behaviour off a
+--- player physically ENTERING a particular door therefore never sees it happen --
+--- hdmod's tutorial is exactly that, and walking into its door online produced an
+--- ordinary 1-1 instead of the tutorial.
+---
+--- Called on EVERY machine, so each one sets the mod's state for itself and the
+--- world still generates identically everywhere.
+--- @param dest table? # { world, level, theme } of the door, or nil for the main exit
+--- @return integer # how many adapters recognised it
+function module.runStartedFromDoor(dest)
+    local applied = 0
+    for packDir, control in pairs(module.controls) do
+        local env = module.envs[packDir]
+        if env ~= nil and control ~= nil and control.matched ~= nil then
+            local ok, matched = pcall(control.matched)
+            if ok and type(matched) == "table" then
+                for _, adapter in ipairs(matched) do
+                    if adapter.startDoor ~= nil then
+                        local fired, hit = pcall(adapter.startDoor, env, dest)
+                        if fired and hit then
+                            applied = applied + 1
+                            dbg(string.format(
+                                "mod host: %s recognised the start door (%s)",
+                                packDir, tostring(adapter.name)))
+                        end
+                    end
+                end
+            end
+        end
+    end
+    return applied
+end
+
+--- Record the engine state a hosted mod's journal-chapter decision reads.
+---
+--- DIAGNOSTIC ONLY, and only while `mo_trace.on` is armed. It changes nothing and
+--- returns nothing, so it cannot alter what the engine does with the chapter.
+---
+--- The crash this exists for: hdmod returns a 20-entry page list from
+--- ON.POST_LOAD_JOURNAL_CHAPTER and the engine dies consuming it. Its own code
+--- clamps that list to the pages revealed so far, but only when all four of
+--- `chapter == STORY`, `is_prologue_active()`, `state.screen == SCREEN.LEVEL` and
+--- `HD_WORLDSTATE_STATE == TUTORIAL` hold. Hosted, the clamp is skipped. Three of
+--- those four are the mod's own state, which is why `module.envs` had to exist
+--- before this could be asked at all.
+---
+--- Naming a specific mod's globals in the host is exactly what the adapter system in
+--- determinism.lua is for, and this deliberately is NOT that: it is a probe with a
+--- flag on it, reading values and writing a log line. Every read is pcall'd, because
+--- a diagnostic that breaks the thing it is diagnosing is worse than none.
+function module.installJournalProbe()
+    local armed = false
+    pcall(function()
+        armed = DesyncLog ~= nil and DesyncLog.tracing ~= nil and DesyncLog.tracing()
+    end)
+    if not armed or rawget(_G, "ON") == nil or ON.POST_LOAD_JOURNAL_CHAPTER == nil then
+        return false
+    end
+    set_callback(function(chapter, pages)
+        -- `pages` is what the ENGINE had before the mod replaced it. Never looked at
+        -- until now, and it is the one input to this whole sequence that comes from
+        -- the engine rather than the mod -- so if hosting changes anything the
+        -- engine knows about this journal, it shows up here.
+        local incoming = "nil"
+        pcall(function()
+            if pages ~= nil then
+                local n = #pages
+                local head = {}
+                for i = 1, (n < 8 and n or 8) do
+                    head[#head + 1] = tostring(pages[i])
+                end
+                incoming = string.format("#%d { %s%s }", n,
+                    table.concat(head, ", "), n > 8 and ", ..." or "")
+            end
+        end)
+        pcall(function()
+            local st = get_local_state()
+            local bits = {}
+            for _, packDir in ipairs(module.requestedPacks()) do
+                local env = module.envs[packDir]
+                if env ~= nil then
+                    local prologue, worldState, tutorial = "?", "?", "?"
+                    pcall(function()
+                        prologue = tostring(env.camplib.is_prologue_active())
+                    end)
+                    pcall(function()
+                        worldState = tostring(env.worldlib.HD_WORLDSTATE_STATE)
+                        tutorial = tostring(env.worldlib.HD_WORLDSTATE_STATUS.TUTORIAL)
+                    end)
+                    bits[#bits + 1] = string.format(
+                        "%s: prologue=%s worldstate=%s tutorial=%s",
+                        packDir, prologue, worldState, tutorial)
+                end
+            end
+            DesyncLog.traceNote(
+                "journal chapter %s | engine pages in: %s | screen=%s (LEVEL=%s"
+                .. " CAMP=%s) level=%s theme=%s loading=%s | journal_ui state=%s"
+                .. " page_shown=%s | %s",
+                tostring(chapter), incoming, tostring(st.screen),
+                tostring(SCREEN.LEVEL), tostring(SCREEN.CAMP), tostring(st.level),
+                tostring(st.theme), tostring(st.loading),
+                (function()
+                    local v = "?"
+                    pcall(function() v = tostring(get_game_manager().journal_ui.state) end)
+                    return v
+                end)(),
+                (function()
+                    local v = "?"
+                    pcall(function()
+                        v = tostring(get_game_manager().journal_ui.page_shown)
+                    end)
+                    return v
+                end)(),
+                #bits > 0 and table.concat(bits, " ; ") or "no hosted env")
+        end)
+        -- Normally returns NOTHING: a probe must not become a second opinion on the
+        -- page list. Under the flag it deliberately does become one -- see
+        -- NO_JOURNAL_PAGES_FLAG.
+        if pages ~= nil then
+            local restore = false
+            pcall(function()
+                -- PackPath() rather than the NO_JOURNAL_PAGES_FLAG local: this
+                -- function is defined ABOVE that declaration, so the name would
+                -- resolve to a nil GLOBAL and io.open(nil) would fail inside this
+                -- very pcall -- an experiment that silently does not run.
+                local h = io.open(PackPath("mo_nojournalpages.on"), "r")
+                if h ~= nil then
+                    h:close()
+                    restore = true
+                end
+            end)
+            if restore then
+                -- The flag file's CONTENTS pick which property of the mod's
+                -- substitution to reproduce, so one launch answers one question:
+                --
+                --   (empty)/restore  the engine's own list, unchanged -- the known
+                --                    non-crashing control
+                --   sameids          the engine's COUNT, but ids from 601 up: if
+                --                    this crashes, the ID RANGE is what kills it
+                --   grow             the mod's COUNT (20), but ids in the engine's
+                --                    own range: if this crashes, GROWING the page
+                --                    vector is what kills it
+                --
+                -- Exactly one of those two should crash. Both crashing means the
+                -- two interact; neither means the substitution is innocent after all
+                -- and something else about the mod's own return value matters.
+                local mode = "restore"
+                pcall(function()
+                    local h = io.open(PackPath("mo_nojournalpages.on"), "r")
+                    if h ~= nil then
+                        local body = h:read("*a") or ""
+                        h:close()
+                        body = body:gsub("%s+", "")
+                        if body ~= "" then
+                            mode = body
+                        end
+                    end
+                end)
+                local copy = {}
+                pcall(function()
+                    local n = #pages
+                    if mode == "sameids" then
+                        for i = 1, n do
+                            copy[i] = 600 + i
+                        end
+                    elseif mode == "grow" then
+                        for i = 1, 20 do
+                            copy[i] = pages[((i - 1) % n) + 1]
+                        end
+                    else
+                        for i = 1, n do
+                            copy[i] = pages[i]
+                        end
+                    end
+                end)
+                local head = {}
+                for i = 1, (#copy < 6 and #copy or 6) do
+                    head[#head + 1] = tostring(copy[i])
+                end
+                pcall(DesyncLog.traceNote,
+                    "journal chapter %s: OVERRIDING the page list, mode=%s ->"
+                    .. " #%d { %s%s } (mo_nojournalpages.on)", tostring(chapter),
+                    mode, #copy, table.concat(head, ", "), #copy > 6 and ", ..." or "")
+                return copy
+            end
+        end
+    end, ON.POST_LOAD_JOURNAL_CHAPTER)
+
+    -- ...and bracket the window the process actually dies in.
+    --
+    -- The chapter callback returns, and the engine is dead before the hosted mod's
+    -- own RENDER_POST_JOURNAL_PAGE hook runs -- which is wrapped and marked, so the
+    -- trace would name it otherwise. That leaves the engine's own page setup and its
+    -- first page render, and nothing currently says which.
+    --
+    -- Marked as well as noted: if the process dies INSIDE a page render,
+    -- crash_frame.txt says `IN journalPageProbe` instead of blaming the chapter
+    -- callback that finished several steps earlier. Bounded by traceNote's own cap.
+    if ON.RENDER_PRE_JOURNAL_PAGE ~= nil then
+        set_callback(function(...)
+            DesyncLog.frameMark("journalPageProbe")
+            -- Built HERE, in the vararg function itself: `...` cannot be used inside
+            -- a nested closure, and a pcall body is one.
+            local bits = {}
+            for i = 1, select("#", ...) do
+                local v = select(i, ...)
+                bits[#bits + 1] = type(v) == "userdata" and "<userdata>" or tostring(v)
+            end
+            pcall(DesyncLog.traceNote, "journal page render (%s)",
+                table.concat(bits, ", "))
+            DesyncLog.frameDone("journalPageProbe")
+            -- NOTHING returned: an explicit nil is what Playlunky rejects as
+            -- "Unexpected return type from function", and `true` would skip the draw
+        end, ON.RENDER_PRE_JOURNAL_PAGE)
+    end
+    return true
+end
+
 --- Hand a hosted mod its save data again, WITHOUT restarting the game.
 ---
 --- Playlunky reads a pack's `save.dat` once, at script load, and passes it to
@@ -111,6 +354,49 @@ module.skipTextures = false
 --- The same reasoning as `mo_host.on` itself, and for the same reason.
 local NO_TEXTURES_FLAG = PackPath("mo_notextures.on")
 
+--- Run a hosted mod against the RAW primitives: real `pairs`, real `math.random`,
+--- the engine's own `get_frame`/`get_ms`, and no ON.FRAME remap.
+---
+--- This is a bisection tool, not a mode anyone should play in -- a networked run
+--- with it on desyncs exactly as it did before any of this existed. It is here
+--- because the sandbox rewrites four primitives under every hosted mod, and when
+--- one of them breaks a mod there is otherwise no way to tell that apart from the
+--- host plumbing (callback ownership, the import path, the teardown guards) without
+--- editing source and relaunching four times.
+---
+--- A FILE, for the same reason `mo_host.on` is one: a mod that takes the game down
+--- has to be recoverable without the game starting.
+local NO_DETERMINISM_FLAG = PackPath("mo_nodeterminism.on")
+
+--- Register a hosted mod's callbacks RAW, with no wrapper of ours around them.
+---
+--- Normally every hosted callback goes to the engine as `Callbacks.hosted(fn)` --
+--- an extra Lua frame, a `pcall`, depth bookkeeping, profiling, and (while tracing)
+--- a frame mark. That wrapper is the single largest thing hosting does that
+--- Playlunky does not, and hdmod's journal story sequence is a nested storm of
+--- callbacks registering and clearing each other from inside one another.
+---
+--- Dropping it is safe to TEST with: `depth` is only raised inside our OWN
+--- callbacks, so when the engine dispatches a mod callback directly we are not
+--- inside one and a bare `clear_callback()` still passes the guard in the teardown
+--- wrapper below. What is lost is the crash trace naming the mod's callbacks, the
+--- per-mod profile lines, and the re-raise of a Lua error as our own -- all
+--- diagnostics, none of them behaviour the mod can see.
+local NO_WRAP_FLAG = PackPath("mo_nowrap.on")
+
+--- Put the ENGINE's own journal page list back, undoing a hosted mod's substitution.
+---
+--- hdmod replaces the story chapter's 8 real pages (ids 2..9) with 20 fabricated
+--- ones (601..620) and draws them itself. That substitution is the last thing in
+--- this path never tested rather than assumed, and the engine dies immediately after
+--- accepting it. Our probe is registered after the mod's, so returning the original
+--- list here overrides it -- IF Overlunky takes the last non-nil return rather than
+--- the first, which this run also settles: a journal showing vanilla story pages
+--- means ours won, hdmod's custom pages means it did not and the test is void.
+---
+--- Diagnostic. With it on the mod's journal is wrong on purpose.
+local NO_JOURNAL_PAGES_FLAG = PackPath("mo_nojournalpages.on")
+
 --- Calls known to kill this machine, remembered ACROSS boots.
 ---
 --- The boot trace is truncated every launch, so reading the previous run's last
@@ -181,6 +467,31 @@ function module.texturesDisabled()
     return true
 end
 
+
+--- Is the determinism layer switched off for hosted mods?
+---
+--- Reported in the desync-log header (`determinism=`) so a capture can never be read
+--- as though the guarantees were in force when they were not.
+--- @return boolean
+function module.determinismDisabled()
+    local handle = io.open(NO_DETERMINISM_FLAG, "r")
+    if handle == nil then
+        return false
+    end
+    handle:close()
+    return true
+end
+
+--- Are hosted callbacks going to the engine unwrapped? See NO_WRAP_FLAG.
+--- @return boolean
+function module.wrapDisabled()
+    local handle = io.open(NO_WRAP_FLAG, "r")
+    if handle == nil then
+        return false
+    end
+    handle:close()
+    return true
+end
 
 --- Bare `clear_callback()` calls refused across every sandbox, for the revival log.
 ---
@@ -340,7 +651,9 @@ function module.newSandbox(report, opts)
             local hostedWrap = nil
             if name == "set_callback" and Callbacks ~= nil then
                 real = Callbacks.rawSetCallback
-                hostedWrap = Callbacks.hosted
+                if not module.wrapDisabled() then
+                    hostedWrap = Callbacks.hosted
+                end
             end
             -- Playlunky's option APIs take (id, label, long_desc, value). hdmod
             -- passes `nil` for long_desc, and a nil arriving where the binding
@@ -507,7 +820,22 @@ function module.newSandbox(report, opts)
     -- Determinism goes on LAST of the built-ins, so it chains the host's own
     -- set_callback wrapper rather than being replaced by it. Explicit overrides
     -- still win, because a test that wants a stub generator has to be able to say so.
-    if opts.determinism ~= false and Determinism ~= nil then
+    if module.wrapDisabled() then
+        -- Say it, for the same reason the determinism flag says it: a bisection
+        -- switch left on silently is one that explains the next mystery wrongly.
+        errorf("mod host: mo_nowrap.on is present -- %s's callbacks go to the engine"
+            .. " RAW. The crash trace can no longer name them and the profile loses"
+            .. " its `mod` lines. Delete the file when you are done.",
+            tostring(opts.packDir or "the hosted mod"))
+    end
+    if module.determinismDisabled() then
+        -- Say it out loud. A silent bisection switch is a switch that gets left on
+        -- and then explains a desync nobody can account for.
+        errorf("mod host: mo_nodeterminism.on is present -- %s runs on the RAW"
+            .. " primitives (real pairs, real math.random, engine get_frame). This"
+            .. " is for isolating a crash; a networked run WILL desync. Delete the"
+            .. " file when you are done.", tostring(opts.packDir or "the hosted mod"))
+    elseif opts.determinism ~= false and Determinism ~= nil then
         -- only while a room is actually running: see the note in determinism.lua.
         -- Forcing it in single-player gave every 1-1 the same level feeling.
         if opts.active == nil then
@@ -695,6 +1023,10 @@ function module.host(packDir, opts)
     }
     opts.packDir = packDir -- so the sandbox can name the mod in its own messages
     local env = module.newSandbox(report, opts)
+    -- Kept so anything outside can read the mod's own globals: they are writes, so
+    -- they land HERE and not in _G. See module.envs.
+    module.envs[packDir] = env
+    report.env = env
     installImports(env, packDir, report, opts.sources)
 
     local entry = opts.entry or "main"
@@ -705,6 +1037,9 @@ function module.host(packDir, opts)
     -- its chunk has run.
     if report.determinism ~= nil then
         pcall(report.determinism.detectAdapters)
+        -- kept so the adapters this mod matched can be reached later, from the run
+        -- lifecycle rather than from generation -- see module.runStartedFromDoor
+        module.controls[packDir] = report.determinism
     end
     report.ok = ok
     if not ok then

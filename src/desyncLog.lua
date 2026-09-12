@@ -250,10 +250,41 @@ local function dumpActive()
 end
 if MO_TRACE == nil then MO_TRACE = false end
 
---- Whether per-frame tracing is on. Checked once, when the log is opened for a
---- run (init), and cached — probing the disk every frame would defeat the point.
---- So the flag file must exist BEFORE the run starts (i.e. create it, then play).
+--- Whether per-frame tracing is on. Cached — probing the disk every frame would
+--- defeat the point — so the flag file must exist BEFORE the game starts.
+---
+--- Armed HERE, at module load, and not only in `init`.
+---
+--- `init` runs when the log is opened for a NETWORKED RUN. Arming only there made
+--- the tracer structurally unable to see the cases it is most needed for: a crash on
+--- the main menu, in the camp lobby, or in single-player with a mod hosted. In all
+--- three `init` never runs, `traceFileOn` stays false, `traceActive()` is false, and
+--- every `frameMark` returns immediately — so `crash_frame.txt` is never created and
+--- the flag looks like it did not work. That cost a full round trip on a
+--- single-player crash: flag present, game relaunched, crash reproduced, no file.
+---
+--- Our per-frame callbacks (the PRE_UPDATE engine marker in main.lua, the GUIFRAME
+--- pumps) are registered unconditionally and run outside a run too, so there is
+--- always something to mark.
 local traceFileOn = false
+do
+    -- Inline rather than via `fileExists`, which is defined much further down with
+    -- the session machinery. `mo_log.off` still wins: it means "write NOTHING".
+    local function present(name)
+        local found = false
+        pcall(function()
+            local probe = io.open(PackPath(name), "r")
+            if probe ~= nil then
+                probe:close()
+                found = true
+            end
+        end)
+        return found
+    end
+    if not present("mo_log.off") then
+        traceFileOn = present("mo_trace.on")
+    end
+end
 -- The trace file is opened ONCE and kept open for the session. The first version
 -- did a full io.open(mode="w")/write/close on EVERY mark and done — ~20 file
 -- CREATIONS per frame (mode "w" truncates, a filesystem metadata write each
@@ -265,6 +296,51 @@ local traceHandle = nil
 -- Every record is padded to this width so overwriting from offset 0 fully
 -- covers a longer previous line (no leftover tail). The file stays one line.
 local TRACE_WIDTH = 180
+
+--- A note that must reach disk even when no run has opened the desync log.
+---
+--- `crash_frame.txt` is one line, overwritten every mark, so it can say WHERE the
+--- process died and nothing about what led there. `earlyEvent` buffers until a run
+--- opens the log -- which offline never happens. Neither can carry a detail like
+--- "this hosted callback handed the engine a 20-element table", which is the kind of
+--- fact that decides a crash of this shape.
+---
+--- Appends, bounded, and only while tracing is armed, so it cannot grow on a normal
+--- session or exist on one.
+local NOTES_PATH = PackPath("crash_notes.txt")
+local notesWritten = 0
+local NOTES_MAX = 400
+
+--- @param fmt string
+function module.traceNote(fmt, ...)
+    if not (MO_TRACE == true or traceFileOn) or notesWritten >= NOTES_MAX then
+        return
+    end
+    notesWritten = notesWritten + 1
+    -- Formatted OUT HERE: `...` cannot be used inside the nested pcall closure,
+    -- which is not itself a vararg function.
+    local ok, s = pcall(string.format, fmt, ...)
+    local line = "[" .. nowStamp() .. "] " .. (ok and s or tostring(fmt))
+    pcall(function()
+        -- truncate on the first note of the session, append after: one file per
+        -- session, not one that grows across launches
+        local f = io.open(NOTES_PATH, notesWritten == 1 and "w" or "a")
+        if f == nil then
+            return
+        end
+        f:write(line .. "\n")
+        f:close()
+    end)
+end
+
+--- Is per-frame tracing on?
+---
+--- Exposed because `Callbacks.hosted` has to decide, at WRAP time, whether to pay
+--- for `debug.getinfo` on a hosted mod's callback so the trace can name it.
+--- @return boolean
+function module.tracing()
+    return MO_TRACE == true or traceFileOn
+end
 
 --- @return boolean
 local function traceActive()
@@ -667,6 +743,17 @@ function module.init()
                     end
                 end)
                 f:write("leaksweep=" .. sweep .. "\n")
+                -- Whether hosted mods got the determinism guarantees at all. A
+                -- capture taken with the bisection flag on is not evidence about
+                -- anything else, and nothing else in the log would say so.
+                local det = "on"
+                pcall(function()
+                    if ModHost ~= nil and ModHost.determinismDisabled ~= nil
+                        and ModHost.determinismDisabled() then
+                        det = "OFF (mo_nodeterminism.on present -- expect desyncs)"
+                    end
+                end)
+                f:write("determinism=" .. det .. "\n")
                 -- WHICH server, and what it is running. Half of this mod is that
                 -- separate process, and hosting on a remote one (the official
                 -- server, a friend's) means server-side fixes may simply be absent
