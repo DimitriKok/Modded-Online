@@ -201,6 +201,14 @@ else
     end
 end
 
+-- A probe, armed only by mo_trace.on, over the journal-chapter load. Registered
+-- AFTER hosting, because it reads the hosted mods' own globals out of their
+-- sandboxes -- which do not exist until they have run.
+if ModHost ~= nil and ModHost.installJournalProbe ~= nil then
+    bootStep("modHost: journal probe (mo_trace.on only)")
+    SafeCall("main/installJournalProbe", ModHost.installJournalProbe)
+end
+
 -- If the last session ended while borrowing a room host's save -- left cleanly,
 -- crashed, or simply closed -- the files were put back when src.saveShare loaded,
 -- but the MOD was handed its save data by Playlunky before any of our Lua ran and

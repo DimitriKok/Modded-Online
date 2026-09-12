@@ -523,7 +523,15 @@ end
 --- @type table[]
 module.adapters = {}
 
---- @param adapter table # { name, detect(env) -> boolean, newRun(env, ctx) }
+--- @param adapter table # { name, detect(env) -> boolean, newRun(env, ctx),
+---   startDoor(env, dest) -> boolean }
+---
+--- `startDoor` is called on EVERY machine when a run begins, with the camp door's
+--- destination the run was started from (`{world, level, theme}`, or nil for the
+--- main exit). It exists because a camp door online is inert: Modded Online detects
+--- the press and starts the run for the party instead of letting one player walk
+--- through, so a mod that keys behaviour off a player physically entering a specific
+--- door never sees it happen. Returning true means the adapter recognised the door.
 function module.register(adapter)
     module.adapters[#module.adapters + 1] = adapter
 end
@@ -557,6 +565,67 @@ module.register({
     end,
     newRun = function(env)
         rawset(env, "POSTTILE_STARTBOOL", false)
+    end,
+})
+
+--- The HD mod's tutorial is entered through a camp door, and online that door is
+--- inert -- so the thing that starts the tutorial never happens.
+---
+--- hdmod watches for a player physically overlapping DOOR_TUTORIAL_UID in
+--- CHAR_STATE.ENTERING and only then sets `HD_WORLDSTATE_STATE = TUTORIAL`
+--- (`lib/camp/camp.lua:104-120`, installed as a per-frame interval at camp setup).
+--- Everything downstream branches on that value: room generation, spikes, flags,
+--- touchups. Online, Modded Online makes every camp door inert on purpose -- one
+--- player walking through would start a solo run -- so the interval never fires, the
+--- state stays NORMAL, and walking into the tutorial door generates an ordinary 1-1.
+--- That is the reported "it just took us into a run".
+---
+--- The destination already travels: `pollCampDoor` reads `door:get_target()` for
+--- every FLOOR_DOOR_STARTING_EXIT, the host's door rides along in `run_start`, and
+--- the tutorial door is one (hdmod spawns it with `spawn_door(x, y, l, 1, 1,
+--- THEME.DWELLING)`). So each machine can match that destination against ITS OWN
+--- tutorial door and set the state the mod would have set itself.
+---
+--- Matching on the door rather than on the literal 1-1 matters: the main exit sends
+--- no destination at all, so starting a normal run can never be mistaken for this.
+module.register({
+    name = "hd-tutorial-door",
+    detect = function(env)
+        local world = rawget(env, "worldlib")
+        return type(world) == "table"
+            and type(rawget(world, "HD_WORLDSTATE_STATUS")) == "table"
+            and type(rawget(env, "camplib")) == "table"
+    end,
+    startDoor = function(env, dest)
+        if type(dest) ~= "table" or dest[1] == nil then
+            return false -- the main exit: an ordinary run, leave the mod alone
+        end
+        local camp = rawget(env, "camplib")
+        local world = rawget(env, "worldlib")
+        local uid = rawget(camp, "DOOR_TUTORIAL_UID")
+        if uid == nil then
+            return false -- this camp has no tutorial door
+        end
+        local matched = false
+        pcall(function()
+            -- the door is still there: the run starts from the camp we are leaving
+            local door = get_entity(math.floor(uid))
+            if door == nil then
+                return
+            end
+            local w, l, t = door:get_target()
+            if w == nil then
+                return
+            end
+            matched = math.floor(w) == math.floor(dest[1])
+                and math.floor(l or -1) == math.floor(dest[2] or -1)
+                and math.floor(t or -1) == math.floor(dest[3] or -1)
+        end)
+        if not matched then
+            return false
+        end
+        world.HD_WORLDSTATE_STATE = world.HD_WORLDSTATE_STATUS.TUTORIAL
+        return true
     end,
 })
 

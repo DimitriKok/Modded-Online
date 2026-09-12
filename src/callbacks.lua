@@ -229,12 +229,54 @@ end
 --- @param fn function
 --- @return function
 function module.hosted(fn)
-    local where = profiling and describe(fn) or "?"
+    -- Tracing needs the name as much as profiling does, and for a better reason.
+    --
+    -- The frame trace marks OUR callbacks only, so a crash inside the engine's
+    -- update reads as "after gameframe:eventSync returned, before POST_UPDATE" --
+    -- which correctly proves the death is not in Modded Online's own code, and then
+    -- says nothing at all about WHICH of a hosted mod's 203 registrations was
+    -- running. hdmod's journal alone registers and tears down eight callbacks in a
+    -- nested storm, so "somewhere in the mod" is not a location.
+    --
+    -- `describe` is one `debug.getinfo` per REGISTRATION (not per call), and only
+    -- when a diagnostic that wants it is armed.
+    local tracing = false
+    pcall(function()
+        tracing = DesyncLog ~= nil and DesyncLog.tracing ~= nil and DesyncLog.tracing()
+    end)
+    local where = (profiling or tracing) and describe(fn) or "?"
+    local mark = tracing and ("mod " .. where) or nil
     return function(...)
         local saved = depth
         depth = 0
         local startedAt = profiling and nowMs() or 0
+        if mark ~= nil then
+            DesyncLog.frameMark(mark)
+        end
+        local firstArg = mark ~= nil and (...) or nil
         local ok, value = pcall(fn, ...)
+        if mark ~= nil then
+            DesyncLog.frameDone(mark)
+            -- A hosted callback returning a TABLE is handing the engine a structure
+            -- to consume, and the engine consumes it the instant we return. When the
+            -- process dies immediately after such a callback -- which is exactly what
+            -- crash_frame.txt showed for hdmod's ON.POST_LOAD_JOURNAL_CHAPTER -- the
+            -- contents of that table are the only thing left worth knowing, and they
+            -- are gone by the time anything else could look.
+            --
+            -- Tables are rare as callback returns (most are nil or a boolean), so
+            -- this is not the per-frame firehose it looks like.
+            if type(value) == "table" and DesyncLog.traceNote ~= nil then
+                local n = #value
+                local head = {}
+                for i = 1, (n < 8 and n or 8) do
+                    head[#head + 1] = tostring(value[i])
+                end
+                DesyncLog.traceNote("%s(%s) -> table #%d { %s%s }", where,
+                    tostring(firstArg), n, table.concat(head, ", "),
+                    n > 8 and ", ..." or "")
+            end
+        end
         depth = saved
         if profiling then
             chargeTo("mod  " .. where, startedAt)

@@ -1,0 +1,39 @@
+# Per-machine state and diagnostic output. None of this is source, and all of it
+# differs between the two machines a desync is diagnosed from.
+
+# Asset trees linked in from the hosted mod by packSetup (see LOADER.md).
+# They are hard links to another pack, hundreds of MB, and rebuilt on every apply.
+/Data/
+/res/
+/soundbank/
+/mod_info.json
+/shaders_mod.hlsl
+/strings00_mod.str
+/.mo_source
+/mo_patched_textures.txt
+
+# The hosted mod's progression, and saveShare's parked copies of it.
+/save.dat
+/savegame.sav
+*.mo_mine
+*.mo_absent
+/mo_own_fields.txt
+
+# Flag files. Every one of these changes behaviour, and a committed one would be a
+# diagnostic switch left on in somebody else's checkout.
+/mo_*.on
+/mo_*.off
+/mo_fatal_calls.txt
+
+# Diagnostic output.
+/desync_log.txt
+/desync_log.prev.txt
+/crash_frame.txt
+/crash_notes.txt
+/modded_online_boot.log
+
+# Local settings.
+/config.json
+
+__pycache__/
+*.pyc
