@@ -1,0 +1,8 @@
+fyi.modded-online-loader
+--fyi.co-op-shared-camera
+--fyi.spelunky-25-2
+--fyi.neco-arc
+--fyi.hdmod-demo
+--fyi.randomizer
+--fyi.modded-online
+--fyi.the-pit-of-100-trials

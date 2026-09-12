@@ -1,0 +1,326 @@
+\-size                                   4 8        // level size in rooms
+
+\?stone_floor                      -
+\?locked_door                      /
+\?thorn_vine                       *
+\?jungle_spear_trap                ~
+\?key                              s
+\?tomb_floor                       G
+\?cursed_pot                       u
+\?litwalltorch                     O
+\?haunted_corpse                   7
+\?bone_block                       f
+\?shop_wall%50                     ;
+\?shop_woodwall                    :
+\?die                              %
+\?merchant                         #
+\?cavemanshopkeeper                &
+\?sleeping_hiredhand               \
+\?forcefield                       ?
+\?forcefield_top                   '
+\?thief                            J
+\?chunk_ground                     5
+\?chunk_air                        6
+\?chunk_door                       8
+\?empty                            0
+\?floor                            1
+\?floor%50                         2
+\?minewood_floor                   =
+\?floor_hard                       X
+\?floor_hard%50%floor              Y
+\?adjacent_floor                   Z
+\?vine                             v
+\?growable_vine                    V
+\?door                             9
+\?door2                            D
+\?spikes                           ^
+\?push_block                       4
+\?treasure                         t
+\?tree_base                        T
+\?cookfire                         r
+\?sister                           i
+\?altar                            x
+\?idol                             I
+\?vault_wall                       |
+\?coffin                           g
+\?shop_sign                        K
+\?shop_door                        k
+\?lamp_hang                        l
+\?shop_wall                        .
+\?shop_item                        S
+\?wanted_poster                    W
+\?shopkeeper                       $
+\?clover                           Q
+\?ladder                           L
+\?platform                         p
+\?ladder_plat                      P
+\?coarse_water                     b
+
+
+
+////////////////////////////////////////////////////////////////////////////////
+\.blackmarket_entrance   // Room behind hidden entrance
+////////////////////////////////////////////////////////////////////////////////
+
+// room
+XXXXXXXXXX
+XXXXXXXXXX
+XXXXXXXXXX
+XXXXXXXXXX
+XXXXXXXXXX
+XXXXXXXXXX
+XXXXXXXXXX
+XXXXXXXXXX
+
+////////////////////////////////////////////////////////////////////////////////
+\.blackmarket_exit   // Room that leads to the front layer (appears on a side)
+////////////////////////////////////////////////////////////////////////////////
+
+// room
+\!dual
+XXXXXXXXXX XXXXXXXXXX
+XXXXXXXXXX XXXXXXXXXX
+XXXXXXXXXX XXXXXXXXXX
+XXXXXXXXXX XXXXXXXXXX
+XXXXXXXXXX XXXXXXXXXX
+XXXXXXXXXX XXXXXXXXXX
+XXXXXXXXXX XXXXXXXXXX
+XXXXXXXXXX XXXXXXXXXX
+
+////////////////////////////////////////////////////////////////////////////////
+\.setroom4-0
+////////////////////////////////////////////////////////////////////////////////
+
+// room
+XXXXXXXXXX
+XXXXXXXXXX
+XXXXXXXXXX
+XXXXXXXXXX
+XXXXXXXXXX
+XXXXXXXXXX
+XXXXXXXXXX
+XXXXXXXXXX
+
+////////////////////////////////////////////////////////////////////////////////
+\.setroom4-1
+////////////////////////////////////////////////////////////////////////////////
+
+// room
+XXXXXXXXXX
+XXXXXXXXXX
+XXXXXXXXXX
+XXXXXXXXXX
+XXXXXXXXXX
+XXXXXXXXXX
+XXXXXXXXXX
+XXXXXXXXXX
+
+////////////////////////////////////////////////////////////////////////////////
+\.setroom4-2
+////////////////////////////////////////////////////////////////////////////////
+
+// room
+XXXXXXXXXX
+XXXXXXXXXX
+XXXXXXXXXX
+XXXXXXXXXX
+XXXXXXXXXX
+XXXXXXXXXX
+XXXXXXXXXX
+XXXXXXXXXX
+
+////////////////////////////////////////////////////////////////////////////////
+\.setroom4-3
+////////////////////////////////////////////////////////////////////////////////
+
+// room
+XXXXXXXXXX
+XXXXXXXXXX
+XXXXXXXXXX
+XXXXXXXXXX
+XXXXXXXXXX
+XXXXXXXXXX
+XXXXXXXXXX
+XXXXXXXXXX
+
+////////////////////////////////////////////////////////////////////////////////
+\.setroom5-0
+////////////////////////////////////////////////////////////////////////////////
+
+// room
+XXXXXXXXXX
+XXXXXXXXXX
+XXXXXXXXXX
+XXXXXXXXXX
+XXXXXXXXXX
+XXXXXXXXXX
+XXXXXXXXXX
+XXXXXXXXXX
+
+////////////////////////////////////////////////////////////////////////////////
+\.setroom5-1
+////////////////////////////////////////////////////////////////////////////////
+
+// room
+XXXXXXXXXX
+XXXXXXXXXX
+XXXXXXXXXX
+XXXXXXXXXX
+XXXXXXXXXX
+XXXXXXXXXX
+XXXXXXXXXX
+XXXXXXXXXX
+
+////////////////////////////////////////////////////////////////////////////////
+\.setroom5-2
+////////////////////////////////////////////////////////////////////////////////
+
+// room
+XXXXXXXXXX
+XXXXXXXXXX
+XXXXXXXXXX
+XXXXXXXXXX
+XXXXXXXXXX
+XXXXXXXXXX
+XXXXXXXXXX
+XXXXXXXXXX
+
+////////////////////////////////////////////////////////////////////////////////
+\.setroom5-3
+////////////////////////////////////////////////////////////////////////////////
+
+// room
+XXXXXXXXXX
+XXXXXXXXXX
+XXXXXXXXXX
+XXXXXXXXXX
+XXXXXXXXXX
+XXXXXXXXXX
+XXXXXXXXXX
+XXXXXXXXXX
+
+////////////////////////////////////////////////////////////////////////////////
+\.setroom6-0
+////////////////////////////////////////////////////////////////////////////////
+
+// room
+XXXXXXXXXX
+XXXXXXXXXX
+XXXXXXXXXX
+XXXXXXXXXX
+XXXXXXXXXX
+XXXXXXXXXX
+XXXXXXXXXX
+XXXXXXXXXX
+
+////////////////////////////////////////////////////////////////////////////////
+\.setroom6-1
+////////////////////////////////////////////////////////////////////////////////
+
+// room
+XXXXXXXXXX
+XXXXXXXXXX
+XXXXXXXXXX
+XXXXXXXXXX
+XXXXXXXXXX
+XXXXXXXXXX
+XXXXXXXXXX
+XXXXXXXXXX
+
+////////////////////////////////////////////////////////////////////////////////
+\.setroom6-2
+////////////////////////////////////////////////////////////////////////////////
+
+// room
+XXXXXXXXXX
+XXXXXXXXXX
+XXXXXXXXXX
+XXXXXXXXXX
+XXXXXXXXXX
+XXXXXXXXXX
+XXXXXXXXXX
+XXXXXXXXXX
+
+////////////////////////////////////////////////////////////////////////////////
+\.setroom6-3   // HEDJET
+////////////////////////////////////////////////////////////////////////////////
+
+// room
+XXXXXXXXXX
+XXXXXXXXXX
+XXXXXXXXXX
+XXXXXXXXXX
+XXXXXXXXXX
+XXXXXXXXXX
+XXXXXXXXXX
+XXXXXXXXXX
+
+////////////////////////////////////////////////////////////////////////////////
+\.setroom7-0
+////////////////////////////////////////////////////////////////////////////////
+
+// room
+XXXXXXXXXX
+XXXXXXXXXX
+XXXXXXXXXX
+XXXXXXXXXX
+XXXXXXXXXX
+XXXXXXXXXX
+XXXXXXXXXX
+XXXXXXXXXX
+
+////////////////////////////////////////////////////////////////////////////////
+\.setroom7-1
+////////////////////////////////////////////////////////////////////////////////
+
+// room
+XXXXXXXXXX
+XXXXXXXXXX
+XXXXXXXXXX
+XXXXXXXXXX
+XXXXXXXXXX
+XXXXXXXXXX
+XXXXXXXXXX
+XXXXXXXXXX
+
+////////////////////////////////////////////////////////////////////////////////
+\.setroom7-2
+////////////////////////////////////////////////////////////////////////////////
+
+// room
+XXXXXXXXXX
+XXXXXXXXXX
+XXXXXXXXXX
+XXXXXXXXXX
+XXXXXXXXXX
+XXXXXXXXXX
+XXXXXXXXXX
+XXXXXXXXXX
+
+////////////////////////////////////////////////////////////////////////////////
+\.setroom7-3
+////////////////////////////////////////////////////////////////////////////////
+
+// room
+XXXXXXXXXX
+XXXXXXXXXX
+XXXXXXXXXX
+XXXXXXXXXX
+XXXXXXXXXX
+XXXXXXXXXX
+XXXXXXXXXX
+XXXXXXXXXX
+
+////////////////////////////////////////////////////////////////////////////////
+\.blackmarket_coffin   // Coffin room for unlockable characters
+////////////////////////////////////////////////////////////////////////////////
+
+// room
+XXXXXXXXXX
+XXXXXXXXXX
+XXXXXXXXXX
+XXXXXXXXXX
+XXXXXXXXXX
+XXXXXXXXXX
+XXXXXXXXXX
+XXXXXXXXXX
