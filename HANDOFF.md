@@ -93,10 +93,35 @@ Using `mo_nojournalpages.on` (see below) to override what the engine receives:
 So the **id range is innocent** and the **count is the trigger**: growing the list
 beyond what the engine passed in.
 
+### What the first real capture proved (dev57, `mo_journal.txt`)
+
+```
+[21:58:52] journal probe armed: trace=false override=false probe=true
+[21:59:11] journal chapter 2 | engine pages in: #0 {  } | screen=11 (LEVEL=12 CAMP=11)
+           level=1 theme=17 loading=0 | fyi.hdmod: prologue=true worldstate=1 tutorial=2
+[21:59:11] journal chapter 8 | engine pages in: #8 { 2, 3, 4, 5, 6, 7, 8, 9 } | screen=11 ...
+```
+
+Hosted, in the camp, opening the journal. Three things are now settled:
+
+* **The engine offers 8 pages hosted.** Confirmed independently of the tracer.
+* **No page render is attempted.** The file ends at chapter 8 — the page-render
+  probe writes to this same file and never fired. The process dies in the engine's
+  page **setup**, before the first draw. Previously an inference; now measured.
+* **hdmod's clamp cannot engage here, and the log says exactly why.**
+  `screen=11` is CAMP, not LEVEL (12), and `worldstate=1` is NORMAL, not TUTORIAL
+  (2). Two of its four conditions fail, so hdmod returns all 20 pages. `prologue=true`
+  and `chapter 8` are the two that hold.
+
+This also means **the camp journal and the tutorial journal are different cases**.
+In the tutorial, `screen` IS LEVEL and — since dev55 — `HD_WORLDSTATE_STATE` IS
+TUTORIAL, so hdmod's own clamp engages and it never returns the long list. Worth
+testing directly: the tutorial journal may already be fine while the camp one is not.
+
 ### The one measurement still missing
 
-**Does the engine offer 8 pages standalone too?** Nobody has looked. It matters
-enormously:
+**Does the engine offer 8 pages standalone too?** Still nobody has looked — the
+capture above is HOSTED. It matters enormously:
 
 * If standalone also offers 8, then hdmod grows 8 → 20 there as well, and growth is
   fatal *only when hosted* — chase how Overlunky sizes the page vector for the

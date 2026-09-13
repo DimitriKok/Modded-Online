@@ -13,7 +13,7 @@
 
 meta = {
     name = "Modded Online (loader build)",
-    version = "2.0.0-dev57",
+    version = "2.0.0-dev58",
     description = "Play scriptable mods together via a self-hosted server",
     author = "EatYoCake + DoctorPuppy",
     online_safe = false, -- not for the *official* online — that's the point

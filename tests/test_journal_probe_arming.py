@@ -125,3 +125,27 @@ def test_the_stale_desync_logs_are_not_shipped_in_git():
                          cwd=str(PACK)).stdout.split(chr(10))
     assert "desync_log.txt" not in out
     assert "desync_log.prev.txt" not in out
+
+
+# ------------------------------------- what the first real capture left unanswered
+
+
+def test_an_unreadable_journal_field_says_why():
+    """The first real capture read `journal_ui state=? page_shown=?`. A "?" says the
+    read failed and not what it failed on, which is a diagnostic that cannot itself
+    be debugged: "no such field on this build" and "journal_ui is nil at this point
+    in the load" are different findings and both printed "?"."""
+    assert "local function journalField(field)" in MOD_HOST
+    at = MOD_HOST.index("local function journalField(field)")
+    body = MOD_HOST[at:at + 600]
+    assert 'return "ERR(" .. tostring(v)' in body
+
+
+def test_max_page_count_is_read():
+    """The leading hypothesis for the mechanism. The engine offers 8 pages, hdmod
+    returns 20, and returning 8 with the mod's own ids does not crash -- so the
+    GROWTH is fatal and something downstream is sized for the incoming count.
+    max_page_count is the one writable JournalUI field that could be that size, and
+    HANDOFF.md has flagged it unread for two sessions."""
+    assert 'journalField("max_page_count")' in MOD_HOST
+    assert "max_page_count=%s" in MOD_HOST

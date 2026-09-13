@@ -231,6 +231,25 @@ end
 ---
 --- Also `print`ed, which Playlunky captures into spelunky.log: two independent
 --- sinks, because the whole point is surviving a process that is about to die.
+--- One JournalUI field, or the reason it could not be read.
+---
+--- Every read here is pcall'd because a diagnostic that breaks the thing it is
+--- diagnosing is worse than none -- but swallowing the error and printing "?" left
+--- the first real capture saying two fields were unreadable and nothing about why.
+--- The message distinguishes "no such field on this build" from "journal_ui is nil
+--- at this point in the load", which are different findings.
+--- @param field string
+--- @return string
+local function journalField(field)
+    local ok, v = pcall(function()
+        return tostring(get_game_manager().journal_ui[field])
+    end)
+    if ok then
+        return v
+    end
+    return "ERR(" .. tostring(v):gsub("%s+", " "):sub(1, 60) .. ")"
+end
+
 --- @type integer
 local journalNotesWritten = 0
 local JOURNAL_NOTES_MAX = 400
@@ -345,22 +364,23 @@ function module.installJournalProbe()
             local line = string.format(
                 "journal chapter %s | engine pages in: %s | screen=%s (LEVEL=%s"
                 .. " CAMP=%s) level=%s theme=%s loading=%s | journal_ui state=%s"
-                .. " page_shown=%s | %s",
+                .. " page_shown=%s max_page_count=%s | %s",
                 tostring(chapter), incoming, tostring(st.screen),
                 tostring(SCREEN.LEVEL), tostring(SCREEN.CAMP), tostring(st.level),
                 tostring(st.theme), tostring(st.loading),
-                (function()
-                    local v = "?"
-                    pcall(function() v = tostring(get_game_manager().journal_ui.state) end)
-                    return v
-                end)(),
-                (function()
-                    local v = "?"
-                    pcall(function()
-                        v = tostring(get_game_manager().journal_ui.page_shown)
-                    end)
-                    return v
-                end)(),
+                -- These came back "?" in the first real capture, which says the read
+                -- FAILED and not what it failed on -- a diagnostic that cannot be
+                -- debugged. Report the error instead of hiding it.
+                journalField("state"), journalField("page_shown"),
+                -- THE LEADING HYPOTHESIS for the mechanism. The engine offers 8 pages
+                -- and hdmod returns 20; returning 8 with the mod's own ids does not
+                -- crash, so it is the GROWTH that kills it, which means something
+                -- downstream is sized for the count the engine passed in.
+                -- `max_page_count` is the one writable field on JournalUI that could
+                -- BE that size, and HANDOFF.md has flagged it unread for two
+                -- sessions. If it reads 8 here, the fix is to raise it before
+                -- returning a longer list rather than to truncate the journal.
+                journalField("max_page_count"),
                 #bits > 0 and table.concat(bits, " ; ") or "no hosted env")
             pcall(DesyncLog.traceNote, "%s", line)
             pcall(DesyncLog.earlyEvent, "%s", line)
