@@ -216,12 +216,47 @@ end
 --- determinism.lua is for, and this deliberately is NOT that: it is a probe with a
 --- flag on it, reading values and writing a log line. Every read is pcall'd, because
 --- a diagnostic that breaks the thing it is diagnosing is worse than none.
-function module.installJournalProbe()
-    local armed = false
+--- @param name string # a flag file in the pack folder
+--- @return boolean
+local function flagPresent(name)
+    local there = false
     pcall(function()
-        armed = DesyncLog ~= nil and DesyncLog.tracing ~= nil and DesyncLog.tracing()
+        -- PackPath(), not one of the *_FLAG locals: several of them are declared
+        -- BELOW this point, so the name would resolve to a nil global and
+        -- io.open(nil) would fail inside this very pcall -- a check that silently
+        -- always says no.
+        local h = io.open(PackPath(name), "r")
+        if h ~= nil then
+            h:close()
+            there = true
+        end
     end)
-    if not armed or rawget(_G, "ON") == nil or ON.POST_LOAD_JOURNAL_CHAPTER == nil then
+    return there
+end
+
+function module.installJournalProbe()
+    -- ARMED BY ANY OF THREE, not by the tracer alone.
+    --
+    -- This used to require mo_trace.on, and the page OVERRIDE lives inside the
+    -- callback it gates -- so `mo_nojournalpages.on` on its own installed nothing
+    -- and the documented crash workaround silently did nothing. The one flag a
+    -- player is told to create to stop the crash was inert without a second,
+    -- undocumented flag that writes a file every frame.
+    --
+    -- mo_journalprobe.on is the cheap half on its own: it logs what the engine
+    -- offered and what the mod returned, and overrides nothing. That is the
+    -- measurement HANDOFF.md calls the missing one ("does the engine offer 8 pages
+    -- standalone too?"), and needing the per-frame tracer to take it is why nobody
+    -- has. This callback runs when a journal CHAPTER loads -- not per frame -- so
+    -- it costs nothing to leave armed.
+    local tracing, override, probe = false, false, false
+    pcall(function()
+        tracing = DesyncLog ~= nil and DesyncLog.tracing ~= nil and DesyncLog.tracing()
+    end)
+    override = flagPresent("mo_nojournalpages.on")
+    probe = flagPresent("mo_journalprobe.on")
+    if not (tracing or override or probe)
+        or rawget(_G, "ON") == nil or ON.POST_LOAD_JOURNAL_CHAPTER == nil then
         return false
     end
     set_callback(function(chapter, pages)
@@ -260,7 +295,12 @@ function module.installJournalProbe()
                         packDir, prologue, worldState, tutorial)
                 end
             end
-            DesyncLog.traceNote(
+            -- Built once and sent to BOTH sinks. traceNote only writes while the
+            -- per-frame tracer is armed, so the one measurement this probe exists to
+            -- take was only obtainable at the cost of a file write every frame --
+            -- which is why it has never been taken. earlyEvent puts it in the desync
+            -- log, where it survives the lobby and costs nothing.
+            local line = string.format(
                 "journal chapter %s | engine pages in: %s | screen=%s (LEVEL=%s"
                 .. " CAMP=%s) level=%s theme=%s loading=%s | journal_ui state=%s"
                 .. " page_shown=%s | %s",
@@ -280,6 +320,8 @@ function module.installJournalProbe()
                     return v
                 end)(),
                 #bits > 0 and table.concat(bits, " ; ") or "no hosted env")
+            pcall(DesyncLog.traceNote, "%s", line)
+            pcall(DesyncLog.earlyEvent, "%s", line)
         end)
         -- Normally returns NOTHING: a probe must not become a second opinion on the
         -- page list. Under the flag it deliberately does become one -- see
@@ -345,10 +387,12 @@ function module.installJournalProbe()
                 for i = 1, (#copy < 6 and #copy or 6) do
                     head[#head + 1] = tostring(copy[i])
                 end
-                pcall(DesyncLog.traceNote,
+                local said = string.format(
                     "journal chapter %s: OVERRIDING the page list, mode=%s ->"
                     .. " #%d { %s%s } (mo_nojournalpages.on)", tostring(chapter),
                     mode, #copy, table.concat(head, ", "), #copy > 6 and ", ..." or "")
+                pcall(DesyncLog.traceNote, "%s", said)
+                pcall(DesyncLog.earlyEvent, "%s", said)
                 return copy
             end
         end

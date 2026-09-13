@@ -136,6 +136,28 @@ and shows the right content. It clamps hdmod's list to the engine's count, so a
 longer journal later in the game would be truncated. It is a **diagnostic, not a
 fix**.
 
+**It did not work on its own until dev56.** The override lives inside the callback
+`installJournalProbe` registers, and that registration was gated on
+`DesyncLog.tracing()` alone — so creating the one flag a player is told to create
+installed nothing at all, and the crash was unchanged. It needed `mo_trace.on`
+alongside it, which is undocumented here and writes a file every frame. Any earlier
+report of "the workaround does not help" should be retested.
+
+### Taking the missing measurement (dev56)
+
+The same gate is why nobody has answered the question above. It now has its own flag:
+
+* Create `mo_journalprobe.on` in the pack folder. Logging only — it overrides
+  nothing and costs nothing (the callback runs when a journal *chapter* loads, not
+  per frame).
+* Delete `mo_nojournalpages.on` so the probe stays log-only.
+* Put hdmod **native** (see "Switching configurations") and open the journal.
+* Read the `engine pages in:` line — it is now in the **desync log**, not only in
+  `crash_notes.txt`.
+
+Then run the same thing hosted and compare the two counts. That single comparison
+decides which of the two chases above is the real one.
+
 ---
 
 ## 3. The tutorial door started an ordinary run — FIXED (needs server 1.0.11)
@@ -241,6 +263,7 @@ starting.
 | `mo_trace.on` | per-frame crash trace → `crash_frame.txt` (one line: what was running when the process died) and `crash_notes.txt` (appending, bounded to 400 lines). Writes every frame — expect stutter. |
 | `mo_nodeterminism.on` | hosted mods run on raw `pairs` / `math.random` / `get_frame`. **Networked runs desync.** |
 | `mo_nowrap.on` | hosted callbacks go to the engine unwrapped. Loses their names in the trace. |
+| `mo_journalprobe.on` | logs what the engine offered the journal-chapter callback and what the mod returned, to the desync log. Overrides nothing; no per-frame cost. |
 | `mo_nojournalpages.on` | probe overrides the journal page list. Contents pick the mode: empty/anything = the engine's own list, `sameids` = engine's count with ids 601+, `grow` = 20 entries with the engine's own ids. |
 
 Each announces itself in `spelunky.log` when active, and `determinism=` appears in the

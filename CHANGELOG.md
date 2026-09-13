@@ -1,5 +1,44 @@
 # Changelog
 
+## 2.0.0-dev56
+
+The journal crash is still not fixed. What is fixed is that **the workaround for it
+did nothing**, and that the one measurement needed to fix it properly no longer costs
+a file write every frame.
+
+### The documented workaround was inert
+
+HANDOFF.md tells you to create `mo_nojournalpages.on` to stop hdmod's journal killing
+the game. That override lives inside the callback `installJournalProbe` registers —
+and the registration was gated on `DesyncLog.tracing()` alone:
+
+```lua
+if not armed or rawget(_G, "ON") == nil or ON.POST_LOAD_JOURNAL_CHAPTER == nil then
+    return false
+end
+```
+
+So creating the flag you are told to create installed **nothing**: no callback, no
+override, the same crash, and no way to tell that apart from "the workaround does not
+work". It silently required a second, undocumented flag (`mo_trace.on`) that writes
+every frame. It now arms on its own flag.
+
+### The missing measurement has its own flag
+
+HANDOFF.md has called the same question open for two sessions — *does the engine
+offer 8 pages standalone too?* — and it decides which of two completely different
+chases is the real one. Nobody has taken it because the probe that answers it needed
+the per-frame tracer.
+
+`mo_journalprobe.on` arms the logging half alone. It overrides nothing, and the
+callback runs when a journal *chapter* loads rather than per frame, so it costs
+nothing to leave on. The `engine pages in:` line now goes to the **desync log** as
+well as the trace, so it survives without `mo_trace.on` at all.
+
+No flag and no tracer still installs nothing: the probe registers a
+`POST_LOAD_JOURNAL_CHAPTER` callback, and leaving that on for everyone would change
+the exact code path the crash lives in.
+
 ## 2.0.0-dev55
 
 hdmod's tutorial door puts the party in the tutorial. **Both players need dev55, and
