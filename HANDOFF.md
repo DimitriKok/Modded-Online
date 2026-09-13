@@ -154,6 +154,31 @@ hdmod never touches it.
 | hdmod's page-count clamp | both `state.screen == SCREEN.LEVEL` and `HD_WORLDSTATE_STATE == TUTORIAL` fail in the camp — but they fail standalone too, so 20 pages is the correct result there |
 | Our `ON.RENDER_PRE_JOURNAL_PAGE` hook | removed it (now session-scoped, see below) — still crashed |
 
+### The journal now OPENS hosted (dev59) — but read this before celebrating
+
+A capture with `mo_nojournalpages.on` present shows the journal opening with no
+crash, 400+ page renders, and:
+
+```
+journal chapter 8: OVERRIDING the page list, mode=restore -> #8 { 2, 3, 4, 5, 6, 7, ... }
+```
+
+`mode=restore` — the flag file was created **empty**, and empty used to mean "the
+engine's own list", which is the non-crashing **control for an experiment**, not the
+thing a player wants. The crash stops and the journal silently shows *vanilla* pages
+instead of hdmod's. As of dev59 an empty file means `sameids`, which stops the crash
+*and* keeps the mod's own content; `restore` is still available by writing it in.
+
+Two further things that capture settled:
+
+* **Page renders do happen once the list is not grown** (400+ of them), which
+  confirms from the other side that the crash is in page SETUP and only when the
+  list grows.
+* **`journal_ui` is unreadable at `POST_LOAD_JOURNAL_CHAPTER`.** Every field came
+  back `attempt to index a nil value` — the UI does not exist yet at chapter-load
+  time. `max_page_count` is therefore read at RENDER time now, which is the one
+  place it demonstrably exists.
+
 ### Current workaround
 
 `mo_nojournalpages.on` containing `sameids` makes the journal open without crashing
@@ -310,7 +335,7 @@ starting.
 | `mo_nodeterminism.on` | hosted mods run on raw `pairs` / `math.random` / `get_frame`. **Networked runs desync.** |
 | `mo_nowrap.on` | hosted callbacks go to the engine unwrapped. Loses their names in the trace. |
 | `mo_journalprobe.on` | logs what the engine offered the journal-chapter callback and what the mod returned, to `mo_journal.txt` (flushed per line, so it survives a native crash) and `spelunky.log`. Overrides nothing; no per-frame cost. |
-| `mo_nojournalpages.on` | probe overrides the journal page list. Contents pick the mode: empty/anything = the engine's own list, `sameids` = engine's count with ids 601+, `grow` = 20 entries with the engine's own ids. |
+| `mo_nojournalpages.on` | probe overrides the journal page list. Contents pick the mode: **empty = `sameids`** (engine's count, ids 601+ — stops the crash AND keeps the mod's content), `restore` = the engine's own list unchanged (the non-crashing control), `grow` = 20 entries with the engine's own ids. |
 
 Each announces itself in `spelunky.log` when active, and `determinism=` appears in the
 desync-log header.

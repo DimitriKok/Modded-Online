@@ -21,6 +21,7 @@ from __future__ import annotations
 import pathlib
 
 PACK = pathlib.Path(__file__).resolve().parent.parent
+NL = chr(10)
 MOD_HOST = (PACK / "src" / "modHost.lua").read_text(encoding="utf-8")
 MAIN = (PACK / "main.lua").read_text(encoding="utf-8")
 
@@ -108,12 +109,17 @@ def test_arming_itself_is_recorded():
     assert "journal probe armed: trace=%s override=%s probe=%s" in MOD_HOST
 
 
+def render_probe() -> str:
+    """The RENDER_PRE_JOURNAL_PAGE block. Located by its callback rather than by a
+    byte offset -- the offsets in these tests broke the moment the block grew."""
+    at = MOD_HOST.index("if ON.RENDER_PRE_JOURNAL_PAGE ~= nil then")
+    return MOD_HOST[at:MOD_HOST.index("ON.RENDER_PRE_JOURNAL_PAGE)", at)]
+
+
 def test_the_page_render_probe_writes_there_too():
     """Whether any page render was attempted is the fact that separates engine page
     SETUP from the first page DRAW, and it has to leave a dying process."""
-    at = MOD_HOST.index("journal page render (%s)")
-    body = MOD_HOST[at:at + 700]
-    assert "journalNote(" in body
+    assert "journalNote(" in render_probe()
 
 
 def test_the_stale_desync_logs_are_not_shipped_in_git():
@@ -135,10 +141,9 @@ def test_an_unreadable_journal_field_says_why():
     read failed and not what it failed on, which is a diagnostic that cannot itself
     be debugged: "no such field on this build" and "journal_ui is nil at this point
     in the load" are different findings and both printed "?"."""
-    assert "local function journalField(field)" in MOD_HOST
     at = MOD_HOST.index("local function journalField(field)")
-    body = MOD_HOST[at:at + 600]
-    assert 'return "ERR(" .. tostring(v)' in body
+    body = MOD_HOST[at:MOD_HOST.index(NL + "end", at)]
+    assert 'return "ERR(" .. msg' in body
 
 
 def test_max_page_count_is_read():
@@ -149,3 +154,39 @@ def test_max_page_count_is_read():
     HANDOFF.md has flagged it unread for two sessions."""
     assert 'journalField("max_page_count")' in MOD_HOST
     assert "max_page_count=%s" in MOD_HOST
+
+
+# ------------------------------------ what the second real capture forced (dev59)
+
+
+def test_the_page_render_probe_collapses_repeats():
+    """It fires every frame the journal is open. A capture of a NON-crashing journal
+    spent all 400 lines on one identical line repeated -- about a second of
+    rendering. That is useless on its own and actively harmful: a crash after that
+    point would have had nowhere left to write."""
+    body = render_probe()
+    assert "lastRenderShape" in body
+    assert "more identical page renders" in body
+
+
+def test_max_page_count_is_read_where_journal_ui_actually_exists():
+    """Every journal_ui field came back "attempt to index a nil value" at
+    POST_LOAD_JOURNAL_CHAPTER -- the UI does not exist yet at chapter-load time. At
+    render time it demonstrably does, because it is drawing."""
+    assert 'journalField("max_page_count")' in render_probe()
+
+
+def test_an_empty_override_flag_picks_the_useful_mode_not_the_control():
+    """A player creating the flag to stop a crash got `restore` -- the engine's own
+    list, which is the non-crashing CONTROL for an experiment. The crash stopped and
+    the journal silently showed VANILLA pages instead of the mod's."""
+    assert 'local mode = "sameids"' in MOD_HOST
+    assert 'local mode = "restore"' not in MOD_HOST
+
+
+def test_a_failed_field_read_reports_the_message_not_the_path():
+    """The first capture printed sixty characters of which fifty-two were the path to
+    modHost.lua itself, leaving "attempt to"."""
+    at = MOD_HOST.index("local function journalField(field)")
+    body = MOD_HOST[at:MOD_HOST.index(NL + "end", at)]
+    assert '%.lua:%d+:' in body, "Lua's file:line prefix has to be stripped"

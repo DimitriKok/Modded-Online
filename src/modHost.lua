@@ -247,7 +247,13 @@ local function journalField(field)
     if ok then
         return v
     end
-    return "ERR(" .. tostring(v):gsub("%s+", " "):sub(1, 60) .. ")"
+    -- The first capture of this printed "ERR(Mods/Packs/Modded Online DEV/src/
+    -- modHost.lua:245: attempt to" -- sixty characters of which fifty-two were the
+    -- path to this very file. Strip Lua's "file:line: " prefix and keep the part
+    -- that says what actually went wrong.
+    local msg = tostring(v):gsub("%s+", " ")
+    msg = msg:match("^.-%.lua:%d+:%s*(.+)$") or msg
+    return "ERR(" .. msg:sub(1, 90) .. ")"
 end
 
 --- @type integer
@@ -417,7 +423,15 @@ function module.installJournalProbe()
                 -- Exactly one of those two should crash. Both crashing means the
                 -- two interact; neither means the substitution is innocent after all
                 -- and something else about the mod's own return value matters.
-                local mode = "restore"
+                -- DEFAULT IS `sameids`, the mode that both stops the crash AND
+                -- leaves the mod's own content on the page. It used to be `restore`
+                -- (the engine's own list) -- which is the non-crashing CONTROL for an
+                -- experiment, not the thing a player wants: the journal opens showing
+                -- VANILLA pages instead of hdmod's. A capture of exactly that is what
+                -- prompted this: the flag file was created empty, the crash stopped,
+                -- and the content was silently wrong. `restore` is still available by
+                -- writing it in the file.
+                local mode = "sameids"
                 pcall(function()
                     local h = io.open(PackPath("mo_nojournalpages.on"), "r")
                     if h ~= nil then
@@ -462,6 +476,10 @@ function module.installJournalProbe()
         end
     end, ON.POST_LOAD_JOURNAL_CHAPTER)
 
+    -- Collapse state for the page-render probe below: one line per DISTINCT shape,
+    -- with a count for the repeats. Declared here so both branches close over them.
+    local lastRenderShape, renderRepeats = nil, 0
+
     -- ...and bracket the window the process actually dies in.
     --
     -- The chapter callback returns, and the engine is dead before the hosted mod's
@@ -487,7 +505,33 @@ function module.installJournalProbe()
             -- The crash kills the process before hdmod's own RENDER_POST hook ever
             -- runs, so whether ANY page render was attempted is a fact the capture
             -- has to carry out of a dying process -- not one the desync log can hold.
-            journalNote("journal page render (%s)", table.concat(bits, ", "))
+            --
+            -- COLLAPSED, because this fires every frame the journal is open. The
+            -- first capture of a non-crashing journal spent all 400 lines on the
+            -- identical line repeated -- roughly a second of rendering -- which is
+            -- both useless and actively harmful: a crash after that point would have
+            -- had nowhere left to write. What matters is THAT a render happened and
+            -- with what arguments, not that it happened six hundred times.
+            local shape = table.concat(bits, ", ")
+            if shape ~= lastRenderShape then
+                if renderRepeats > 0 then
+                    journalNote("  ... and %d more identical page renders",
+                        renderRepeats)
+                end
+                lastRenderShape = shape
+                renderRepeats = 0
+                journalNote("journal page render (%s)", shape)
+                -- journal_ui is unreadable at POST_LOAD_JOURNAL_CHAPTER (every field
+                -- came back "attempt to index a nil value" -- the UI does not exist
+                -- yet at chapter-load time). Here it demonstrably does, because it is
+                -- drawing. This is the one place max_page_count CAN be read, and it
+                -- is the leading candidate for the size the grown list overflows.
+                journalNote("  journal_ui at render: state=%s page_shown=%s"
+                    .. " max_page_count=%s", journalField("state"),
+                    journalField("page_shown"), journalField("max_page_count"))
+            else
+                renderRepeats = renderRepeats + 1
+            end
             DesyncLog.frameDone("journalPageProbe")
             -- NOTHING returned: an explicit nil is what Playlunky rejects as
             -- "Unexpected return type from function", and `true` would skip the draw

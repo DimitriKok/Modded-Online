@@ -1059,7 +1059,10 @@ def test_the_flag_makes_the_probe_restore_the_engines_page_list(fake_pack, tmp_p
     """hdmod replaces the story chapter's 8 real pages with 20 fabricated ones and
     draws them itself. The engine dies right after accepting that, and it is the last
     thing in the path assumed rather than tested."""
-    (tmp_path / "mo_nojournalpages.on").write_text("", encoding="utf-8")
+    # "restore" spelled out: an EMPTY flag means `sameids` as of dev59, because a
+    # player creating this file to stop the crash was getting the experiment's
+    # non-crashing control and a journal full of vanilla pages.
+    (tmp_path / "mo_nojournalpages.on").write_text("restore", encoding="utf-8")
     rt = runtime(pack_root=str(tmp_path).replace(chr(92), "/"))
     rt.execute("noted = {}")
     rt.execute("DesyncLog = { tracing = function() return true end,"
@@ -1080,7 +1083,7 @@ function set_callback(fn, id) fns[id] = fn return realSet(fn, id) end
 def test_the_restore_is_a_copy_not_the_engines_own_table(fake_pack, tmp_path):
     """Handing the engine back the very object it passed in is a different thing
     from handing it an equal list, and not one worth finding out about the hard way."""
-    (tmp_path / "mo_nojournalpages.on").write_text("", encoding="utf-8")
+    (tmp_path / "mo_nojournalpages.on").write_text("restore", encoding="utf-8")
     rt = runtime(pack_root=str(tmp_path).replace(chr(92), "/"))
     rt.execute("DesyncLog = { tracing = function() return true end, traceNote = function() end,"
                " frameMark = function() end, frameDone = function() end }")
@@ -1137,15 +1140,26 @@ def test_grow_keeps_the_ids_and_moves_the_count(tmp_path, fake_pack):
     assert set(got) <= {2, 3, 4, 5, 6, 7, 8, 9}, got
 
 
-def test_an_empty_flag_still_means_restore(tmp_path, fake_pack):
-    """The control has to stay the default, or a stale flag file silently becomes a
-    different experiment."""
+def test_an_empty_flag_means_sameids_not_the_control(tmp_path, fake_pack):
+    """REVERSED in dev59, on evidence this test predates.
+
+    It used to assert the control stayed the default, so that a stale flag file could
+    not silently become a different experiment. A real capture showed the cost of
+    that: HANDOFF.md tells a player to create this file to stop the crash, they
+    created it empty, and got `restore` -- the engine's own list. The crash stopped
+    and the journal silently showed VANILLA pages instead of hdmod's.
+
+    The stale-file worry is answered without paying that: every chapter logs
+    `mode=...`, so which experiment ran is never a guess. `restore` stays available
+    by writing it in, and the test above does exactly that."""
     rt = _probe_with_flag(tmp_path, "")
     rt.execute("res = fns[139](8, {2, 3, 4, 5})")
-    assert [int(v) for v in rt.eval("res").values()] == [2, 3, 4, 5]
+    assert [int(v) for v in rt.eval("res").values()] == [601, 602, 603, 604]
 
 
-def test_an_unknown_mode_falls_back_to_restore(tmp_path, fake_pack):
+def test_an_unknown_mode_still_falls_back_to_restore(tmp_path, fake_pack):
+    """A TYPO must not silently run an experiment: falling back to the engine's own
+    list is the one mode that changes nothing."""
     rt = _probe_with_flag(tmp_path, "typo-here")
     rt.execute("res = fns[139](8, {2, 3, 4, 5})")
     assert [int(v) for v in rt.eval("res").values()] == [2, 3, 4, 5]
