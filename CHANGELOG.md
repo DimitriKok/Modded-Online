@@ -1,5 +1,34 @@
 # Changelog
 
+## 2.0.0-dev58
+
+The first real capture of the journal crash arrived, and it settles three things and
+leaves one open. See HANDOFF.md #2 for the log and the reading.
+
+Settled: the engine offers **8** pages hosted; **no page render is ever attempted**
+(the page-render probe writes to the same file and never fired, so the process dies
+in the engine's page *setup*, not in a draw — previously an inference, now measured);
+and hdmod's own page clamp cannot engage in the camp because `screen` is CAMP not
+LEVEL and `HD_WORLDSTATE_STATE` is NORMAL not TUTORIAL, which is why it returns all
+20 pages there.
+
+That last point means the camp journal and the tutorial journal are different cases.
+In the tutorial both of those conditions hold — the second one only since dev55 — so
+hdmod clamps its own list and never hands over the long one.
+
+### Two fixes to the probe, from what the capture could not say
+
+* `journal_ui state=? page_shown=?` — a `?` says the read failed and not what it
+  failed on, which is a diagnostic that cannot itself be debugged. It now reports the
+  error, so "no such field on this build" and "journal_ui is nil at this point in the
+  load" stop looking identical.
+* **`max_page_count` is now read.** It is the leading hypothesis for the mechanism
+  and HANDOFF.md has flagged it unread for two sessions: the engine offers 8, hdmod
+  returns 20, and returning 8 with hdmod's own ids does not crash — so the growth is
+  what kills it, and something downstream is sized for the incoming count. If that
+  field reads 8, the fix is to raise it before returning a longer list rather than to
+  truncate the journal.
+
 ## 2.0.0-dev57
 
 Two captures of the journal crash came back with the same file in them, from a
