@@ -1,5 +1,39 @@
 # Changelog
 
+## 2.0.0-dev59
+
+The tutorial door is confirmed working in game, and the journal now opens hosted
+rather than killing the process. Four fixes, every one of them forced by a real
+capture rather than guessed at.
+
+### An empty override flag did the wrong useful thing
+
+A player who creates `mo_nojournalpages.on` to stop the crash got `mode=restore` —
+the engine's own page list, which is the non-crashing **control** for an experiment.
+The crash stops, and the journal silently shows *vanilla* pages instead of hdmod's.
+Empty now means `sameids`: the engine's count with the mod's own ids, which stops the
+crash *and* keeps the mod's content. `restore` is still there by writing it in.
+
+### The page-render probe burned the whole capture budget
+
+It fires every frame the journal is open, so the first non-crashing capture spent all
+400 lines on one identical line repeated — about a second of rendering. Useless by
+itself, and actively harmful: a crash after that point would have had nowhere left to
+write. Repeats are collapsed to one line plus a count.
+
+### journal_ui cannot be read when the chapter loads
+
+Every field came back `attempt to index a nil value` — the UI does not exist yet at
+`POST_LOAD_JOURNAL_CHAPTER`. `max_page_count`, the leading candidate for the size a
+grown list overflows, is now read at RENDER time, which is the one point it
+demonstrably exists because it is drawing.
+
+### An error message that was 87% path
+
+`ERR(Mods/Packs/Modded Online DEV/src/modHost.lua:245: attempt to` — sixty
+characters, fifty-two of them the path to the file doing the reporting. Lua's
+`file:line:` prefix is stripped and the message kept.
+
 ## 2.0.0-dev58
 
 The first real capture of the journal crash arrived, and it settles three things and
