@@ -216,6 +216,43 @@ end
 --- determinism.lua is for, and this deliberately is NOT that: it is a probe with a
 --- flag on it, reading values and writing a log line. Every read is pcall'd, because
 --- a diagnostic that breaks the thing it is diagnosing is worse than none.
+--- Write one line where a NATIVE CRASH OUTSIDE A RUN cannot take it with us.
+---
+--- The desync log is opened by `DesyncLog.init`, which runs from
+--- `InputSync.beginSession` -- i.e. only when a networked RUN starts. This crash
+--- happens in the lobby camp, before any run: `DesyncLog.line` drops everything
+--- while `logPath` is nil, and `earlyEvent` buffers for "the next run's header"
+--- that never comes. So the one sink the measurement needs is the one sink it
+--- did not have.
+---
+--- Opened and CLOSED per line, so it is flushed to disk before the process dies --
+--- an unflushed buffer is exactly how the last capture came back empty. Journal
+--- CHAPTER loads are rare, so a file handle per line costs nothing.
+---
+--- Also `print`ed, which Playlunky captures into spelunky.log: two independent
+--- sinks, because the whole point is surviving a process that is about to die.
+--- @type integer
+local journalNotesWritten = 0
+local JOURNAL_NOTES_MAX = 400
+
+--- @param fmt string
+local function journalNote(fmt, ...)
+    if journalNotesWritten >= JOURNAL_NOTES_MAX then
+        return -- bounded like traceNote's own cap: a long session must not fill a disk
+    end
+    journalNotesWritten = journalNotesWritten + 1
+    local ok, line = pcall(string.format, fmt, ...)
+    line = ok and line or tostring(fmt)
+    pcall(function()
+        local h = io.open(PackPath("mo_journal.txt"), "a")
+        if h ~= nil then
+            h:write(os.date("[%H:%M:%S] ") .. line .. "\n")
+            h:close()
+        end
+    end)
+    pcall(print, "[ModdedOnline] " .. line)
+end
+
 --- @param name string # a flag file in the pack folder
 --- @return boolean
 local function flagPresent(name)
@@ -259,6 +296,11 @@ function module.installJournalProbe()
         or rawget(_G, "ON") == nil or ON.POST_LOAD_JOURNAL_CHAPTER == nil then
         return false
     end
+    -- First line in the file, so "the probe never armed" and "the probe armed and
+    -- the journal was never opened" are distinguishable. Without it an empty
+    -- mo_journal.txt means both.
+    journalNote("journal probe armed: trace=%s override=%s probe=%s",
+        tostring(tracing), tostring(override), tostring(probe))
     set_callback(function(chapter, pages)
         -- `pages` is what the ENGINE had before the mod replaced it. Never looked at
         -- until now, and it is the one input to this whole sequence that comes from
@@ -322,6 +364,7 @@ function module.installJournalProbe()
                 #bits > 0 and table.concat(bits, " ; ") or "no hosted env")
             pcall(DesyncLog.traceNote, "%s", line)
             pcall(DesyncLog.earlyEvent, "%s", line)
+            journalNote("%s", line)
         end)
         -- Normally returns NOTHING: a probe must not become a second opinion on the
         -- page list. Under the flag it deliberately does become one -- see
@@ -393,6 +436,7 @@ function module.installJournalProbe()
                     mode, #copy, table.concat(head, ", "), #copy > 6 and ", ..." or "")
                 pcall(DesyncLog.traceNote, "%s", said)
                 pcall(DesyncLog.earlyEvent, "%s", said)
+                journalNote("%s", said)
                 return copy
             end
         end
@@ -420,6 +464,10 @@ function module.installJournalProbe()
             end
             pcall(DesyncLog.traceNote, "journal page render (%s)",
                 table.concat(bits, ", "))
+            -- The crash kills the process before hdmod's own RENDER_POST hook ever
+            -- runs, so whether ANY page render was attempted is a fact the capture
+            -- has to carry out of a dying process -- not one the desync log can hold.
+            journalNote("journal page render (%s)", table.concat(bits, ", "))
             DesyncLog.frameDone("journalPageProbe")
             -- NOTHING returned: an explicit nil is what Playlunky rejects as
             -- "Unexpected return type from function", and `true` would skip the draw

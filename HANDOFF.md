@@ -143,6 +143,25 @@ installed nothing at all, and the crash was unchanged. It needed `mo_trace.on`
 alongside it, which is undocumented here and writes a file every frame. Any earlier
 report of "the workaround does not help" should be retested.
 
+### Why two captures of this crash came back empty
+
+**The desync log cannot contain this crash.** `DesyncLog.init` is called from
+`InputSync.beginSession`, so the log is opened and rotated only when a networked
+**run** starts. Opening the journal in the lobby camp happens before any run:
+`DesyncLog.line` drops everything while `logPath` is nil, and `earlyEvent` buffers
+for a run header that never arrives. Both sinks are empty by construction.
+
+Worse, the pack folder still held a `desync_log.txt` — **the repo shipped one**.
+`desync_log.txt` and `desync_log.prev.txt` were listed in `.gitignore` *and tracked
+anyway*, which `.gitignore` does not undo, so every clone delivered a stale capture
+from somebody else's session (`Modded Online 1.0`, crossoverlunky, server 1.0.10)
+that reads exactly like a fresh one. Two rounds of debugging went into that file
+before anyone checked its header. They are untracked as of dev57; delete any copy
+still sitting in your pack folder.
+
+So for a camp journal crash the file to read is **`mo_journal.txt`** (below), or
+`spelunky.log`. Not the desync log.
+
 ### Taking the missing measurement (dev56)
 
 The same gate is why nobody has answered the question above. It now has its own flag:
@@ -152,8 +171,10 @@ The same gate is why nobody has answered the question above. It now has its own 
   per frame).
 * Delete `mo_nojournalpages.on` so the probe stays log-only.
 * Put hdmod **native** (see "Switching configurations") and open the journal.
-* Read the `engine pages in:` line — it is now in the **desync log**, not only in
-  `crash_notes.txt`.
+* Read the `engine pages in:` line in **`mo_journal.txt`** in the pack folder. That
+  file is opened and closed per line, so it is flushed to disk before the process
+  dies, and it is written whether or not a run is in progress. The same lines go to
+  `spelunky.log` via `print`, as a second independent sink.
 
 Then run the same thing hosted and compare the two counts. That single comparison
 decides which of the two chases above is the real one.
@@ -263,7 +284,7 @@ starting.
 | `mo_trace.on` | per-frame crash trace → `crash_frame.txt` (one line: what was running when the process died) and `crash_notes.txt` (appending, bounded to 400 lines). Writes every frame — expect stutter. |
 | `mo_nodeterminism.on` | hosted mods run on raw `pairs` / `math.random` / `get_frame`. **Networked runs desync.** |
 | `mo_nowrap.on` | hosted callbacks go to the engine unwrapped. Loses their names in the trace. |
-| `mo_journalprobe.on` | logs what the engine offered the journal-chapter callback and what the mod returned, to the desync log. Overrides nothing; no per-frame cost. |
+| `mo_journalprobe.on` | logs what the engine offered the journal-chapter callback and what the mod returned, to `mo_journal.txt` (flushed per line, so it survives a native crash) and `spelunky.log`. Overrides nothing; no per-frame cost. |
 | `mo_nojournalpages.on` | probe overrides the journal page list. Contents pick the mode: empty/anything = the engine's own list, `sameids` = engine's count with ids 601+, `grow` = 20 entries with the engine's own ids. |
 
 Each announces itself in `spelunky.log` when active, and `determinism=` appears in the
