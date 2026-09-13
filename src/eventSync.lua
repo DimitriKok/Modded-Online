@@ -3768,9 +3768,14 @@ local function pollPlayFlow()
     -- can still be animating over the menu: starting the play flow underneath
     -- it wedged the journal in an endless page-turn loop on the character
     -- select. Wait for the journal to close, then let the menu settle a beat.
+    -- JournalUI(), not get_game_manager(): that API is absent on some Playlunky
+    -- builds, and the bare pcall here read the resulting "attempt to call a nil
+    -- value" as "no journal is open" -- so this wait, and the wedged page-turn on
+    -- CHOOSE ADVENTURER it exists to prevent, never happened at all.
     local journalOpen = false
     pcall(function()
-        journalOpen = get_game_manager().journal_ui.state ~= 0
+        local j = JournalUI()
+        journalOpen = j ~= nil and j.state ~= 0
     end)
     if journalOpen then
         playFlowReadyMs = nil
@@ -3827,7 +3832,7 @@ local function pollCloseStrayJournal()
         return
     end
     pcall(function()
-        local j = get_game_manager().journal_ui
+        local j = JournalUI()
         if j == nil then
             return
         end
