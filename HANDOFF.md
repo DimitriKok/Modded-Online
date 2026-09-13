@@ -1,12 +1,36 @@
 # Handoff — where this branch stands
 
-Written at the end of a long debugging session so the next person (or the next
-Claude) does not repeat any of it. Read `LOADER.md` first for what the loader build
-is; this file is only about the three things worked on here.
+Read `LOADER.md` first for what the loader build is. This file covers the three bugs
+worked on in this branch, plus the state a new session needs before touching any of
+them.
 
-**Short version:** two of the three are fixed and shipped (1 and 3). The journal
-crash (2) is not, and is diagnosed a long way down — most of the value there is the
-*elimination*, not the code.
+## Start here
+
+**Build: `2.0.0-dev55` → `dev60`. The server must be redeployed at `1.0.11`.**
+Section 3's fix is half a server fix and does nothing without it; a client on an
+older server now says so in a toast and in the log. Check with
+`py server/server_version.py` (exit 0 = the server matches this pack).
+
+| # | Bug | State |
+|---|---|---|
+| 1 | A peer kept the room host's progression after leaving | **FIXED**, shipped (`ef0b102`, PR #1) |
+| 2 | hdmod's journal crashes the game when hosted | **NOT FIXED.** Workaround works — see section 2 |
+| 3 | The tutorial door started an ordinary run | **FIXED**, confirmed in game |
+
+**Git state:** commits `9ef9f8a`, `c397867`, `a78d624`, `1bcf49d`, `fda94cf`,
+`1d08557` sit on `fix/peer-save-restore` and were delivered to the maintainer as
+patches, because the session that wrote them had no push access to
+`DimitriKok/Modded-Online` (403 on every path — it is not that account's repo).
+Confirm with `git log --oneline origin/fix/peer-save-restore..HEAD` whether they have
+landed before assuming anything about what is on the remote.
+
+**Before trusting any log in the pack folder**, read "why two captures came back
+empty" in section 2. A stale `desync_log.txt` used to ship *inside the repo* and cost
+two rounds of debugging. Delete any copy still sitting in your pack folder.
+
+**Short version:** 1 and 3 are done. 2 is not, but it is now playable, fully measured
+on the hosted side, and blocked on exactly one measurement that takes about five
+minutes — see "THE ONE MEASUREMENT STILL MISSING".
 
 ---
 
@@ -46,96 +70,122 @@ Also fixed alongside it:
 
 ---
 
-## 2. hdmod's journal crashes the game when hosted — NOT FIXED
+## 2. hdmod's journal crashes the game when hosted — NOT FIXED (workaround works)
 
 ### Symptom
 
-Hosted under Modded Online, opening the journal in the camp crashes the game
-natively (no Lua error, nothing in `spelunky.log`). Entering the tutorial crashes
-too — same thing, because hdmod's tutorial auto-opens the journal on fade-in
-(`lib/tutorial/logic.lua:70-71` → `schedule_story_on_fade_in`).
+Hosted under Modded Online, opening the journal **in the camp** crashes the game
+natively — no Lua error, nothing in `spelunky.log`. hdmod loaded natively by
+Playlunky does **not** crash.
 
-hdmod loaded natively by Playlunky does **not** crash.
+The tutorial used to crash too, because hdmod's tutorial auto-opens the journal on
+fade-in (`lib/tutorial/logic.lua:70-71` → `schedule_story_on_fade_in`). See "the two
+cases are different" below — that one may now be fine on its own.
 
-### Where it dies
+### Play around it today
 
-`crash_frame.txt` (needs `mo_trace.on`):
+Create `mo_nojournalpages.on` in the pack folder. **Empty is correct** — that means
+`sameids` as of dev59, which stops the crash and keeps hdmod's own page content.
 
-```
-OUT mod hdmod_journal.lua:965 | sim 0:0
-```
+Caveat, and it is why this is a workaround and not a fix: `sameids` clamps to the
+engine's **8** pages and hdmod has **20** story pages, so pages 9–20 are not shown.
 
-`OUT` means that callback *returned*; the engine died immediately after. Line 965 is
-hdmod's `ON.POST_LOAD_JOURNAL_CHAPTER`, which hands the engine a rebuilt page list.
-`crash_notes.txt` captured both sides of it:
+(Before dev56 this flag installed *nothing* unless `mo_trace.on` was also set, and
+before dev59 an empty file meant `restore` — the engine's own vanilla pages. Any
+older report of "the workaround does not help" or "the journal looks wrong" is
+explained by one of those two and should be retested.)
 
-```
-journal chapter 2 | engine pages in: #0 {  }
-journal chapter 8 | engine pages in: #8 { 2, 3, 4, 5, 6, 7, 8, 9 }
-hdmod_journal.lua:965(8) -> table #20 { 601, 602, 603, 604, 605, 606, 607, 608, ... }
-```
+### What is measured, and how
 
-Chapter 8 is `JOURNALUI_PAGE_SHOWN.STORY`. The engine offers **8** pages and hdmod
-returns **20** with fabricated ids in the 600s (its own comment calls this
-"bastardizing the custom journal code"). No page render is ever attempted — hdmod's
-own `ON.RENDER_POST_JOURNAL_PAGE` never runs — so the engine dies in page **setup**.
+Everything below is from `mo_journal.txt` (needs `mo_journalprobe.on`, or the
+override flag). That file is written per line and closed each time, so it survives
+the native crash; the desync log cannot hold this crash at all (see "why captures
+came back empty").
 
-### What narrows it
-
-Using `mo_nojournalpages.on` (see below) to override what the engine receives:
-
-| Returned to the engine | Result |
+| Fact | Evidence |
 |---|---|
-| the engine's own 8 pages, unchanged | no crash |
-| 8 pages, ids 601–608 (`sameids`) | **no crash**, and hdmod drew its own textures correctly |
-| hdmod's real 20 pages, ids 601–620 | crash |
+| The engine offers **8** pages for chapter 8 (`STORY`), ids `{2..9}` | `engine pages in: #8` — hosted, twice |
+| hdmod returns **20**, ids 601–620 | `hdmod_journal.lua:965(8) -> table #20` in `crash_notes.txt` |
+| The crash is in engine page **setup**, not a draw | the page-render probe writes to the same file and never fires on a crashing run; it fires 400+ times when the list is not grown |
+| **Growth is the trigger, not the id range** | returning 8 pages with ids 601–608 does not crash and draws hdmod's textures correctly; returning 20 does crash |
+| hdmod's own clamp cannot engage in the camp | `screen=11` is CAMP not LEVEL (12), `worldstate=1` is NORMAL not TUTORIAL (2) — two of its four conditions fail, so it returns all 20 |
 
-So the **id range is innocent** and the **count is the trigger**: growing the list
-beyond what the engine passed in.
+`mo_nojournalpages.on` picks what the engine receives, one question per launch:
+`restore` = the engine's own list (the non-crashing control), `sameids` = the
+engine's count with ids 601+, `grow` = 20 entries with the engine's own ids.
 
-### What the first real capture proved (dev57, `mo_journal.txt`)
+### The two cases are different — test the tutorial separately
 
-```
-[21:58:52] journal probe armed: trace=false override=false probe=true
-[21:59:11] journal chapter 2 | engine pages in: #0 {  } | screen=11 (LEVEL=12 CAMP=11)
-           level=1 theme=17 loading=0 | fyi.hdmod: prologue=true worldstate=1 tutorial=2
-[21:59:11] journal chapter 8 | engine pages in: #8 { 2, 3, 4, 5, 6, 7, 8, 9 } | screen=11 ...
-```
+hdmod's clamp needs `chapter == STORY`, `is_prologue_active()`, `screen == LEVEL`
+**and** `HD_WORLDSTATE_STATE == TUTORIAL`. In the camp the last two fail. In the
+tutorial both hold — and the second one only holds at all because of the dev55 fix in
+section 3. A capture on the tutorial level confirms `screen=12 worldstate=2`.
 
-Hosted, in the camp, opening the journal. Three things are now settled:
+So hdmod may well clamp its own list in the tutorial and never hand over the long
+one. **Nobody has yet opened the journal in the tutorial with the override flag
+removed.** If that does not crash, the bug is camp-only and much less urgent.
 
-* **The engine offers 8 pages hosted.** Confirmed independently of the tracer.
-* **No page render is attempted.** The file ends at chapter 8 — the page-render
-  probe writes to this same file and never fired. The process dies in the engine's
-  page **setup**, before the first draw. Previously an inference; now measured.
-* **hdmod's clamp cannot engage here, and the log says exactly why.**
-  `screen=11` is CAMP, not LEVEL (12), and `worldstate=1` is NORMAL, not TUTORIAL
-  (2). Two of its four conditions fail, so hdmod returns all 20 pages. `prologue=true`
-  and `chapter 8` are the two that hold.
+### THE ONE MEASUREMENT STILL MISSING
 
-This also means **the camp journal and the tutorial journal are different cases**.
-In the tutorial, `screen` IS LEVEL and — since dev55 — `HD_WORLDSTATE_STATE` IS
-TUTORIAL, so hdmod's own clamp engages and it never returns the long list. Worth
-testing directly: the tutorial journal may already be fine while the camp one is not.
+**Does the engine offer 8 pages when hdmod is NATIVE?** Every capture so far is
+hosted. This decides between two completely different fixes:
 
-### The one measurement still missing
-
-**Does the engine offer 8 pages standalone too?** Still nobody has looked — the
-capture above is HOSTED. It matters enormously:
-
-* If standalone also offers 8, then hdmod grows 8 → 20 there as well, and growth is
-  fatal *only when hosted* — chase how Overlunky sizes the page vector for the
+* **Native also offers 8** → hdmod grows 8 → 20 there too *without dying*, so growth
+  is fatal only when hosted. Chase how Overlunky sizes the page vector for a
   returning script.
-* If standalone offers 20, there is no growth natively and the real bug is that
-  **hosting shrinks the engine's own list** — a completely different chase, upstream
-  of hdmod entirely.
+* **Native offers 20** → there is no growth natively, and **hosting shrinks the
+  engine's own list**. A different bug entirely, upstream of hdmod.
 
-The probe lives in *our* script, so it logs even when hdmod is native. Delete
-`mo_nojournalpages.on` first (so the probe is log-only), put hdmod native (see
-"Switching configurations"), open the journal, and read the `engine pages in:` line.
+How to take it (the probe is in *our* script, so it logs with hdmod native):
 
-`JournalUI` has a writable `max_page_count` field — worth investigating, though
-hdmod never touches it.
+1. Delete `mo_nojournalpages.on` so the probe is log-only; create
+   `mo_journalprobe.on`.
+2. Put hdmod native — see "Switching configurations". Getting this wrong mounts the
+   assets twice and crashes on boot.
+3. Open the journal, read `engine pages in:` in `mo_journal.txt`.
+
+### `get_game_manager()` IS NOT ON THIS BUILD
+
+Every JournalUI field read back `attempt to call a nil value (global
+'get_game_manager')`. Not "journal_ui is nil" — **the function is not a global at
+all**. Two unrelated features called it inside a bare `pcall` and read the failure as
+"no journal is open":
+
+* `pollPlayFlow` waits for the death-recap book to finish animating before launching
+  character select. It never waited — which is the wedged endless page-turn on
+  CHOOSE ADVENTURER that the wait was written to stop.
+* `pollCloseStrayJournal` force-closes a journal drawn over the character select. It
+  never closed one.
+
+Neither has ever run on this build. `GameManager()` / `JournalUI()` in `src/util.lua`
+now try `get_game_manager()` then the `game_manager` global, latch the miss, and
+report which worked via `GameManagerVia()`.
+
+**This parks the `max_page_count` hypothesis.** That field is the leading candidate
+for the size a grown list overflows — `JournalUI` exposes it writable and hdmod never
+touches it — but it cannot be read until one of those accessors resolves. The next
+capture's `n/a(GameManager via ...)` says whether either does. If one does, read
+`max_page_count`: if it is 8, the fix is to raise it before returning a longer list
+rather than to truncate the journal.
+
+### Why two captures of this crash came back empty
+
+Worth knowing before trusting any log in the pack folder.
+
+**The desync log cannot contain this crash.** `DesyncLog.init` is called from
+`InputSync.beginSession`, so the log opens only when a networked **run** starts.
+Opening the journal in the lobby camp is before any run: `DesyncLog.line` drops
+everything while `logPath` is nil, and `earlyEvent` buffers for a run header that
+never arrives.
+
+Worse, the repo *shipped* a `desync_log.txt` — it was in `.gitignore` and tracked
+anyway, which `.gitignore` does not undo. Every clone delivered a stale capture from
+someone else's session (`Modded Online 1.0`, crossoverlunky, server 1.0.10, clean
+`run end`) that reads exactly like a fresh one. Two rounds of debugging went into
+that file before anyone checked its header. Untracked as of dev57 — **delete any copy
+still in your pack folder.**
+
+For a camp journal crash, read `mo_journal.txt` or `spelunky.log`. Not the desync log.
 
 ### Ruled out — do not re-test these
 
@@ -151,136 +201,18 @@ hdmod never touches it.
 | `save.dat` / `savegame.sav` | crashes with `save.dat` absent (matching standalone); `savegame.sav` byte-identical |
 | Double-loading | only `fyi.modded-online-loader` registers as a script mod; hdmod stays `--` disabled |
 | Ambiguous module resolution | 0 ambiguous `require`s across the pack |
-| hdmod's page-count clamp | both `state.screen == SCREEN.LEVEL` and `HD_WORLDSTATE_STATE == TUTORIAL` fail in the camp — but they fail standalone too, so 20 pages is the correct result there |
-| Our `ON.RENDER_PRE_JOURNAL_PAGE` hook | removed it (now session-scoped, see below) — still crashed |
+| The page id range | `sameids` (601–608) does not crash and renders correctly |
+| Our `ON.RENDER_PRE_JOURNAL_PAGE` hook | removed it (now session-scoped) — still crashed |
 
-### The journal now OPENS hosted (dev59) — but read this before celebrating
+## 3. The tutorial door started an ordinary run — FIXED, CONFIRMED IN GAME
 
-A capture with `mo_nojournalpages.on` present shows the journal opening with no
-crash, 400+ page renders, and:
+dev55. **This is half a server fix.** A client against a server older than 1.0.11
+behaves exactly as before, and now says so in a toast and in the log.
 
-```
-journal chapter 8: OVERRIDING the page list, mode=restore -> #8 { 2, 3, 4, 5, 6, 7, ... }
-```
-
-`mode=restore` — the flag file was created **empty**, and empty used to mean "the
-engine's own list", which is the non-crashing **control for an experiment**, not the
-thing a player wants. The crash stops and the journal silently shows *vanilla* pages
-instead of hdmod's. As of dev59 an empty file means `sameids`, which stops the crash
-*and* keeps the mod's own content; `restore` is still available by writing it in.
-
-Two further things that capture settled:
-
-* **Page renders do happen once the list is not grown** (400+ of them), which
-  confirms from the other side that the crash is in page SETUP and only when the
-  list grows.
-* **`journal_ui` is unreadable at `POST_LOAD_JOURNAL_CHAPTER`.** Every field came
-  back `attempt to index a nil value` — the UI does not exist yet at chapter-load
-  time. `max_page_count` is therefore read at RENDER time now, which is the one
-  place it demonstrably exists.
-
-### Confirmed in game (dev59)
-
-A capture with `mo_nojournalpages.on` empty, hosted:
-
-```
-journal chapter 8: OVERRIDING the page list, mode=sameids -> #8 { 601, 602, 603, ... }
-journal page render (<userdata>, 7, <userdata>)          <- ONE line, collapsed
-...
-journal chapter 8 | ... screen=12 (LEVEL=12 CAMP=11) level=1 theme=1 loading=3
-                   | fyi.hdmod: prologue=true worldstate=2 tutorial=2
-```
-
-* **The workaround now does the right thing.** `mode=sameids`, the engine's count
-  with hdmod's own ids.
-* **dev55 is confirmed at the point that matters.** That last line is the TUTORIAL:
-  `screen=12` is LEVEL and `worldstate=2` is TUTORIAL. The adapter is setting the
-  mod's state for the actual tutorial level, not just at run start.
-* **`sameids` truncates.** It clamps to the engine's 8, and hdmod has 20 story
-  pages, so pages 9-20 are not shown. Still a workaround, not a fix.
-
-### `get_game_manager()` IS NOT ON THIS BUILD
-
-The same capture read back, for every JournalUI field:
-
-```
-attempt to call a nil value (global 'get_game_manager')
-```
-
-Not "journal_ui is nil" — **the function is not a global at all**. Two real features
-called it inside a bare `pcall` and read the failure as "no journal is open":
-
-* `pollPlayFlow` waits for the death-recap book to finish animating before launching
-  character select. It never waited — which is the wedged endless page-turn on
-  CHOOSE ADVENTURER that the wait exists to stop.
-* `pollCloseStrayJournal` force-closes a journal drawn over the character select. It
-  never closed one.
-
-Both had been inert for the life of the build: a `pcall` around a missing global is
-indistinguishable from a legitimate "nothing here". `GameManager()` / `JournalUI()`
-in `src/util.lua` now try `get_game_manager()` then the `game_manager` global, latch
-the miss, and report which worked via `GameManagerVia()`.
-
-**This also parks the `max_page_count` hypothesis.** It cannot be read on this build
-until one of those accessors resolves. The next capture's
-`n/a(GameManager via ...)` says whether either does.
-
-### Current workaround
-
-`mo_nojournalpages.on` containing `sameids` makes the journal open without crashing
-and shows the right content. It clamps hdmod's list to the engine's count, so a
-longer journal later in the game would be truncated. It is a **diagnostic, not a
-fix**.
-
-**It did not work on its own until dev56.** The override lives inside the callback
-`installJournalProbe` registers, and that registration was gated on
-`DesyncLog.tracing()` alone — so creating the one flag a player is told to create
-installed nothing at all, and the crash was unchanged. It needed `mo_trace.on`
-alongside it, which is undocumented here and writes a file every frame. Any earlier
-report of "the workaround does not help" should be retested.
-
-### Why two captures of this crash came back empty
-
-**The desync log cannot contain this crash.** `DesyncLog.init` is called from
-`InputSync.beginSession`, so the log is opened and rotated only when a networked
-**run** starts. Opening the journal in the lobby camp happens before any run:
-`DesyncLog.line` drops everything while `logPath` is nil, and `earlyEvent` buffers
-for a run header that never arrives. Both sinks are empty by construction.
-
-Worse, the pack folder still held a `desync_log.txt` — **the repo shipped one**.
-`desync_log.txt` and `desync_log.prev.txt` were listed in `.gitignore` *and tracked
-anyway*, which `.gitignore` does not undo, so every clone delivered a stale capture
-from somebody else's session (`Modded Online 1.0`, crossoverlunky, server 1.0.10)
-that reads exactly like a fresh one. Two rounds of debugging went into that file
-before anyone checked its header. They are untracked as of dev57; delete any copy
-still sitting in your pack folder.
-
-So for a camp journal crash the file to read is **`mo_journal.txt`** (below), or
-`spelunky.log`. Not the desync log.
-
-### Taking the missing measurement (dev56)
-
-The same gate is why nobody has answered the question above. It now has its own flag:
-
-* Create `mo_journalprobe.on` in the pack folder. Logging only — it overrides
-  nothing and costs nothing (the callback runs when a journal *chapter* loads, not
-  per frame).
-* Delete `mo_nojournalpages.on` so the probe stays log-only.
-* Put hdmod **native** (see "Switching configurations") and open the journal.
-* Read the `engine pages in:` line in **`mo_journal.txt`** in the pack folder. That
-  file is opened and closed per line, so it is flushed to disk before the process
-  dies, and it is written whether or not a run is in progress. The same lines go to
-  `spelunky.log` via `print`, as a second independent sink.
-
-Then run the same thing hosted and compare the two counts. That single comparison
-decides which of the two chases above is the real one.
-
----
-
-## 3. The tutorial door started an ordinary run — FIXED (needs server 1.0.11)
-
-dev55. **This is half a server fix.** A dev55 client against a server older than
-1.0.11 behaves exactly as before, and now says so in a toast and in the log.
+Confirmed twice: the maintainer reports the door working, and a `mo_journal.txt`
+capture taken on the tutorial level itself reads `screen=12` (LEVEL) with
+`worldstate=2` (TUTORIAL) — so the adapter is holding the mod's state where
+generation and `hdmod`'s own logic read it, not merely setting it at run start.
 
 ### The bug
 
@@ -369,22 +301,30 @@ therefore does not get `HD_WORLDSTATE_STATE` set, and their floor generates as a
 ordinary level. Untested and out of scope here — it needs the destination carried on
 the join path and the hits re-established on the joiner.
 
-## Diagnostic tooling added this session
+## Diagnostic tooling (flags and the files they write)
 
 All flag files live in the pack folder. They are files, not settings, for the reason
 `mo_host.on` is: a mod that kills the game must be recoverable without the game
-starting.
+starting. Create them empty unless the table says the contents mean something.
 
 | Flag | Effect |
 |---|---|
 | `mo_trace.on` | per-frame crash trace → `crash_frame.txt` (one line: what was running when the process died) and `crash_notes.txt` (appending, bounded to 400 lines). Writes every frame — expect stutter. |
 | `mo_nodeterminism.on` | hosted mods run on raw `pairs` / `math.random` / `get_frame`. **Networked runs desync.** |
 | `mo_nowrap.on` | hosted callbacks go to the engine unwrapped. Loses their names in the trace. |
-| `mo_journalprobe.on` | logs what the engine offered the journal-chapter callback and what the mod returned, to `mo_journal.txt` (flushed per line, so it survives a native crash) and `spelunky.log`. Overrides nothing; no per-frame cost. |
+| `mo_journalprobe.on` | logs what the engine offered the journal-chapter callback and what the mod returned, to `mo_journal.txt` and `spelunky.log`. Overrides nothing; no per-frame cost. **This is the one to use for section 2's missing measurement.** |
 | `mo_nojournalpages.on` | probe overrides the journal page list. Contents pick the mode: **empty = `sameids`** (engine's count, ids 601+ — stops the crash AND keeps the mod's content), `restore` = the engine's own list unchanged (the non-crashing control), `grow` = 20 entries with the engine's own ids. |
 
 Each announces itself in `spelunky.log` when active, and `determinism=` appears in the
 desync-log header.
+
+### Files they write
+
+| File | Written when | Survives a native crash |
+|---|---|---|
+| `mo_journal.txt` | either journal flag is set | **yes** — opened and closed per line, and mirrored to `spelunky.log`. Bounded at 400 lines; repeated page-render lines collapse to one plus a count, so the budget is not eaten by a second of rendering. |
+| `crash_frame.txt` / `crash_notes.txt` | `mo_trace.on` | yes, but costs a file write every frame |
+| `desync_log.txt` / `.prev.txt` | **only once a networked RUN starts** | n/a — cannot hold a camp or menu crash at all. See section 2. |
 
 Genuine fixes to the tooling itself, worth keeping:
 
@@ -429,7 +369,7 @@ quit** — that runs packSetup's teardown and unlinks the assets, which must hap
 py -m pytest tests/ -q
 ```
 
-510 passing. **16 pre-existing failures** in `tests/test_seeded_run.py` and
+535 passing. **16 pre-existing failures** in `tests/test_seeded_run.py` and
 `tests/test_world_mailbox.py` — they cover the world mailbox deleted in dev44 and are
 unrelated to anything here.
 
@@ -446,9 +386,37 @@ and every client-side test passed throughout.
 hard limit of 200 locals**, so anything added there must hang off `module` instead.
 Run it after every Lua edit.
 
+### Two habits this branch paid for
+
+**A green test suite proves nothing about the wire.** The tutorial-door fix had ten
+passing unit tests while being completely broken in game, because every one of them
+called the adapter directly with a destination it built itself — and the destination
+never arrived. `tests/test_tutorial_door.py` now imports `server.py` and asserts the
+round trip. When a fix spans the client and the server, test the seam.
+
+**A `pcall` around a missing global is indistinguishable from a legitimate "nothing
+here".** That is how `get_game_manager()` being absent on this build hid two dead
+features for the life of the build, and how a diagnostic that printed `?` instead of
+the error cost a round. If a read can fail, log *why* it failed.
+
 ## Not committed on purpose
 
 The working tree also holds asset links and per-machine artifacts — `Data/`, `res/`,
 `soundbank/`, `mod_info.json`, `strings00_mod.str`, `save.dat`, `savegame.sav`, the
-`mo_*.on` flags, `crash_*.txt` and the desync logs. None of them belong in git; see
-`.gitignore`.
+`mo_*.on` flags, `mo_journal.txt`, `crash_*.txt` and the desync logs. None of them
+belong in git; see `.gitignore`.
+
+`.gitignore` listing a file is **not** the same as the file being untracked —
+`desync_log.txt` and `desync_log.prev.txt` were in it and committed anyway for the
+life of the repo, and shipped a misleading stale capture to every clone. If you add
+an artifact to `.gitignore`, check `git ls-files` as well.
+
+## If you are a new session picking this up
+
+1. Read "Start here" at the top, then section 2.
+2. Run both test suites (above) so you know what "unchanged" looks like before you
+   touch anything.
+3. The single highest-value thing available is **the native page-count measurement**
+   in section 2. It is about five minutes of game time, it needs no code, and it
+   decides which of two unrelated fixes the journal crash actually needs. Everything
+   else in section 2 is already measured — do not re-derive it.
