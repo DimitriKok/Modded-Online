@@ -1,5 +1,38 @@
 # Changelog
 
+## 2.0.0-dev57
+
+Two captures of the journal crash came back with the same file in them, from a
+session in May, and neither of us noticed for two rounds. Both reasons are fixed.
+
+### The repo was shipping a stale desync log
+
+`desync_log.txt` and `desync_log.prev.txt` are listed in `.gitignore` — and were
+committed anyway, which `.gitignore` does not undo. So every clone put a capture from
+somebody else's session into the pack folder, where it reads exactly like a real one:
+right filename, right format, plausible contents. Its header says `Modded Online 1.0`,
+hosts crossoverlunky rather than hdmod, talks to server 1.0.10, and ends with a clean
+`run end`. Now untracked.
+
+### The desync log could not have held this crash anyway
+
+`DesyncLog.init` runs from `InputSync.beginSession` — the log is opened and rotated
+only when a networked **run** starts. Opening the journal in the lobby camp happens
+before any run, so `DesyncLog.line` drops every line (`logPath` is nil) and
+`earlyEvent` buffers for a run header that never comes. The dev56 change routed the
+journal measurement to `earlyEvent`, which for this crash meant writing it into a
+buffer that dies with the process.
+
+`mo_journal.txt` is the sink that survives: opened and closed per line so it is
+flushed before the process dies, written whether or not a run is in progress, bounded
+at 400 lines, and mirrored to `spelunky.log` via `print` as a second independent sink.
+Journal *chapter* loads are rare, so a file handle per line costs nothing.
+
+It also records that the probe armed at all, so an empty file no longer means both
+"never armed" and "armed, journal never opened"; and the page-render probe writes
+there too, so whether the engine got as far as drawing a page — the fact that
+separates page SETUP from the first DRAW — leaves the dying process.
+
 ## 2.0.0-dev56
 
 The journal crash is still not fixed. What is fixed is that **the workaround for it
