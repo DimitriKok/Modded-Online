@@ -1,5 +1,42 @@
 # Changelog
 
+## 2.0.0-dev60
+
+dev59 verified in game, and the verification turned up a much older bug that had
+nothing to do with the journal crash.
+
+### Confirmed working
+
+`mode=sameids` on an empty flag, the engine's count with hdmod's own page ids; the
+render probe collapsed to one line instead of four hundred; and — on the tutorial
+level itself — `screen=12` (LEVEL) with `worldstate=2` (TUTORIAL), which is dev55's
+adapter doing its job at the point that actually matters rather than only at run
+start.
+
+`sameids` still truncates hdmod's 20 story pages to the engine's 8. It remains a
+workaround.
+
+### get_game_manager() is not on this Playlunky build
+
+Every JournalUI field in the capture read back `attempt to call a nil value (global
+'get_game_manager')`. Not "journal_ui is nil" — the function is not a global at all.
+
+Two real features called it inside a bare `pcall` and took the failure as "no journal
+is open": `pollPlayFlow`, which waits for the death-recap book to finish animating
+before launching character select, and `pollCloseStrayJournal`, which force-closes a
+journal drawn over the character select. Neither has ever run on this build. The
+wedged endless page-turn on CHOOSE ADVENTURER that the first one was written to
+prevent was never actually being prevented.
+
+A `pcall` around a missing global is indistinguishable from a legitimate "nothing
+here", which is why this survived so long — it took a probe that printed the message
+instead of swallowing it. `GameManager()` and `JournalUI()` in `src/util.lua` now try
+`get_game_manager()` and then the `game_manager` global, latch the miss so a dead
+lookup is not repeated every frame, and report which accessor worked.
+
+It also parks the `max_page_count` hypothesis: that field cannot be read at all until
+one of those accessors resolves on this build.
+
 ## 2.0.0-dev59
 
 The tutorial door is confirmed working in game, and the journal now opens hosted

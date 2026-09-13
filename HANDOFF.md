@@ -179,6 +179,52 @@ Two further things that capture settled:
   time. `max_page_count` is therefore read at RENDER time now, which is the one
   place it demonstrably exists.
 
+### Confirmed in game (dev59)
+
+A capture with `mo_nojournalpages.on` empty, hosted:
+
+```
+journal chapter 8: OVERRIDING the page list, mode=sameids -> #8 { 601, 602, 603, ... }
+journal page render (<userdata>, 7, <userdata>)          <- ONE line, collapsed
+...
+journal chapter 8 | ... screen=12 (LEVEL=12 CAMP=11) level=1 theme=1 loading=3
+                   | fyi.hdmod: prologue=true worldstate=2 tutorial=2
+```
+
+* **The workaround now does the right thing.** `mode=sameids`, the engine's count
+  with hdmod's own ids.
+* **dev55 is confirmed at the point that matters.** That last line is the TUTORIAL:
+  `screen=12` is LEVEL and `worldstate=2` is TUTORIAL. The adapter is setting the
+  mod's state for the actual tutorial level, not just at run start.
+* **`sameids` truncates.** It clamps to the engine's 8, and hdmod has 20 story
+  pages, so pages 9-20 are not shown. Still a workaround, not a fix.
+
+### `get_game_manager()` IS NOT ON THIS BUILD
+
+The same capture read back, for every JournalUI field:
+
+```
+attempt to call a nil value (global 'get_game_manager')
+```
+
+Not "journal_ui is nil" — **the function is not a global at all**. Two real features
+called it inside a bare `pcall` and read the failure as "no journal is open":
+
+* `pollPlayFlow` waits for the death-recap book to finish animating before launching
+  character select. It never waited — which is the wedged endless page-turn on
+  CHOOSE ADVENTURER that the wait exists to stop.
+* `pollCloseStrayJournal` force-closes a journal drawn over the character select. It
+  never closed one.
+
+Both had been inert for the life of the build: a `pcall` around a missing global is
+indistinguishable from a legitimate "nothing here". `GameManager()` / `JournalUI()`
+in `src/util.lua` now try `get_game_manager()` then the `game_manager` global, latch
+the miss, and report which worked via `GameManagerVia()`.
+
+**This also parks the `max_page_count` hypothesis.** It cannot be read on this build
+until one of those accessors resolves. The next capture's
+`n/a(GameManager via ...)` says whether either does.
+
 ### Current workaround
 
 `mo_nojournalpages.on` containing `sameids` makes the journal open without crashing

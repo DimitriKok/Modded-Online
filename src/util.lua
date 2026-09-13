@@ -184,5 +184,80 @@ function PackPathWin(rest)
     return (PackPath(rest):gsub("/", "\\"))
 end
 
+-- ------------------------------------------------------- the journal UI object
+
+--- Which accessor actually worked, once we know. "" = not tried yet.
+local gmVia = ""
+
+--- The engine's GameManager, however this Playlunky build exposes it.
+---
+--- `get_game_manager()` is an Overlunky API that IS NOT PRESENT ON EVERY BUILD. On
+--- the one this was found on it is not even a global: a capture of the journal probe
+--- read back `attempt to call a nil value (global 'get_game_manager')`.
+---
+--- That mattered far beyond the probe. Two real features called it inside a bare
+--- `pcall` and took the failure as "no journal open":
+---
+---   * `pollPlayFlow` waits for the death-recap book to finish animating before
+---     launching character select. It never waited, which is the wedged
+---     endless page-turn on CHOOSE ADVENTURER that the wait was added to stop.
+---   * `pollCloseStrayJournal` force-closes a journal drawn over the character
+---     select. It never closed one.
+---
+--- Both had been silently inert for the whole life of the build, because a `pcall`
+--- around a missing global is indistinguishable from a legitimate "nothing here".
+--- @return userdata?
+function GameManager()
+    if gmVia == "none" then
+        return nil
+    end
+    local ok, gm = pcall(function()
+        if type(rawget(_G, "get_game_manager")) == "function" then
+            local m = get_game_manager()
+            if m ~= nil then
+                gmVia = "get_game_manager()"
+                return m
+            end
+        end
+        local m = rawget(_G, "game_manager")
+        if m ~= nil then
+            gmVia = "game_manager"
+            return m
+        end
+        return nil
+    end)
+    if not ok or gm == nil then
+        -- Latch the miss: this is called per frame from the journal polls, and a
+        -- failing global lookup every frame for the life of the session is a cost
+        -- with no information in it. Whichever accessor exists, exists at boot.
+        if gmVia == "" then
+            gmVia = "none"
+        end
+        return nil
+    end
+    return gm
+end
+
+--- The journal UI, or nil on a build that does not expose the GameManager.
+--- @return userdata?
+function JournalUI()
+    local gm = GameManager()
+    if gm == nil then
+        return nil
+    end
+    local ok, ui = pcall(function() return gm.journal_ui end)
+    if not ok then
+        return nil
+    end
+    return ui
+end
+
+--- How the GameManager was reached, for the log: the accessor's name, "none" if no
+--- accessor on this build works, or "untried".
+--- @return string
+function GameManagerVia()
+    return gmVia ~= "" and gmVia or "untried"
+end
+
 MoUtil = module
 return module

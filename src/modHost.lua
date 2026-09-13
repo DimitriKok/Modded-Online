@@ -241,8 +241,22 @@ end
 --- @param field string
 --- @return string
 local function journalField(field)
+    -- rawget, not a bare call: src.util defines JournalUI and this module must not
+    -- assume it is loaded. A missing helper is a "cannot read", not an error --
+    -- diagnosing the journal must never be the thing that breaks the boot.
+    local resolve = rawget(_G, "JournalUI")
+    local ui = type(resolve) == "function" and resolve() or nil
+    if ui == nil then
+        -- Not an error worth three identical copies per line: the capture that found
+        -- this printed the same "attempt to call a nil value (global
+        -- 'get_game_manager')" for every field, twice a line. Say it once, and say
+        -- which accessor was tried.
+        local via = rawget(_G, "GameManagerVia")
+        return "n/a(GameManager via "
+            .. (type(via) == "function" and tostring(via()) or "no helper") .. ")"
+    end
     local ok, v = pcall(function()
-        return tostring(get_game_manager().journal_ui[field])
+        return tostring(ui[field])
     end)
     if ok then
         return v
