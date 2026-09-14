@@ -152,13 +152,20 @@ local function myChosenChar()
     return math.floor(char)
 end
 
---- A camp door's destination as a short comparable label ("1-1", "2-1", ...).
---- nil/absent means the main exit, i.e. a normal 1-1 start.
+--- A camp door's destination as a short comparable label ("2-1", "4-1", ...).
+--- nil/absent means the MAIN EXIT, which is its own label and not "1-1".
+---
+--- The main exit used to share the "1-1" label with any door leading there, on the
+--- reasoning that both start the run at 1-1 so they are the same choice. They are
+--- not: hdmod's tutorial door leads to 1-1 and starts the TUTORIAL. Merging them
+--- let one player ready at the tutorial door and another at the main exit while
+--- everyoneSameDest said they agreed, and made pressing the main exit while readied
+--- at the tutorial door read as un-readying (same label) instead of moving the vote.
 --- @param dest integer[]?
 --- @return string
 local function destLabel(dest)
     if type(dest) ~= "table" or dest[1] == nil then
-        return "1-1"
+        return "main"
     end
     return string.format("%d-%d", math.floor(dest[1]), math.floor(dest[2] or 1))
 end
@@ -250,6 +257,22 @@ local function clearRunState(reason)
     -- ...and their own save values, if a load was in flight when the run ended.
     if module.releaseSaveSync ~= nil then
         module.releaseSaveSync()
+    end
+    -- Forget whose values those WERE, as well as putting ours back. Releasing
+    -- without clearing left the previous host's `shortcuts`/`characters` sitting in
+    -- `saveSyncHost` for the rest of the session, so the first load of the NEXT run
+    -- -- in a different room, before that host's first broadcast arrives -- held a
+    -- player who has left to the progression of a player they are no longer playing
+    -- with. There is no version of that which is correct.
+    if module.forgetSaveSync ~= nil then
+        module.forgetSaveSync()
+    end
+    -- ...and forget which camp door this run began at. The adapters that recognised
+    -- it re-apply their state on every generation while levelOrdinal is 0, so a hit
+    -- left behind here would put the NEXT run into hdmod's tutorial -- this bug
+    -- again with the sign flipped.
+    if ModHost ~= nil and ModHost.forgetStartDoor ~= nil then
+        pcall(ModHost.forgetStartDoor)
     end
     pendingRunSeed = nil
     rosterChars = nil
@@ -735,6 +758,15 @@ function module.releaseSaveSync()
         writeSaveField(name, mine)
     end
     saveSyncOwn = nil
+end
+
+--- Drop the host's values entirely. Separate from releaseSaveSync because the two
+--- answer different questions: release is "give this player their own values back
+--- NOW", forget is "there is no host any more, so there is nothing to hold". A run
+--- ending is both. Declared on the module for the same reason releaseSaveSync is --
+--- clearRunState is defined above it.
+function module.forgetSaveSync()
+    saveSyncHost = nil
 end
 
 --- Keep `player_inventory[].time_of_death` consistent with `.health`.
@@ -1924,6 +1956,36 @@ local function onRunStart(payload)
         -- a camp SHORTCUT start rides along on run_start, so every machine warps
         -- to the same world; absent (or the main exit) means the usual 1-1
         local startAt = payload.start
+        -- An OUT-OF-DATE SERVER is the one thing that can silently undo all of the
+        -- below, and it looks exactly like the bug it used to cause. Servers before
+        -- 1.0.11 discarded a door whose target is 1-1 as "the main exit", which is
+        -- precisely hdmod's tutorial door -- so `start` came back absent, the
+        -- adapters were handed nil and correctly did nothing, and the tutorial door
+        -- built an ordinary run. Say so rather than letting it read as "the fix
+        -- doesn't work". NOT worked around by substituting our own door: only the
+        -- machine that pressed it knows it, so the peers would build a different
+        -- world and the whole party would desync. A wrong-but-identical run beats a
+        -- right-for-one-player one.
+        if startAt == nil and type(myReadyDest) == "table" and myReadyDest[1] ~= nil then
+            toast("This server is out of date — the camp door you started at was ignored")
+            if DesyncLog ~= nil then
+                pcall(DesyncLog.earlyEvent,
+                    "start door: we readied at %d-%d but run_start carried none —"
+                    .. " server %s is older than 1.0.11 and drops 1-1 doors",
+                    math.floor(myReadyDest[1]), math.floor(myReadyDest[2] or 1),
+                    Network.serverDescribe ~= nil and Network.serverDescribe() or "?")
+            end
+        end
+        -- ...and tell the hosted mods WHICH door that was, before anything
+        -- generates. Online the door is inert, so a mod that keys behaviour off a
+        -- player physically entering it never finds out on its own: hdmod's tutorial
+        -- door is a plain 1-1 destination and produced an ordinary run instead of
+        -- the tutorial. Every machine does this for itself, so the world still
+        -- generates identically. See ModHost.runStartedFromDoor.
+        if ModHost ~= nil and ModHost.runStartedFromDoor ~= nil then
+            SafeCall("eventSync:runStartedFromDoor", ModHost.runStartedFromDoor,
+                type(startAt) == "table" and startAt or nil)
+        end
         if type(startAt) == "table" and startAt[1] ~= nil then
             moWarp(math.floor(tonumber(startAt[1]) or 1),
                 math.floor(tonumber(startAt[2]) or 1),
@@ -2275,6 +2337,19 @@ local function onPreLevelGeneration()
     -- identical, LIVING spelunkers with an even kit (the same reset the host's
     -- Quick Restart already applied).
     applyFreshRunReset()
+    -- Re-apply whatever a hosted mod's adapter did when it recognised the camp door
+    -- this run began at. That recognition happens back at run_start, because it
+    -- matches on the camp door and the door is gone once we warp -- but the mod's
+    -- own load and reset callbacks run in between, and hdmod's camp setup puts
+    -- HD_WORLDSTATE_STATE back to NORMAL. This is the last point before the world is
+    -- built, so whatever ran in between loses. Gated the same way applyFreshRunReset
+    -- is (levelOrdinal == 0, the window before the first floor engages) and for the
+    -- same reason: generation can run more than once in it, so the LAST write before
+    -- the level is built has to be ours. A no-op when no adapter recognised a door,
+    -- and identical on every machine, so it cannot desync generation.
+    if levelOrdinal == 0 and ModHost ~= nil and ModHost.reassertStartDoor ~= nil then
+        SafeCall("eventSync:reassertStartDoor", ModHost.reassertStartDoor)
+    end
     -- MID-RUN JOIN: give the just-added late-joiner a clean, IDENTICAL body on
     -- every machine — alive but EMPTY-HANDED. Identify the joiner the same way
     -- everywhere: the roster slot with NO entry in the host's snapshot (they
@@ -3554,6 +3629,24 @@ local function pollCampDoor()
     if hooked then
         doorReadyHeld = false
         doorHookPending = false
+        -- What this camp actually offers, once per camp. The other half of the start
+        -- door evidence: runStartedFromDoor logs the destination that ARRIVED, and
+        -- without this there is no way to tell "the door was never hooked" from "it
+        -- was hooked and the destination was lost on the way". A mod's custom door
+        -- (hdmod's tutorial door is one) only reaches the party if it is a
+        -- FLOOR_DOOR_STARTING_EXIT and its target reads back here.
+        if DesyncLog ~= nil then
+            local seen = {}
+            for uid, dest in pairs(campDoors) do
+                seen[#seen + 1] = string.format("%s=%s", tostring(uid),
+                    type(dest) == "table"
+                        and string.format("%d-%d(theme %d)", dest[1], dest[2], dest[3])
+                        or "main exit")
+            end
+            table.sort(seen)
+            pcall(DesyncLog.earlyEvent, "camp doors hooked: %s",
+                table.concat(seen, ", "))
+        end
     end
 end
 
@@ -3675,9 +3768,14 @@ local function pollPlayFlow()
     -- can still be animating over the menu: starting the play flow underneath
     -- it wedged the journal in an endless page-turn loop on the character
     -- select. Wait for the journal to close, then let the menu settle a beat.
+    -- JournalUI(), not get_game_manager(): that API is absent on some Playlunky
+    -- builds, and the bare pcall here read the resulting "attempt to call a nil
+    -- value" as "no journal is open" -- so this wait, and the wedged page-turn on
+    -- CHOOSE ADVENTURER it exists to prevent, never happened at all.
     local journalOpen = false
     pcall(function()
-        journalOpen = get_game_manager().journal_ui.state ~= 0
+        local j = JournalUI()
+        journalOpen = j ~= nil and j.state ~= 0
     end)
     if journalOpen then
         playFlowReadyMs = nil
@@ -3734,7 +3832,7 @@ local function pollCloseStrayJournal()
         return
     end
     pcall(function()
-        local j = get_game_manager().journal_ui
+        local j = JournalUI()
         if j == nil then
             return
         end
@@ -3742,6 +3840,57 @@ local function pollCloseStrayJournal()
         j.opacity = 0
         j.fade_timer = 0
     end)
+end
+
+--- The journal page-render hook, INSTALLED ONLY WHILE A SESSION IS ACTIVE.
+---
+--- It exists for one job: skipping the vanilla page render so the stray death-recap
+--- book cannot show over a menu or the character select in a networked session.
+--- `journalShouldBeHidden` returns false on its first line when `Network.isActive()`
+--- is false, so out of a session this hook can never do anything at all.
+---
+--- Registering it anyway is not free, and it is not harmless. A Lua pre-render hook
+--- makes the engine build and hand over a page context for EVERY journal page it
+--- draws -- including the fabricated page ids a content mod substitutes for its own
+--- journal (hdmod returns 601..620 from ON.POST_LOAD_JOURNAL_CHAPTER, which back no
+--- real journal entry). hdmod has no such hook of its own, which is why its tutorial
+--- journal works under Playlunky and died the instant it was hosted here: the only
+--- difference in that entire code path was this registration.
+---
+--- So it goes in when a room is joined and comes out when it is left. It is not a
+--- per-frame kind, so `Callbacks.sweep` never revives it behind our back.
+---
+--- Hung on `module` rather than kept in locals for an unglamorous reason: this
+--- file's main chunk is AT Lua's hard limit of 200 locals, and three more would not
+--- compile. Worth knowing before adding anything else here.
+--- @type integer?
+module.journalHookId = nil
+
+function module.journalPreRender()
+    -- SafeCall: engine-invoked render hook (C++ boundary → no traceback on an
+    -- uncaught error). NEVER return the SafeCall result raw: on its error path it
+    -- yields an explicit nil, and a raw passthrough is what Playlunky rejects as
+    -- "Unexpected return type from function". Normalise to exactly `true` (skip
+    -- this page) or NO value at all.
+    local hide = SafeCall("eventSync:journalPreRender", journalShouldBeHidden)
+    if hide == true then
+        return true -- do not draw this journal page
+    end
+end
+
+--- Put the hook in for the duration of a session and take it out again.
+function module.pollJournalHook()
+    if ON.RENDER_PRE_JOURNAL_PAGE == nil then
+        return -- this Overlunky build has no such hook
+    end
+    local wanted = Network.isActive()
+    if wanted and module.journalHookId == nil then
+        module.journalHookId =
+            set_callback(module.journalPreRender, ON.RENDER_PRE_JOURNAL_PAGE)
+    elseif not wanted and module.journalHookId ~= nil then
+        clear_callback(module.journalHookId)
+        module.journalHookId = nil
+    end
 end
 
 -- -------------------------------------------------------------- leaving
@@ -4212,24 +4361,9 @@ set_callback(function()
         DesyncLog.leave("postLevelGeneration")
     end
 end, ON.POST_LEVEL_GENERATION)
--- Skip rendering the journal's pages when the stray death-recap book would show
--- over a menu/character-select in a networked session. Returning true skips the
--- vanilla page render, which is what actually removes the book (forcing the
--- journal's state/opacity shut wasn't enough on its own). Guarded in case this
--- Overlunky build lacks the hook.
-if ON.RENDER_PRE_JOURNAL_PAGE ~= nil then
-    set_callback(function()
-        -- SafeCall: engine-invoked render hook (C++ boundary → no traceback on an
-        -- uncaught error). NEVER return the SafeCall result raw: on its error path
-        -- it yields an explicit nil, and a raw passthrough is what Playlunky
-        -- rejects as "Unexpected return type from function". Normalise to exactly
-        -- `true` (skip this page) or NO value at all.
-        local hide = SafeCall("eventSync:journalPreRender", journalShouldBeHidden)
-        if hide == true then
-            return true -- do not draw this journal page
-        end
-    end, ON.RENDER_PRE_JOURNAL_PAGE)
-end
+-- The journal page-render hook used to be registered HERE, unconditionally, for the
+-- whole run of the game. It is now installed only while a session is active -- see
+-- pollJournalHook, and the note above it for what that cost.
 set_callback(function()
     if DesyncLog ~= nil then
         DesyncLog.frameMark("guiframe:eventSync")
@@ -4237,6 +4371,9 @@ set_callback(function()
     SafeCall("eventSync:pollLobbyReady", pollLobbyReady)
     SafeCall("eventSync:pollPlayFlow", pollPlayFlow)
     SafeCall("eventSync:pollCloseStrayJournal", pollCloseStrayJournal)
+    -- ...and own the journal render hook's lifetime, so it is absent outside a
+    -- session rather than installed and inert
+    SafeCall("eventSync:pollJournalHook", module.pollJournalHook)
     SafeCall("eventSync:pollCampDoor", pollCampDoor)
     SafeCall("eventSync:pollReadyDoor", pollReadyDoor)
     SafeCall("eventSync:pollAutoStart", pollAutoStart)

@@ -13,7 +13,7 @@
 
 meta = {
     name = "Modded Online (loader build)",
-    version = "2.0.0-dev54",
+    version = "2.0.0-dev60",
     description = "Play scriptable mods together via a self-hosted server",
     author = "EatYoCake + DoctorPuppy",
     online_safe = false, -- not for the *official* online — that's the point
@@ -199,6 +199,15 @@ else
         ModHost.onProgress = nil
         bootStep("hosted " .. packDir)
     end
+end
+
+-- A probe over the journal-chapter load, armed by mo_trace.on, mo_journalprobe.on
+-- or mo_nojournalpages.on. Registered AFTER hosting, because it reads the hosted
+-- mods' own globals out of their sandboxes -- which do not exist until they have run.
+if ModHost ~= nil and ModHost.installJournalProbe ~= nil then
+    bootStep("modHost: journal probe (mo_trace.on / mo_journalprobe.on"
+        .. " / mo_nojournalpages.on)")
+    SafeCall("main/installJournalProbe", ModHost.installJournalProbe)
 end
 
 -- If the last session ended while borrowing a room host's save -- left cleanly,

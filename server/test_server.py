@@ -835,7 +835,8 @@ async def run_tests():
 
     print("camp shortcut doors carry the start destination:")
     check(srv.parse_start_dest([2, 1, 2]) == [2, 1, 2], "a shortcut destination survives validation")
-    check(srv.parse_start_dest([1, 1, 1]) is None, "the main door (1-1) carries no destination")
+    check(srv.parse_start_dest([1, 1, 1]) == [1, 1, 1],
+          "a door that leads to 1-1 keeps its destination (hdmod's tutorial door is one)")
     check(srv.parse_start_dest(None) is None, "a missing destination is the main door")
     check(srv.parse_start_dest([2, 1]) is None, "a malformed destination is rejected")
     check(srv.parse_start_dest(["a", 1, 2]) is None, "a non-integer destination is rejected")
@@ -875,6 +876,32 @@ async def run_tests():
     check(len(restarts) > len(starts) and restarts[-1]["p"].get("start") == [2, 1, 2],
           "a restart puts the party back at the same shortcut")
     for c in (sc1, sc2):
+        c.send({"t": "leave"})
+    await asyncio.sleep(0.3)
+
+    # A camp door whose target IS 1-1 -- hdmod spawns its tutorial door with
+    # spawn_door(x, y, l, 1, 1, THEME.DWELLING). The server used to discard that as
+    # "the main door", so run_start carried no `start`, every machine's tutorial
+    # adapter was handed nil, and the door built an ordinary 1-1 instead of the
+    # tutorial. The main exit is still distinguishable: the client sends no dest
+    # for it at all.
+    print("a camp door that leads to 1-1 is not mistaken for the main exit:")
+    tc1 = await start_fake_client("Tut1", 26995)
+    tc2 = await start_fake_client("Tut2", 26996)
+    await tc1.create_room(modv="tutorial-door-test")
+    await tc2.join_room(tc1.room, modv="tutorial-door-test")
+    tc1.send({"t": "ready", "ready": True, "dest": [1, 1, 1]})
+    tc2.send({"t": "ready", "ready": True, "dest": [1, 1, 1]})
+    await asyncio.sleep(0.3)
+    troom = protocol.rooms[tc1.room]
+    check(all(c.start_dest == [1, 1, 1] for c in troom.clients.values()),
+          "the server records a 1-1 door as a door, not as the main exit")
+    tc1.send({"t": "start", "dest": [1, 1, 1]})
+    await asyncio.sleep(0.4)
+    tstarts = [e for e in tc2.applied_events if e["k"] == "run_start"]
+    check(tstarts and tstarts[-1]["p"].get("start") == [1, 1, 1],
+          "run_start carries the 1-1 door so every machine can recognise it")
+    for c in (tc1, tc2):
         c.send({"t": "leave"})
     await asyncio.sleep(0.3)
 

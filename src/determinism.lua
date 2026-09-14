@@ -523,7 +523,25 @@ end
 --- @type table[]
 module.adapters = {}
 
---- @param adapter table # { name, detect(env) -> boolean, newRun(env, ctx) }
+--- @param adapter table # { name, detect(env) -> boolean, newRun(env, ctx),
+---   startDoor(env, dest) -> boolean, reassert(env) -> string? }
+---
+--- `startDoor` is called on EVERY machine when a run begins, with the camp door's
+--- destination the run was started from (`{world, level, theme}`, or nil for the
+--- main exit). It exists because a camp door online is inert: Modded Online detects
+--- the press and starts the run for the party instead of letting one player walk
+--- through, so a mod that keys behaviour off a player physically entering a specific
+--- door never sees it happen. Returning true means the adapter recognised the door.
+---
+--- `reassert` is called again on the run's FIRST level generation, only for adapters
+--- whose `startDoor` returned true. `startDoor` has to run at run_start -- before
+--- the warp is booked, while the camp door it matches on still exists -- but the mod
+--- gets its own load and reset callbacks in between, and those may put the state
+--- back. So the recognition happens once, at the only moment the evidence is there,
+--- and the *consequence* is re-applied at the last moment before the world is built.
+--- It must NOT re-run the door match: by then the camp is gone and the door's uid
+--- may have been recycled by another entity. Return a short string describing what
+--- it found for the log -- that is what says whether anything clobbered the state.
 function module.register(adapter)
     module.adapters[#module.adapters + 1] = adapter
 end
@@ -557,6 +575,126 @@ module.register({
     end,
     newRun = function(env)
         rawset(env, "POSTTILE_STARTBOOL", false)
+    end,
+})
+
+--- Where each hosted mod's tutorial door LED, remembered from the last camp.
+---
+--- An instant restart re-sends the door the run began at (the server keeps it on the
+--- room so a restart returns to the same shortcut), but by then the camp is gone and
+--- `DOOR_TUTORIAL_UID` names a dead entity -- so restarting inside the tutorial read
+--- as "not the tutorial door" and dropped the party into an ordinary run. Reading it
+--- is only possible while the camp is up; comparing against it is not, so the read
+--- and the comparison are separated.
+---
+--- Keyed by sandbox, so two hosted packs cannot collide, and deliberately NOT stored
+--- in the mod's own globals: `pairs` is determinized over that table and a key we
+--- invented would be handed to the mod's own iteration.
+---
+--- Every machine fills this from its own camp at the same run start, so it holds the
+--- same value everywhere -- it cannot make one machine generate a different world
+--- than another.
+--- @type table<table, integer[]>
+local tutorialTarget = setmetatable({}, { __mode = "k" })
+
+--- The HD mod's tutorial is entered through a camp door, and online that door is
+--- inert -- so the thing that starts the tutorial never happens.
+---
+--- hdmod watches for a player physically overlapping DOOR_TUTORIAL_UID in
+--- CHAR_STATE.ENTERING and only then sets `HD_WORLDSTATE_STATE = TUTORIAL`
+--- (`lib/camp/camp.lua:104-120`, installed as a per-frame interval at camp setup).
+--- Everything downstream branches on that value: room generation, spikes, flags,
+--- touchups. Online, Modded Online makes every camp door inert on purpose -- one
+--- player walking through would start a solo run -- so the interval never fires, the
+--- state stays NORMAL, and walking into the tutorial door generates an ordinary 1-1.
+--- That is the reported "it just took us into a run".
+---
+--- The destination already travels: `pollCampDoor` reads `door:get_target()` for
+--- every FLOOR_DOOR_STARTING_EXIT, the host's door rides along in `run_start`, and
+--- the tutorial door is one (hdmod spawns it with `spawn_door(x, y, l, 1, 1,
+--- THEME.DWELLING)`). So each machine can match that destination against ITS OWN
+--- tutorial door and set the state the mod would have set itself.
+---
+--- Matching on the door rather than on the literal 1-1 matters: the main exit sends
+--- no destination at all, so starting a normal run can never be mistaken for this.
+---
+--- `detect` deliberately asks only for `worldlib`. It used to require `camplib` in
+--- the same breath, and detection happens ONCE -- immediately after the mod's main
+--- chunk runs (`ModHost.host`) -- so a global the mod assigns any later than that
+--- made the adapter invisible for the rest of the session, silently and with no way
+--- to tell that from "this mod is not hdmod". `worldlib.HD_WORLDSTATE_STATUS` is
+--- already specific enough to name this mod; `camplib` is what the adapter WORKS on,
+--- not what identifies it, so it is looked up when it is used instead.
+module.register({
+    name = "hd-tutorial-door",
+    detect = function(env)
+        local world = rawget(env, "worldlib")
+        return type(world) == "table"
+            and type(rawget(world, "HD_WORLDSTATE_STATUS")) == "table"
+    end,
+    --- @return boolean # recognised, and a reason string when it was not
+    startDoor = function(env, dest)
+        if type(dest) ~= "table" or dest[1] == nil then
+            return false, "no door (the main exit)"
+        end
+        local world = rawget(env, "worldlib")
+        local camp = rawget(env, "camplib")
+        if type(camp) ~= "table" then
+            return false, "the mod has no camplib global yet"
+        end
+        local uid = rawget(camp, "DOOR_TUTORIAL_UID")
+        local target, why = tutorialTarget[env], nil
+        if uid ~= nil then
+            pcall(function()
+                -- the door is still there: the run starts from the camp we are
+                -- leaving, which is the only time this can be read at all
+                local door = get_entity(math.floor(uid))
+                if door == nil then
+                    return
+                end
+                local w, l, t = door:get_target()
+                if w ~= nil then
+                    target = { math.floor(w), math.floor(l or -1), math.floor(t or -1) }
+                    tutorialTarget[env] = target
+                end
+            end)
+        end
+        if target == nil then
+            return false, uid == nil and "this camp has no tutorial door"
+                or string.format("door uid %s is gone and was never read", tostring(uid))
+        end
+        local matched = target[1] == math.floor(dest[1])
+            and target[2] == math.floor(dest[2] or -1)
+            and target[3] == math.floor(dest[3] or -1)
+        if not matched then
+            why = string.format("tutorial door is %d-%d(%d), run started at %d-%d(%d)",
+                target[1], target[2], target[3], math.floor(dest[1]),
+                math.floor(dest[2] or -1), math.floor(dest[3] or -1))
+            return false, why
+        end
+        world.HD_WORLDSTATE_STATE = world.HD_WORLDSTATE_STATUS.TUTORIAL
+        return true
+    end,
+    --- Put the state back if anything cleared it between run_start and generation.
+    --- hdmod sets HD_WORLDSTATE_STATE = NORMAL at camp setup and has its own reset
+    --- handlers, and this is the last point before the world is built, so whatever
+    --- ran in between loses. Idempotent, identical on every machine, and it reports
+    --- what it found so a capture says whether the re-apply was needed at all.
+    --- @return string?
+    reassert = function(env)
+        local world = rawget(env, "worldlib")
+        if type(world) ~= "table" then
+            return nil
+        end
+        local status = rawget(world, "HD_WORLDSTATE_STATUS")
+        if type(status) ~= "table" or status.TUTORIAL == nil then
+            return nil
+        end
+        local was = rawget(world, "HD_WORLDSTATE_STATE")
+        world.HD_WORLDSTATE_STATE = status.TUTORIAL
+        return string.format("worldstate %s -> %s%s", tostring(was),
+            tostring(status.TUTORIAL),
+            was == status.TUTORIAL and " (already set)" or " (IT HAD BEEN CLEARED)")
     end,
 })
 

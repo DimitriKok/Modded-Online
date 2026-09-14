@@ -789,3 +789,377 @@ def test_a_skipped_texture_is_not_reported_as_missing(fake_pack):
                        rt.eval("ModHost.summarize")(report).values())
     assert "NOT FOUND" not in summary, summary
     assert "skipped on purpose" in summary, summary
+
+
+# ------------------------------------------------------------------- meta
+
+
+def test_a_hosted_mods_meta_writes_do_not_reach_ours(fake_pack):
+    """`meta` is the one global where the sandbox's read-through leaked.
+
+    Both Playlunky idioms look identical and are not. `meta = { ... }` is a write and
+    lands in the sandbox. `meta.name = "HDMod"` is a READ -- answered with the real
+    _G.meta -- followed by a field write on that table, which mutates OURS. hdmod
+    (main.lua:67-70) and crossoverlunky (main.lua:1-4) both use the second form, and a
+    session hosting crossoverlunky opened its desync log `=== Modded Online 1.0 ===`.
+
+    netCore builds the lobby compatibility handshake from these two fields, so a mod
+    rewriting them turns off the check that stops two different Modded Online builds
+    sharing a room.
+    """
+    fake_pack("main.lua", """
+        meta.name = "HDMod"
+        meta.version = "2.0.0"
+    """)
+    rt = runtime()
+    rt.execute('meta = { name = "Modded Online (loader build)", version = "2.0.0-dev54" }')
+    report = rt.eval("ModHost.host")("fake.mod", rt.table_from({"inert": False}))
+    assert report["ok"] is True, report["err"]
+    assert str(rt.eval("meta.version")) == "2.0.0-dev54", (
+        "a hosted mod rewrote Modded Online's own version -- the lobby version gate "
+        "compares this, and the desync log header names it")
+    assert str(rt.eval("meta.name")) == "Modded Online (loader build)"
+
+
+def test_a_hosted_mod_reads_back_the_meta_it_wrote(fake_pack):
+    """Giving it a private table is only correct if the mod still sees its own
+    values: hdmod stamps `mod_version = meta.version` into its save data, and 2.5
+    reads meta.name for its crash diagnostics."""
+    fake_pack("main.lua", """
+        meta.version = "2.0.0"
+        probe.seen = meta.version
+    """)
+    rt = runtime()
+    rt.execute('meta = { name = "Modded Online (loader build)", version = "2.0.0-dev54" }')
+    rt.execute("probe = {}")
+    report = rt.eval("ModHost.host")("fake.mod", rt.table_from({"inert": False}))
+    assert report["ok"] is True, report["err"]
+    assert str(rt.eval("probe.seen")) == "2.0.0", (
+        "the mod could not read back its own meta")
+
+
+def test_the_wholesale_meta_idiom_still_works(fake_pack):
+    """2.5 writes `meta = { ... }`. That always landed in the sandbox; it must keep
+    landing there now that a table is waiting for it."""
+    fake_pack("main.lua", """
+        meta = { name = "Spelunky 2.5", version = "9.9" }
+    """)
+    rt = runtime()
+    rt.execute('meta = { name = "Modded Online (loader build)", version = "2.0.0-dev54" }')
+    report = rt.eval("ModHost.host")("fake.mod", rt.table_from({"inert": False}))
+    assert report["ok"] is True, report["err"]
+    assert str(rt.eval("meta.version")) == "2.0.0-dev54"
+
+
+# ------------------------------------------------- the determinism bisection flag
+
+
+def test_determinism_is_installed_by_default(fake_pack, tmp_path):
+    fake_pack("main.lua", "probe.kind = type(pairs)")
+    rt = runtime(pack_root=str(tmp_path).replace(chr(92), "/"))
+    rt.execute("probe = {}")
+    rt.execute("Determinism = { install = function(env) env.MARKED = true return {} end }")
+    report = rt.eval("ModHost.host")("fake.mod", rt.table_from({"inert": False}))
+    assert report["ok"] is True, report["err"]
+    assert rt.eval("ModHost.determinismDisabled()") is False
+
+
+def test_the_flag_file_runs_a_mod_on_the_raw_primitives(fake_pack, tmp_path):
+    """Four primitives are rewritten under every hosted mod (pairs, math.random,
+    get_frame/get_ms, the ON.FRAME remap). When one of them breaks a mod there is
+    otherwise no way to tell that apart from the host plumbing without editing
+    source and relaunching. The switch has to be a FILE for the same reason
+    mo_host.on is one: a mod that kills the game must be recoverable without it."""
+    (tmp_path / "mo_nodeterminism.on").write_text("", encoding="utf-8")
+    fake_pack("main.lua", "probe.ran = true")
+    rt = runtime(pack_root=str(tmp_path).replace(chr(92), "/"))
+    rt.execute("probe = {}")
+    rt.execute("installed = false")
+    rt.execute("Determinism = { install = function() installed = true return {} end }")
+    report = rt.eval("ModHost.host")("fake.mod", rt.table_from({"inert": False}))
+    assert report["ok"] is True, report["err"]
+    assert rt.eval("ModHost.determinismDisabled()") is True
+    assert rt.eval("installed") is False, "determinism was installed despite the flag"
+    assert rt.eval("probe.ran") is True, "the mod did not run at all"
+
+
+def test_the_flag_says_so_out_loud(fake_pack, tmp_path):
+    """A silent bisection switch is one that gets left on and then explains a desync
+    nobody can account for."""
+    (tmp_path / "mo_nodeterminism.on").write_text("", encoding="utf-8")
+    fake_pack("main.lua", "")
+    rt = runtime(pack_root=str(tmp_path).replace(chr(92), "/"))
+    rt.execute("Determinism = { install = function() return {} end }")
+    rt.eval("ModHost.host")("fake.mod", rt.table_from({"inert": False}))
+    printed = [str(v) for v in rt.eval("printed").values()]
+    assert any("mo_nodeterminism.on" in line for line in printed), printed
+
+
+# ------------------------------------------------- the hosted sandbox, exposed
+
+
+def test_the_hosted_sandbox_is_reachable_afterwards(fake_pack):
+    """A mod's globals are WRITES, so they land in the sandbox and not in _G.
+    Nothing outside could read them -- the gap LOADER.md flags for the 2.5 adapter
+    ("the mod's world counter is a value in its own module table, in our state,
+    readable directly") and which nothing actually provided."""
+    fake_pack("main.lua", """
+        worldlib = { HD_WORLDSTATE_STATE = 3 }
+    """)
+    rt = runtime()
+    rt.eval("ModHost.host")("fake.mod", rt.table_from({"inert": False}))
+    env = rt.eval("ModHost.envFor")("fake.mod")
+    assert env is not None, "the sandbox was discarded once the mod had loaded"
+    assert int(env["worldlib"]["HD_WORLDSTATE_STATE"]) == 3
+    assert rt.eval("worldlib") is None, "the mod's global leaked into ours"
+
+
+def test_an_unhosted_pack_has_no_sandbox(fake_pack):
+    rt = runtime()
+    assert rt.eval("ModHost.envFor")("never.hosted") is None
+
+
+def test_the_journal_probe_stays_out_unless_tracing_is_armed(fake_pack):
+    """It reads a named mod's globals, which is the one thing the adapter system
+    exists to keep out of the host. It is acceptable only as a flagged probe."""
+    rt = runtime()
+    rt.execute("DesyncLog = { tracing = function() return false end, traceNote = function() end }")
+    rt.execute("ON.POST_LOAD_JOURNAL_CHAPTER = 139")
+    assert rt.eval("ModHost.installJournalProbe")() is False
+    assert int(rt.eval("engineCalls")) == 0
+
+
+def test_the_journal_probe_registers_when_tracing(fake_pack):
+    rt = runtime()
+    rt.execute("DesyncLog = { tracing = function() return true end, traceNote = function() end }")
+    rt.execute("ON.POST_LOAD_JOURNAL_CHAPTER = 139")
+    assert rt.eval("ModHost.installJournalProbe")() is True
+    assert 139 in [int(v) for v in rt.eval("registeredIds").values()]
+
+
+def test_the_probe_degrades_on_a_build_without_the_hook(fake_pack):
+    rt = runtime()
+    rt.execute("DesyncLog = { tracing = function() return true end, traceNote = function() end }")
+    rt.execute("ON.POST_LOAD_JOURNAL_CHAPTER = nil")
+    assert rt.eval("ModHost.installJournalProbe")() is False
+
+
+def test_main_installs_the_probe_after_hosting(fake_pack):
+    """It reads the hosted mods' globals out of their sandboxes, which do not exist
+    until they have run."""
+    main = (PACK / "main.lua").read_text(encoding="utf-8")
+    assert main.index("ModHost.hostOne") < main.index("installJournalProbe")
+
+
+def test_the_probe_also_brackets_the_page_render(fake_pack):
+    """The chapter callback returns and the engine is dead before the hosted mod's
+    own RENDER_POST_JOURNAL_PAGE hook runs. That leaves the engine's page setup and
+    its first page render, and nothing said which -- so the probe marks the render
+    too, and crash_frame.txt names `journalPageProbe` instead of blaming a callback
+    that finished several steps earlier."""
+    rt = runtime()
+    rt.execute("DesyncLog = { tracing = function() return true end, traceNote = function() end,"
+               " frameMark = function() end, frameDone = function() end }")
+    rt.execute("ON.POST_LOAD_JOURNAL_CHAPTER = 139; ON.RENDER_PRE_JOURNAL_PAGE = 145")
+    assert rt.eval("ModHost.installJournalProbe")() is True
+    kinds = [int(v) for v in rt.eval("registeredIds").values()]
+    assert 139 in kinds and 145 in kinds, kinds
+
+
+def test_the_page_probe_never_skips_a_page(fake_pack):
+    """Returning `true` would skip the draw and returning an explicit nil is what
+    Playlunky rejects as "Unexpected return type from function". A probe must be
+    invisible to the thing it probes."""
+    rt = runtime()
+    rt.execute("noted = {}")
+    rt.execute("DesyncLog = { tracing = function() return true end,"
+               " traceNote = function(fmt, a) noted[#noted + 1] = tostring(a) end,"
+               " frameMark = function() end, frameDone = function() end }")
+    rt.execute("ON.POST_LOAD_JOURNAL_CHAPTER = 139; ON.RENDER_PRE_JOURNAL_PAGE = 145")
+    # capture the functions, which the default harness throws away
+    rt.execute("""
+fns = {}
+local realSet = set_callback
+function set_callback(fn, id)
+    fns[id] = fn
+    return realSet(fn, id)
+end
+""")
+    rt.eval("ModHost.installJournalProbe")()
+    page = rt.eval("fns")[145]
+    assert page is not None, "no RENDER_PRE_JOURNAL_PAGE probe was registered"
+    assert page(3, 7) is None, "the probe returned a value and would alter the draw"
+    noted = [str(v) for v in rt.eval("noted").values()]
+    assert any("3, 7" in n for n in noted), (
+        "the page render's arguments were not recorded: %r" % noted)
+
+
+# ------------------------------------------------- the callback-wrapper bisection
+
+
+def test_hosted_callbacks_are_wrapped_by_default(fake_pack, tmp_path):
+    """The wrapper is what zeroes our callback depth, names the mod's callbacks in
+    the crash trace, and charges them in the profile. It must stay on by default."""
+    fake_pack("main.lua", "set_callback(function() end, 2)")
+    rt = runtime(pack_root=str(tmp_path).replace(chr(92), "/"))
+    rt.execute("wrapped = 0")
+    rt.execute("Callbacks = { rawSetCallback = set_callback,"
+               " hosted = function(fn) wrapped = wrapped + 1 return fn end,"
+               " depth = function() return 0 end }")
+    report = rt.eval("ModHost.host")("fake.mod", rt.table_from({"inert": False}))
+    assert report["ok"] is True, report["err"]
+    assert int(rt.eval("wrapped")) == 1
+    assert rt.eval("ModHost.wrapDisabled()") is False
+
+
+def test_the_flag_sends_hosted_callbacks_to_the_engine_raw(fake_pack, tmp_path):
+    """The wrapper is the single largest thing hosting does that Playlunky does not:
+    an extra Lua frame and a pcall around every callback. hdmod's journal story
+    sequence is a nested storm of callbacks registering and clearing each other from
+    inside one another, so it has to be separable from the rest of the sandbox."""
+    (tmp_path / "mo_nowrap.on").write_text("", encoding="utf-8")
+    fake_pack("main.lua", "set_callback(function() end, 2)")
+    rt = runtime(pack_root=str(tmp_path).replace(chr(92), "/"))
+    rt.execute("wrapped = 0")
+    rt.execute("Callbacks = { rawSetCallback = set_callback,"
+               " hosted = function(fn) wrapped = wrapped + 1 return fn end,"
+               " depth = function() return 0 end }")
+    report = rt.eval("ModHost.host")("fake.mod", rt.table_from({"inert": False}))
+    assert report["ok"] is True, report["err"]
+    assert rt.eval("ModHost.wrapDisabled()") is True
+    assert int(rt.eval("wrapped")) == 0, "a wrapper was applied despite mo_nowrap.on"
+
+
+def test_the_raw_flag_says_so_out_loud(fake_pack, tmp_path):
+    (tmp_path / "mo_nowrap.on").write_text("", encoding="utf-8")
+    fake_pack("main.lua", "")
+    rt = runtime(pack_root=str(tmp_path).replace(chr(92), "/"))
+    rt.eval("ModHost.host")("fake.mod", rt.table_from({"inert": False}))
+    printed = [str(v) for v in rt.eval("printed").values()]
+    assert any("mo_nowrap.on" in line for line in printed), printed
+
+
+def test_the_probe_returns_nothing_by_default(fake_pack, tmp_path):
+    """A probe that answers a callback the engine consumes is not a probe."""
+    rt = runtime(pack_root=str(tmp_path).replace(chr(92), "/"))
+    rt.execute("DesyncLog = { tracing = function() return true end, traceNote = function() end,"
+               " frameMark = function() end, frameDone = function() end }")
+    rt.execute("ON.POST_LOAD_JOURNAL_CHAPTER = 139")
+    rt.execute("""
+fns = {}
+local realSet = set_callback
+function set_callback(fn, id) fns[id] = fn return realSet(fn, id) end
+""")
+    rt.eval("ModHost.installJournalProbe")()
+    chapter = rt.eval("fns")[139]
+    assert chapter(8, rt.table_from([2, 3, 4])) is None
+
+
+def test_the_flag_makes_the_probe_restore_the_engines_page_list(fake_pack, tmp_path):
+    """hdmod replaces the story chapter's 8 real pages with 20 fabricated ones and
+    draws them itself. The engine dies right after accepting that, and it is the last
+    thing in the path assumed rather than tested."""
+    # "restore" spelled out: an EMPTY flag means `sameids` as of dev59, because a
+    # player creating this file to stop the crash was getting the experiment's
+    # non-crashing control and a journal full of vanilla pages.
+    (tmp_path / "mo_nojournalpages.on").write_text("restore", encoding="utf-8")
+    rt = runtime(pack_root=str(tmp_path).replace(chr(92), "/"))
+    rt.execute("noted = {}")
+    rt.execute("DesyncLog = { tracing = function() return true end,"
+               " traceNote = function(fmt, a, b) noted[#noted + 1] = tostring(a) end,"
+               " frameMark = function() end, frameDone = function() end }")
+    rt.execute("ON.POST_LOAD_JOURNAL_CHAPTER = 139")
+    rt.execute("""
+fns = {}
+local realSet = set_callback
+function set_callback(fn, id) fns[id] = fn return realSet(fn, id) end
+""")
+    rt.eval("ModHost.installJournalProbe")()
+    out = rt.eval("fns")[139](8, rt.table_from([2, 3, 4, 5]))
+    assert out is not None, "the engine's page list was not restored"
+    assert [int(v) for v in out.values()] == [2, 3, 4, 5]
+
+
+def test_the_restore_is_a_copy_not_the_engines_own_table(fake_pack, tmp_path):
+    """Handing the engine back the very object it passed in is a different thing
+    from handing it an equal list, and not one worth finding out about the hard way."""
+    (tmp_path / "mo_nojournalpages.on").write_text("restore", encoding="utf-8")
+    rt = runtime(pack_root=str(tmp_path).replace(chr(92), "/"))
+    rt.execute("DesyncLog = { tracing = function() return true end, traceNote = function() end,"
+               " frameMark = function() end, frameDone = function() end }")
+    rt.execute("ON.POST_LOAD_JOURNAL_CHAPTER = 139")
+    rt.execute("""
+fns = {}
+local realSet = set_callback
+function set_callback(fn, id) fns[id] = fn return realSet(fn, id) end
+incoming = {7, 8}
+returned = nil
+""")
+    rt.eval("ModHost.installJournalProbe")()
+    rt.execute("returned = fns[139](8, incoming)")
+    assert rt.eval("returned ~= incoming") is True
+    assert [int(v) for v in rt.eval("returned").values()] == [7, 8]
+
+
+CAPTURE_SET_CALLBACK = """
+fns = {}
+local realSet = set_callback
+function set_callback(fn, id) fns[id] = fn return realSet(fn, id) end
+"""
+
+
+def _probe_with_flag(tmp_path, body):
+    """Install the probe with mo_nojournalpages.on holding `body`."""
+    (tmp_path / "mo_nojournalpages.on").write_text(body, encoding="utf-8")
+    rt = T_runtime(str(tmp_path).replace(chr(92), "/"))
+    rt.execute("DesyncLog = { tracing = function() return true end, traceNote = function() end,"
+               " frameMark = function() end, frameDone = function() end }")
+    rt.execute("ON.POST_LOAD_JOURNAL_CHAPTER = 139")
+    rt.execute(CAPTURE_SET_CALLBACK)
+    rt.eval("ModHost.installJournalProbe")()
+    return rt
+
+
+T_runtime = runtime
+
+
+def test_sameids_keeps_the_count_and_moves_the_ids(tmp_path, fake_pack):
+    """If this crashes in the game, the ID RANGE is what the engine cannot take."""
+    rt = _probe_with_flag(tmp_path, "sameids")
+    rt.execute("res = fns[139](8, {2, 3, 4, 5, 6, 7, 8, 9})")
+    got = [int(v) for v in rt.eval("res").values()]
+    assert got == [601, 602, 603, 604, 605, 606, 607, 608]
+
+
+def test_grow_keeps_the_ids_and_moves_the_count(tmp_path, fake_pack):
+    """If this crashes instead, GROWING the page vector is what does it."""
+    rt = _probe_with_flag(tmp_path, "grow")
+    rt.execute("res = fns[139](8, {2, 3, 4, 5, 6, 7, 8, 9})")
+    got = [int(v) for v in rt.eval("res").values()]
+    assert len(got) == 20
+    assert set(got) <= {2, 3, 4, 5, 6, 7, 8, 9}, got
+
+
+def test_an_empty_flag_means_sameids_not_the_control(tmp_path, fake_pack):
+    """REVERSED in dev59, on evidence this test predates.
+
+    It used to assert the control stayed the default, so that a stale flag file could
+    not silently become a different experiment. A real capture showed the cost of
+    that: HANDOFF.md tells a player to create this file to stop the crash, they
+    created it empty, and got `restore` -- the engine's own list. The crash stopped
+    and the journal silently showed VANILLA pages instead of hdmod's.
+
+    The stale-file worry is answered without paying that: every chapter logs
+    `mode=...`, so which experiment ran is never a guess. `restore` stays available
+    by writing it in, and the test above does exactly that."""
+    rt = _probe_with_flag(tmp_path, "")
+    rt.execute("res = fns[139](8, {2, 3, 4, 5})")
+    assert [int(v) for v in rt.eval("res").values()] == [601, 602, 603, 604]
+
+
+def test_an_unknown_mode_still_falls_back_to_restore(tmp_path, fake_pack):
+    """A TYPO must not silently run an experiment: falling back to the engine's own
+    list is the one mode that changes nothing."""
+    rt = _probe_with_flag(tmp_path, "typo-here")
+    rt.execute("res = fns[139](8, {2, 3, 4, 5})")
+    assert [int(v) for v in rt.eval("res").values()] == [2, 3, 4, 5]

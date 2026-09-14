@@ -20,6 +20,10 @@ local PRIMARY_PATH = PackPath("desync_log.txt")
 local FALLBACK_PATH = "modded_online_desync_log.txt"
 
 local logPath = nil     -- the path we actually opened (nil = logging off/failed)
+--- Lines raised before any run session opened the file, held until one does.
+--- See module.earlyEvent for why this has to exist.
+local early = {}
+local EARLY_MAX = 60    -- a player who never starts a run must not accumulate forever
 local everInit = false  -- first run of a game launch truncates; later runs append
 local entNameById = nil -- lazy reverse map of ENT_TYPE: id -> "NAME"
 
@@ -246,10 +250,41 @@ local function dumpActive()
 end
 if MO_TRACE == nil then MO_TRACE = false end
 
---- Whether per-frame tracing is on. Checked once, when the log is opened for a
---- run (init), and cached — probing the disk every frame would defeat the point.
---- So the flag file must exist BEFORE the run starts (i.e. create it, then play).
+--- Whether per-frame tracing is on. Cached — probing the disk every frame would
+--- defeat the point — so the flag file must exist BEFORE the game starts.
+---
+--- Armed HERE, at module load, and not only in `init`.
+---
+--- `init` runs when the log is opened for a NETWORKED RUN. Arming only there made
+--- the tracer structurally unable to see the cases it is most needed for: a crash on
+--- the main menu, in the camp lobby, or in single-player with a mod hosted. In all
+--- three `init` never runs, `traceFileOn` stays false, `traceActive()` is false, and
+--- every `frameMark` returns immediately — so `crash_frame.txt` is never created and
+--- the flag looks like it did not work. That cost a full round trip on a
+--- single-player crash: flag present, game relaunched, crash reproduced, no file.
+---
+--- Our per-frame callbacks (the PRE_UPDATE engine marker in main.lua, the GUIFRAME
+--- pumps) are registered unconditionally and run outside a run too, so there is
+--- always something to mark.
 local traceFileOn = false
+do
+    -- Inline rather than via `fileExists`, which is defined much further down with
+    -- the session machinery. `mo_log.off` still wins: it means "write NOTHING".
+    local function present(name)
+        local found = false
+        pcall(function()
+            local probe = io.open(PackPath(name), "r")
+            if probe ~= nil then
+                probe:close()
+                found = true
+            end
+        end)
+        return found
+    end
+    if not present("mo_log.off") then
+        traceFileOn = present("mo_trace.on")
+    end
+end
 -- The trace file is opened ONCE and kept open for the session. The first version
 -- did a full io.open(mode="w")/write/close on EVERY mark and done — ~20 file
 -- CREATIONS per frame (mode "w" truncates, a filesystem metadata write each
@@ -261,6 +296,51 @@ local traceHandle = nil
 -- Every record is padded to this width so overwriting from offset 0 fully
 -- covers a longer previous line (no leftover tail). The file stays one line.
 local TRACE_WIDTH = 180
+
+--- A note that must reach disk even when no run has opened the desync log.
+---
+--- `crash_frame.txt` is one line, overwritten every mark, so it can say WHERE the
+--- process died and nothing about what led there. `earlyEvent` buffers until a run
+--- opens the log -- which offline never happens. Neither can carry a detail like
+--- "this hosted callback handed the engine a 20-element table", which is the kind of
+--- fact that decides a crash of this shape.
+---
+--- Appends, bounded, and only while tracing is armed, so it cannot grow on a normal
+--- session or exist on one.
+local NOTES_PATH = PackPath("crash_notes.txt")
+local notesWritten = 0
+local NOTES_MAX = 400
+
+--- @param fmt string
+function module.traceNote(fmt, ...)
+    if not (MO_TRACE == true or traceFileOn) or notesWritten >= NOTES_MAX then
+        return
+    end
+    notesWritten = notesWritten + 1
+    -- Formatted OUT HERE: `...` cannot be used inside the nested pcall closure,
+    -- which is not itself a vararg function.
+    local ok, s = pcall(string.format, fmt, ...)
+    local line = "[" .. nowStamp() .. "] " .. (ok and s or tostring(fmt))
+    pcall(function()
+        -- truncate on the first note of the session, append after: one file per
+        -- session, not one that grows across launches
+        local f = io.open(NOTES_PATH, notesWritten == 1 and "w" or "a")
+        if f == nil then
+            return
+        end
+        f:write(line .. "\n")
+        f:close()
+    end)
+end
+
+--- Is per-frame tracing on?
+---
+--- Exposed because `Callbacks.hosted` has to decide, at WRAP time, whether to pay
+--- for `debug.getinfo` on a hosted mod's callback so the trace can name it.
+--- @return boolean
+function module.tracing()
+    return MO_TRACE == true or traceFileOn
+end
 
 --- @return boolean
 local function traceActive()
@@ -432,6 +512,38 @@ end
 --- Alias — a general timeline event (money reconcile, resync, join, ...).
 function module.event(fmt, ...)
     module.line(fmt, ...)
+end
+
+--- An event that happens BEFORE a run session exists.
+---
+--- `line` drops everything while `logPath` is nil, and for the hot per-frame paths
+--- that is right — on the menu there is nothing there worth a `string.format`. But
+--- the save-share exchange runs ENTIRELY IN THE LOBBY: the host publishes, every
+--- peer adopts, and a peer that backs out restores, all before any run has opened
+--- the file. Every one of those lines has always gone in the bin.
+---
+--- That is why four rounds of fixes for one bug could each be, in the dev53
+--- post-mortem's own words, "correct and invisible". The `saveshare=` header line
+--- added to answer it is a snapshot taken at run start — it says what the pack holds
+--- once a run begins, never what leaving the lobby actually did. Two captures from a
+--- failing session contain the string "save share" exactly zero times, on both
+--- machines, for this reason and not because nothing ran.
+---
+--- So: write it now if the file is open, and otherwise hold it until one opens.
+--- Bounded, and stamped `lobby` because the seq:offset columns mean nothing there.
+function module.earlyEvent(fmt, ...)
+    if not MO_LOG then
+        return
+    end
+    if logPath ~= nil then
+        module.line(fmt, ...)
+        return
+    end
+    local ok, s = pcall(string.format, fmt, ...)
+    if #early >= EARLY_MAX then
+        table.remove(early, 1)
+    end
+    early[#early + 1] = "[" .. nowStamp() .. " lobby] " .. (ok and s or tostring(fmt))
 end
 
 --- Open the log for a new run. Truncates on the first run of a game launch,
@@ -631,6 +743,17 @@ function module.init()
                     end
                 end)
                 f:write("leaksweep=" .. sweep .. "\n")
+                -- Whether hosted mods got the determinism guarantees at all. A
+                -- capture taken with the bisection flag on is not evidence about
+                -- anything else, and nothing else in the log would say so.
+                local det = "on"
+                pcall(function()
+                    if ModHost ~= nil and ModHost.determinismDisabled ~= nil
+                        and ModHost.determinismDisabled() then
+                        det = "OFF (mo_nodeterminism.on present -- expect desyncs)"
+                    end
+                end)
+                f:write("determinism=" .. det .. "\n")
                 -- WHICH server, and what it is running. Half of this mod is that
                 -- separate process, and hosting on a remote one (the official
                 -- server, a friend's) means server-side fixes may simply be absent
@@ -651,6 +774,14 @@ function module.init()
                     f:write("*** PREVIOUS SESSION's last per-frame callback: "
                         .. frameMark .. "\n")
                 end
+                -- Everything that happened in the LOBBY, where there was no file to
+                -- put it in: the save-share exchange in full. Directly under the
+                -- header, because that is where `saveshare=` is and the two are read
+                -- together. See module.earlyEvent.
+                for i = 1, #early do
+                    f:write(early[i] .. "\n")
+                end
+                early = {}
             end)
             f:close()
             break
