@@ -55,6 +55,29 @@ function module.envFor(packDir)
     return module.envs[packDir]
 end
 
+--- The adapters that recognised the door this run began at: { env, adapter, packDir }.
+--- Rebuilt by every runStartedFromDoor, which is once per run start.
+--- @type table[]
+module.startDoorHits = {}
+
+--- Say, in one line, what happened the last time a run start was dispatched.
+--- Read by the desync log; kept as a plain string so nothing has to be recomputed.
+--- @type string?
+module.startDoorNote = nil
+
+--- A start destination as one readable token for the log: "1-1(theme 1)", or
+--- "none (the main exit)". `nil` and `{1,1,1}` are DIFFERENT things here and the log has to
+--- show which one arrived -- confusing the two is the bug this whole path exists for.
+--- @param dest table?
+--- @return string
+local function describeDest(dest)
+    if type(dest) ~= "table" or dest[1] == nil then
+        return "none (the main exit)"
+    end
+    return string.format("%s-%s(theme %s)", tostring(dest[1]), tostring(dest[2]),
+        tostring(dest[3]))
+end
+
 --- Tell every hosted mod which camp door the run was started from.
 ---
 --- Online a camp door is inert: Modded Online detects the press and starts the run
@@ -66,30 +89,114 @@ end
 ---
 --- Called on EVERY machine, so each one sets the mod's state for itself and the
 --- world still generates identically everywhere.
+---
+--- EVERY outcome is logged, not just a hit. This ran silent for a whole debugging
+--- session: the door was being dispatched correctly and the destination never
+--- arrived (the server discarded a 1-1 door as "the main exit"), and from the
+--- outside that is indistinguishable from a dispatch that never happened or an
+--- adapter that never matched. A miss now says which of those it was.
 --- @param dest table? # { world, level, theme } of the door, or nil for the main exit
 --- @return integer # how many adapters recognised it
 function module.runStartedFromDoor(dest)
     local applied = 0
+    local hits = {}
+    local notes = {}
     for packDir, control in pairs(module.controls) do
         local env = module.envs[packDir]
-        if env ~= nil and control ~= nil and control.matched ~= nil then
+        if env == nil or control == nil or control.matched == nil then
+            notes[#notes + 1] = string.format("%s: not hosted", tostring(packDir))
+        else
             local ok, matched = pcall(control.matched)
-            if ok and type(matched) == "table" then
+            if not ok or type(matched) ~= "table" then
+                notes[#notes + 1] = string.format("%s: no adapters matched this mod",
+                    tostring(packDir))
+            else
+                local asked = 0
                 for _, adapter in ipairs(matched) do
                     if adapter.startDoor ~= nil then
-                        local fired, hit = pcall(adapter.startDoor, env, dest)
+                        asked = asked + 1
+                        local fired, hit, why = pcall(adapter.startDoor, env, dest)
                         if fired and hit then
                             applied = applied + 1
+                            hits[#hits + 1] =
+                                { env = env, adapter = adapter, packDir = packDir }
+                            notes[#notes + 1] = string.format("%s/%s: RECOGNISED",
+                                tostring(packDir), tostring(adapter.name))
                             dbg(string.format(
                                 "mod host: %s recognised the start door (%s)",
                                 packDir, tostring(adapter.name)))
+                        else
+                            notes[#notes + 1] = string.format("%s/%s: no (%s)",
+                                tostring(packDir), tostring(adapter.name),
+                                fired and tostring(why or "did not match")
+                                    or "ERROR: " .. tostring(hit))
                         end
                     end
+                end
+                if asked == 0 then
+                    notes[#notes + 1] = string.format(
+                        "%s: none of this mod's adapters cares about start doors",
+                        tostring(packDir))
                 end
             end
         end
     end
+    module.startDoorHits = hits
+    module.startDoorNote = string.format("start door %s -> %d recognised | %s",
+        describeDest(dest), applied,
+        #notes > 0 and table.concat(notes, "; ") or "no mods are hosted")
+    if DesyncLog ~= nil then
+        pcall(DesyncLog.earlyEvent, "mod host: %s", module.startDoorNote)
+        pcall(DesyncLog.traceNote, "mod host: %s", module.startDoorNote)
+    end
     return applied
+end
+
+--- Re-apply what the recognised adapters did, at the last moment before the world
+--- is built.
+---
+--- `runStartedFromDoor` has to run at run_start: it matches on the camp door, which
+--- only exists until the warp. But the mod's own load and reset callbacks run
+--- between that and generation, and hdmod's camp setup sets HD_WORLDSTATE_STATE
+--- back to NORMAL -- so recognising the door was never enough on its own to
+--- guarantee the state was still set when generation read it. Splitting it in two
+--- means the recognition happens where the evidence is and the consequence happens
+--- where it counts.
+---
+--- Identical on every machine (the hit list was built from the same ordered
+--- run_start event everywhere), so it cannot desync generation.
+--- @return integer # how many adapters re-applied
+function module.reassertStartDoor()
+    local applied = 0
+    local notes = {}
+    for _, hit in ipairs(module.startDoorHits) do
+        if hit.adapter.reassert ~= nil then
+            local ok, note = pcall(hit.adapter.reassert, hit.env)
+            if ok then
+                applied = applied + 1
+                notes[#notes + 1] = string.format("%s/%s: %s", tostring(hit.packDir),
+                    tostring(hit.adapter.name), tostring(note or "re-applied"))
+            else
+                notes[#notes + 1] = string.format("%s/%s: ERROR %s",
+                    tostring(hit.packDir), tostring(hit.adapter.name), tostring(note))
+            end
+        end
+    end
+    if #notes > 0 and DesyncLog ~= nil then
+        pcall(DesyncLog.earlyEvent, "mod host: start door re-asserted | %s",
+            table.concat(notes, "; "))
+        pcall(DesyncLog.traceNote, "mod host: start door re-asserted | %s",
+            table.concat(notes, "; "))
+    end
+    return applied
+end
+
+--- Drop the recognised adapters. The run is over, so nothing may re-apply into the
+--- next one -- a tutorial that leaked into the following run would be this bug
+--- again with the sign flipped.
+function module.forgetStartDoor()
+    module.startDoorHits = {}
+    module.startDoorNote = nil
 end
 
 --- Record the engine state a hosted mod's journal-chapter decision reads.
@@ -109,14 +216,130 @@ end
 --- determinism.lua is for, and this deliberately is NOT that: it is a probe with a
 --- flag on it, reading values and writing a log line. Every read is pcall'd, because
 --- a diagnostic that breaks the thing it is diagnosing is worse than none.
-function module.installJournalProbe()
-    local armed = false
-    pcall(function()
-        armed = DesyncLog ~= nil and DesyncLog.tracing ~= nil and DesyncLog.tracing()
+--- Write one line where a NATIVE CRASH OUTSIDE A RUN cannot take it with us.
+---
+--- The desync log is opened by `DesyncLog.init`, which runs from
+--- `InputSync.beginSession` -- i.e. only when a networked RUN starts. This crash
+--- happens in the lobby camp, before any run: `DesyncLog.line` drops everything
+--- while `logPath` is nil, and `earlyEvent` buffers for "the next run's header"
+--- that never comes. So the one sink the measurement needs is the one sink it
+--- did not have.
+---
+--- Opened and CLOSED per line, so it is flushed to disk before the process dies --
+--- an unflushed buffer is exactly how the last capture came back empty. Journal
+--- CHAPTER loads are rare, so a file handle per line costs nothing.
+---
+--- Also `print`ed, which Playlunky captures into spelunky.log: two independent
+--- sinks, because the whole point is surviving a process that is about to die.
+--- One JournalUI field, or the reason it could not be read.
+---
+--- Every read here is pcall'd because a diagnostic that breaks the thing it is
+--- diagnosing is worse than none -- but swallowing the error and printing "?" left
+--- the first real capture saying two fields were unreadable and nothing about why.
+--- The message distinguishes "no such field on this build" from "journal_ui is nil
+--- at this point in the load", which are different findings.
+--- @param field string
+--- @return string
+local function journalField(field)
+    -- rawget, not a bare call: src.util defines JournalUI and this module must not
+    -- assume it is loaded. A missing helper is a "cannot read", not an error --
+    -- diagnosing the journal must never be the thing that breaks the boot.
+    local resolve = rawget(_G, "JournalUI")
+    local ui = type(resolve) == "function" and resolve() or nil
+    if ui == nil then
+        -- Not an error worth three identical copies per line: the capture that found
+        -- this printed the same "attempt to call a nil value (global
+        -- 'get_game_manager')" for every field, twice a line. Say it once, and say
+        -- which accessor was tried.
+        local via = rawget(_G, "GameManagerVia")
+        return "n/a(GameManager via "
+            .. (type(via) == "function" and tostring(via()) or "no helper") .. ")"
+    end
+    local ok, v = pcall(function()
+        return tostring(ui[field])
     end)
-    if not armed or rawget(_G, "ON") == nil or ON.POST_LOAD_JOURNAL_CHAPTER == nil then
+    if ok then
+        return v
+    end
+    -- The first capture of this printed "ERR(Mods/Packs/Modded Online DEV/src/
+    -- modHost.lua:245: attempt to" -- sixty characters of which fifty-two were the
+    -- path to this very file. Strip Lua's "file:line: " prefix and keep the part
+    -- that says what actually went wrong.
+    local msg = tostring(v):gsub("%s+", " ")
+    msg = msg:match("^.-%.lua:%d+:%s*(.+)$") or msg
+    return "ERR(" .. msg:sub(1, 90) .. ")"
+end
+
+--- @type integer
+local journalNotesWritten = 0
+local JOURNAL_NOTES_MAX = 400
+
+--- @param fmt string
+local function journalNote(fmt, ...)
+    if journalNotesWritten >= JOURNAL_NOTES_MAX then
+        return -- bounded like traceNote's own cap: a long session must not fill a disk
+    end
+    journalNotesWritten = journalNotesWritten + 1
+    local ok, line = pcall(string.format, fmt, ...)
+    line = ok and line or tostring(fmt)
+    pcall(function()
+        local h = io.open(PackPath("mo_journal.txt"), "a")
+        if h ~= nil then
+            h:write(os.date("[%H:%M:%S] ") .. line .. "\n")
+            h:close()
+        end
+    end)
+    pcall(print, "[ModdedOnline] " .. line)
+end
+
+--- @param name string # a flag file in the pack folder
+--- @return boolean
+local function flagPresent(name)
+    local there = false
+    pcall(function()
+        -- PackPath(), not one of the *_FLAG locals: several of them are declared
+        -- BELOW this point, so the name would resolve to a nil global and
+        -- io.open(nil) would fail inside this very pcall -- a check that silently
+        -- always says no.
+        local h = io.open(PackPath(name), "r")
+        if h ~= nil then
+            h:close()
+            there = true
+        end
+    end)
+    return there
+end
+
+function module.installJournalProbe()
+    -- ARMED BY ANY OF THREE, not by the tracer alone.
+    --
+    -- This used to require mo_trace.on, and the page OVERRIDE lives inside the
+    -- callback it gates -- so `mo_nojournalpages.on` on its own installed nothing
+    -- and the documented crash workaround silently did nothing. The one flag a
+    -- player is told to create to stop the crash was inert without a second,
+    -- undocumented flag that writes a file every frame.
+    --
+    -- mo_journalprobe.on is the cheap half on its own: it logs what the engine
+    -- offered and what the mod returned, and overrides nothing. That is the
+    -- measurement HANDOFF.md calls the missing one ("does the engine offer 8 pages
+    -- standalone too?"), and needing the per-frame tracer to take it is why nobody
+    -- has. This callback runs when a journal CHAPTER loads -- not per frame -- so
+    -- it costs nothing to leave armed.
+    local tracing, override, probe = false, false, false
+    pcall(function()
+        tracing = DesyncLog ~= nil and DesyncLog.tracing ~= nil and DesyncLog.tracing()
+    end)
+    override = flagPresent("mo_nojournalpages.on")
+    probe = flagPresent("mo_journalprobe.on")
+    if not (tracing or override or probe)
+        or rawget(_G, "ON") == nil or ON.POST_LOAD_JOURNAL_CHAPTER == nil then
         return false
     end
+    -- First line in the file, so "the probe never armed" and "the probe armed and
+    -- the journal was never opened" are distinguishable. Without it an empty
+    -- mo_journal.txt means both.
+    journalNote("journal probe armed: trace=%s override=%s probe=%s",
+        tostring(tracing), tostring(override), tostring(probe))
     set_callback(function(chapter, pages)
         -- `pages` is what the ENGINE had before the mod replaced it. Never looked at
         -- until now, and it is the one input to this whole sequence that comes from
@@ -153,26 +376,35 @@ function module.installJournalProbe()
                         packDir, prologue, worldState, tutorial)
                 end
             end
-            DesyncLog.traceNote(
+            -- Built once and sent to BOTH sinks. traceNote only writes while the
+            -- per-frame tracer is armed, so the one measurement this probe exists to
+            -- take was only obtainable at the cost of a file write every frame --
+            -- which is why it has never been taken. earlyEvent puts it in the desync
+            -- log, where it survives the lobby and costs nothing.
+            local line = string.format(
                 "journal chapter %s | engine pages in: %s | screen=%s (LEVEL=%s"
                 .. " CAMP=%s) level=%s theme=%s loading=%s | journal_ui state=%s"
-                .. " page_shown=%s | %s",
+                .. " page_shown=%s max_page_count=%s | %s",
                 tostring(chapter), incoming, tostring(st.screen),
                 tostring(SCREEN.LEVEL), tostring(SCREEN.CAMP), tostring(st.level),
                 tostring(st.theme), tostring(st.loading),
-                (function()
-                    local v = "?"
-                    pcall(function() v = tostring(get_game_manager().journal_ui.state) end)
-                    return v
-                end)(),
-                (function()
-                    local v = "?"
-                    pcall(function()
-                        v = tostring(get_game_manager().journal_ui.page_shown)
-                    end)
-                    return v
-                end)(),
+                -- These came back "?" in the first real capture, which says the read
+                -- FAILED and not what it failed on -- a diagnostic that cannot be
+                -- debugged. Report the error instead of hiding it.
+                journalField("state"), journalField("page_shown"),
+                -- THE LEADING HYPOTHESIS for the mechanism. The engine offers 8 pages
+                -- and hdmod returns 20; returning 8 with the mod's own ids does not
+                -- crash, so it is the GROWTH that kills it, which means something
+                -- downstream is sized for the count the engine passed in.
+                -- `max_page_count` is the one writable field on JournalUI that could
+                -- BE that size, and HANDOFF.md has flagged it unread for two
+                -- sessions. If it reads 8 here, the fix is to raise it before
+                -- returning a longer list rather than to truncate the journal.
+                journalField("max_page_count"),
                 #bits > 0 and table.concat(bits, " ; ") or "no hosted env")
+            pcall(DesyncLog.traceNote, "%s", line)
+            pcall(DesyncLog.earlyEvent, "%s", line)
+            journalNote("%s", line)
         end)
         -- Normally returns NOTHING: a probe must not become a second opinion on the
         -- page list. Under the flag it deliberately does become one -- see
@@ -205,7 +437,15 @@ function module.installJournalProbe()
                 -- Exactly one of those two should crash. Both crashing means the
                 -- two interact; neither means the substitution is innocent after all
                 -- and something else about the mod's own return value matters.
-                local mode = "restore"
+                -- DEFAULT IS `sameids`, the mode that both stops the crash AND
+                -- leaves the mod's own content on the page. It used to be `restore`
+                -- (the engine's own list) -- which is the non-crashing CONTROL for an
+                -- experiment, not the thing a player wants: the journal opens showing
+                -- VANILLA pages instead of hdmod's. A capture of exactly that is what
+                -- prompted this: the flag file was created empty, the crash stopped,
+                -- and the content was silently wrong. `restore` is still available by
+                -- writing it in the file.
+                local mode = "sameids"
                 pcall(function()
                     local h = io.open(PackPath("mo_nojournalpages.on"), "r")
                     if h ~= nil then
@@ -238,14 +478,21 @@ function module.installJournalProbe()
                 for i = 1, (#copy < 6 and #copy or 6) do
                     head[#head + 1] = tostring(copy[i])
                 end
-                pcall(DesyncLog.traceNote,
+                local said = string.format(
                     "journal chapter %s: OVERRIDING the page list, mode=%s ->"
                     .. " #%d { %s%s } (mo_nojournalpages.on)", tostring(chapter),
                     mode, #copy, table.concat(head, ", "), #copy > 6 and ", ..." or "")
+                pcall(DesyncLog.traceNote, "%s", said)
+                pcall(DesyncLog.earlyEvent, "%s", said)
+                journalNote("%s", said)
                 return copy
             end
         end
     end, ON.POST_LOAD_JOURNAL_CHAPTER)
+
+    -- Collapse state for the page-render probe below: one line per DISTINCT shape,
+    -- with a count for the repeats. Declared here so both branches close over them.
+    local lastRenderShape, renderRepeats = nil, 0
 
     -- ...and bracket the window the process actually dies in.
     --
@@ -269,6 +516,36 @@ function module.installJournalProbe()
             end
             pcall(DesyncLog.traceNote, "journal page render (%s)",
                 table.concat(bits, ", "))
+            -- The crash kills the process before hdmod's own RENDER_POST hook ever
+            -- runs, so whether ANY page render was attempted is a fact the capture
+            -- has to carry out of a dying process -- not one the desync log can hold.
+            --
+            -- COLLAPSED, because this fires every frame the journal is open. The
+            -- first capture of a non-crashing journal spent all 400 lines on the
+            -- identical line repeated -- roughly a second of rendering -- which is
+            -- both useless and actively harmful: a crash after that point would have
+            -- had nowhere left to write. What matters is THAT a render happened and
+            -- with what arguments, not that it happened six hundred times.
+            local shape = table.concat(bits, ", ")
+            if shape ~= lastRenderShape then
+                if renderRepeats > 0 then
+                    journalNote("  ... and %d more identical page renders",
+                        renderRepeats)
+                end
+                lastRenderShape = shape
+                renderRepeats = 0
+                journalNote("journal page render (%s)", shape)
+                -- journal_ui is unreadable at POST_LOAD_JOURNAL_CHAPTER (every field
+                -- came back "attempt to index a nil value" -- the UI does not exist
+                -- yet at chapter-load time). Here it demonstrably does, because it is
+                -- drawing. This is the one place max_page_count CAN be read, and it
+                -- is the leading candidate for the size the grown list overflows.
+                journalNote("  journal_ui at render: state=%s page_shown=%s"
+                    .. " max_page_count=%s", journalField("state"),
+                    journalField("page_shown"), journalField("max_page_count"))
+            else
+                renderRepeats = renderRepeats + 1
+            end
             DesyncLog.frameDone("journalPageProbe")
             -- NOTHING returned: an explicit nil is what Playlunky rejects as
             -- "Unexpected return type from function", and `true` would skip the draw

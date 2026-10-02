@@ -161,7 +161,7 @@ local serverVersionWarned = false  -- one warning per session, not per reconnect
 -- mod version told everyone to "update the server" every time -- for a server that
 -- was already correct. Bump this ONLY when server/server.py actually changes, and
 -- keep it equal to SERVER_VERSION there.
-local EXPECTED_SERVER_VERSION = "1.0.10"
+local EXPECTED_SERVER_VERSION = "1.0.11"
 local lastLoadingNoticeMs = 0
 -- how often the "I am about to load" warning may repeat while a load is pending
 local LOADING_NOTICE_MS = 500

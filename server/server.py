@@ -45,7 +45,7 @@ PROTOCOL_VERSION = 1
 # is then simply absent, and the symptom is a client-side mystery. That cost
 # several rounds of debugging a "waiting for other players" hang that had already
 # been fixed, on a server that did not have the fix.
-SERVER_VERSION = "1.0.10"
+SERVER_VERSION = "1.0.11"
 DEFAULT_PORT = 26000
 MAX_PLAYERS_PER_ROOM = 4
 # how long a silent client stays in the room before being dropped. Kept
@@ -127,8 +127,23 @@ UNKNOWN_PING_MS = 120
 def parse_start_dest(value):
     """Validate a camp-door destination from the wire: [world, level, theme].
 
-    Returns a clean list of ints, or None for "the main door / 1-1". Bounds keep
-    a malformed or hostile packet from warping a party somewhere nonsensical.
+    Returns a clean list of ints, or None for "no door" (the main exit). Bounds
+    keep a malformed or hostile packet from warping a party somewhere nonsensical.
+
+    A destination of 1-1 IS KEPT. This used to collapse to None on the reasoning
+    that 1-1 is where a run starts anyway, so carrying it was pointless -- and
+    that quietly broke hdmod's tutorial. Its tutorial door is a camp door whose
+    target is literally 1-1 (`spawn_door(x, y, l, 1, 1, THEME.DWELLING)`), so the
+    one field that told every machine WHICH door the run began at was thrown away
+    for exactly that door, `run_start` carried no `start`, and the client's
+    tutorial adapter was handed nil and correctly did nothing. The run then built
+    an ordinary 1-1 instead of the tutorial.
+
+    Dropping it is safe because the client never sends a destination for the main
+    exit: `pollCampDoor` records `false` for FLOOR_DOOR_MAIN_EXIT and only reads
+    `get_target()` for FLOOR_DOOR_STARTING_EXIT, so "the main door" arrives here
+    as an absent field, not as [1, 1, theme]. A present 1-1 means a real door
+    that leads to 1-1, which is a different thing and now stays distinguishable.
     """
     if not (isinstance(value, list) and len(value) == 3):
         return None
@@ -137,8 +152,6 @@ def parse_start_dest(value):
     world, level, theme = value
     if not (1 <= world <= 16 and 1 <= level <= 99 and 0 <= theme <= 32):
         return None
-    if world == 1 and level == 1:
-        return None  # the main door: the default start, nothing to carry
     return [world, level, theme]
 
 
