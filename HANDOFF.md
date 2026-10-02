@@ -6,7 +6,7 @@ them.
 
 ## Start here
 
-**Build: `2.0.0-dev55` → `dev60`. The server must be redeployed at `1.0.11`.**
+**Build: `2.0.0-dev55` → `dev62`. The server must be redeployed at `1.0.11`.**
 Section 3's fix is half a server fix and does nothing without it; a client on an
 older server now says so in a toast and in the log. Check with
 `py server/server_version.py` (exit 0 = the server matches this pack).
@@ -16,13 +16,11 @@ older server now says so in a toast and in the log. Check with
 | 1 | A peer kept the room host's progression after leaving | **FIXED**, shipped (`ef0b102`, PR #1) |
 | 2 | hdmod's journal crashes the game when hosted | **NOT FIXED.** Workaround works — see section 2 |
 | 3 | The tutorial door started an ordinary run | **FIXED**, confirmed in game |
+| 4 | The tutorial crashed entering level 2 | **Fixed in dev62 by windowing; NOT yet confirmed in game.** dev61's fix was tested and failed — see section 2, "Tutorial level 2" |
 
-**Git state:** commits `9ef9f8a`, `c397867`, `a78d624`, `1bcf49d`, `fda94cf`,
-`1d08557` sit on `fix/peer-save-restore` and were delivered to the maintainer as
-patches, because the session that wrote them had no push access to
-`DimitriKok/Modded-Online` (403 on every path — it is not that account's repo).
-Confirm with `git log --oneline origin/fix/peer-save-restore..HEAD` whether they have
-landed before assuming anything about what is on the remote.
+**Git state:** everything is on `origin/fix/peer-save-restore`; the patch-delivered
+commits from the no-push-access session have landed. `git log --oneline
+origin/fix/peer-save-restore..HEAD` should be empty before you start.
 
 **Before trusting any log in the pack folder**, read "why two captures came back
 empty" in section 2. A stale `desync_log.txt` used to ship *inside the repo* and cost
@@ -89,6 +87,39 @@ Create `mo_nojournalpages.on` in the pack folder. **Empty is correct** — that 
 
 Caveat, and it is why this is a workaround and not a fix: `sameids` clamps to the
 engine's **8** pages and hdmod has **20** story pages, so pages 9–20 are not shown.
+
+### Tutorial level 2 (dev61)
+
+Before dev61 the workaround **caused** a crash on entering tutorial level 2. hdmod
+opens each tutorial story with `show_journal(STORY, start + 1)` — pages 6, 10, 14, 18
+for level 1, 2, 3 and after — and Overlunky's `show_journal` writes `current_page`
+with **no bounds check** (`src/game_api/screen.cpp`). Clamped to 8, page 10 indexed
+off the end of the vector. Level 1 (page 6) only ever survived by fitting.
+
+**dev61 (failed in game):** let hdmod's own longer list through when the page was past
+8. That grew the list, and the game died straight after `NOT overriding -- the mod is
+opening page 10`. **Growth is fatal when hosted on every path — camp and tutorial. 8
+pages has never crashed; 12 and 20 always have.** Do not retry any fix that grows the
+list.
+
+**dev62 (current, not yet confirmed in game): a window, never growth.** When hdmod
+opens a story page past 8, the engine gets 8 pages that *are* the story entries being
+shown (`offset = page - 2`), the sandbox's `show_journal` points the journal at
+`page - offset` right after the real call, and the sandbox's `game_manager` adds the
+offset back to `flipping_to_page` so hdmod's story lock reads full numbering. All in
+`src/modHost.lua` (`module.journalWindow`). Locks that open within 8 are still clamped.
+
+If it misbehaves, `mo_journal.txt` says `WINDOW -- ... gets story pages 9..16 ...
+opened at engine page 2`. If that line is there and it still crashes, the window is
+being handed over but the engine is reading something else past the end — check
+whether `current_page` was actually corrected (the proxy is only installed with
+`mo_nojournalpages.on`).
+
+Already ruled out from Overlunky's source, do not re-derive: `JournalPageStory::
+construct` initialises every meaningful field; backend locks are `recursive_mutex`;
+the callback `unordered_map` cannot rehash during play (erase never shrinks it, and
+its boot-time capacity sits far above live size); `max_page_count` is `2147483647`
+because Overlunky sets it on every override.
 
 (Before dev56 this flag installed *nothing* unless `mo_trace.on` was also set, and
 before dev59 an empty file meant `restore` — the engine's own vanilla pages. Any
@@ -369,7 +400,7 @@ quit** — that runs packSetup's teardown and unlinks the assets, which must hap
 py -m pytest tests/ -q
 ```
 
-535 passing. **16 pre-existing failures** in `tests/test_seeded_run.py` and
+562 passing. **16 pre-existing failures** in `tests/test_seeded_run.py` and
 `tests/test_world_mailbox.py` — they cover the world mailbox deleted in dev44 and are
 unrelated to anything here.
 

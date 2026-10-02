@@ -1,5 +1,123 @@
 # Changelog
 
+## 2.0.0-dev62
+
+Tutorial level 2 still crashed under dev61. **dev61's fix was the wrong shape;
+this replaces it.**
+
+### What the capture said
+
+The dev61 log line fired exactly as designed — `NOT overriding -- the mod is opening
+page 10 and the engine's list has only 8` — and the game died straight after hdmod
+returned its list (`crash_frame.txt`: `OUT mod hdmod_journal.lua:965`). dev61 let
+hdmod's own 12-page list through to reach page 10, and that **grew** the engine's list.
+
+So growth is fatal when hosted on the tutorial's path too, not only the camp's. The
+measured rule is now unconditional: **8 pages has never crashed, in any context; 12
+and 20 always have.**
+
+### The fix: a window, never growth
+
+hdmod only ever *shows* four story pages per tutorial lock, so 8 is always enough room
+— it just has to be the right 8. When hdmod opens a story page past the engine's count:
+
+1. **The engine gets 8 pages that are the story entries being shown** — ids
+   `600 + offset + 1 .. 600 + offset + 8`, with `offset = page - 2`, so the spread
+   being opened is the window's first. hdmod draws every page from its own id
+   (`page_number - page_offset`), so the content is right wherever it sits.
+2. **The journal is pointed inside the window.** Overlunky's `show_journal` writes the
+   full page into `current_page` with no bounds check; the sandbox's `show_journal`
+   corrects it to `page - offset` the moment the real call returns, still inside
+   hdmod's callback, before the engine runs a frame.
+3. **hdmod sees full story numbering.** Its story lock compares
+   `journal_ui.flipping_to_page` with `start + 1` and `start + count - 1`, so the
+   sandbox's `game_manager` adds the offset back on the way out, while the window is
+   in force and the story chapter is what is on screen.
+
+`offset` is always even (hdmod only opens even pages), so no page changes side.
+Window pages past hdmod's 20 entries (post-tutorial only) sit beyond the lock, where
+it never lets the player flip.
+
+### Why the proxy is safe
+
+Audited against hdmod before writing it. hdmod only ever reads `game_manager.<field>`
+— seven fields — and never calls a method on `game_manager` or `journal_ui`, passes
+either to a function, writes a page field, or uses `type`, `pairs`, `rawget`,
+`tostring` or a comparison on them. Everything except the two page fields is the real
+object, and everything is the real object while no window is in force. It is installed
+only with `mo_nojournalpages.on`; without the flag hdmod sees exactly what it always
+did.
+
+The camp (journal pickup, page 2) and tutorial level 1 (page 6) fit in 8 and are still
+clamped exactly as before.
+
+## 2.0.0-dev61
+
+The tutorial crashed on entering level 2. **Caused by the journal workaround itself.**
+
+### What the log said
+
+`mo_journal.txt` from a fresh-save run, identical on both captures:
+
+| Where | Engine offers | Override returned | Result |
+|---|---|---|---|
+| camp (`screen=11`) | 8 | 8 | fine |
+| tutorial level 1 (`screen=12 level=1`) | 8 | 8 | fine |
+| tutorial level 2 (`screen=12 level=2`) | 8 | 8 | **crash** |
+
+The page list is the same on both levels, so the list is not what changed. What
+changes is the page hdmod OPENS: `schedule_story_on_fade_in` calls
+`show_journal(STORY, start + 1)`, and the tutorial locks are `{5,4}`, `{9,4}`,
+`{13,4}`, then `{17,4}` after it — pages **6, 10, 14, 18**.
+
+### Why that kills it
+
+Overlunky's `show_journal` (`src/game_api/screen.cpp`) ends with
+
+```cpp
+gm->journal_ui->current_page = page;
+gm->journal_ui->flipping_to_page = page;
+```
+
+and **no check against how many pages the chapter has**. `sameids` clamps the story
+chapter to the engine's 8, so level 2 set the journal to page 10 of 8 and the engine
+indexed off the end of the vector. Level 1 opens at 6, which is the only reason it
+ever survived.
+
+No mode of the flag could have fixed this: every mode returns the engine's count.
+
+### The fix
+
+The sandbox wraps `show_journal`, so the page being opened is known while the chapter
+loads — Overlunky loads it synchronously and only writes the page afterwards, so the
+chapter callback is the one moment the list is decided and nothing else can tell. The
+override no longer clamps when that page is past the engine's count; the mod's own
+list stands, since it is the only one that contains the page.
+
+Every hdmod lock that opens within the engine's 8 also ENDS within it (journal pickup
+`{1,4}`, tutorial level 1 `{5,4}`, replay `{1,8}`), so those are still clamped exactly
+as before and the camp is unchanged. A test reads hdmod's own lock table and fails if
+that ever stops being true.
+
+### What is still not known
+
+Level 2 onward now **grows** the story chapter (8 → 12 / 16 / 20) on the tutorial's
+path. The only growth ever captured crashing is the camp's, which goes through
+hdmod's chapter-0 hook and opens the story chapter from *inside* an Overlunky journal
+callback. The tutorial opens it from an ordinary `POST_UPDATE`. Growth on that path
+has never been tested — the clamp always got there first. If level 2 still crashes,
+the last line of `mo_journal.txt` will read `NOT overriding -- the mod is opening page
+10`, and that says growth itself is the problem on any path.
+
+Also ruled out while reading Overlunky's source, so nobody re-derives them:
+`JournalPageStory::construct` initialises every field that matters (the only one it
+leaves is padding); backend locks are `recursive_mutex`, so re-entry is safe; and
+although `set_callback` inserts straight into the `unordered_map` every dispatch loop
+iterates, cleared callbacks are erased and `erase` never shrinks the bucket array, so
+the map's capacity is fixed at boot far above its live size and cannot rehash during
+play. `max_page_count` reads `2147483647` — Overlunky sets it on every override — so it
+is not the limit either.
+
 ## 2.0.0-dev60
 
 dev59 verified in game, and the verification turned up a much older bug that had
