@@ -1,5 +1,257 @@
 # Changelog
 
+## 2.0.0-dev60
+
+dev59 verified in game, and the verification turned up a much older bug that had
+nothing to do with the journal crash.
+
+### Confirmed working
+
+`mode=sameids` on an empty flag, the engine's count with hdmod's own page ids; the
+render probe collapsed to one line instead of four hundred; and — on the tutorial
+level itself — `screen=12` (LEVEL) with `worldstate=2` (TUTORIAL), which is dev55's
+adapter doing its job at the point that actually matters rather than only at run
+start.
+
+`sameids` still truncates hdmod's 20 story pages to the engine's 8. It remains a
+workaround.
+
+### get_game_manager() is not on this Playlunky build
+
+Every JournalUI field in the capture read back `attempt to call a nil value (global
+'get_game_manager')`. Not "journal_ui is nil" — the function is not a global at all.
+
+Two real features called it inside a bare `pcall` and took the failure as "no journal
+is open": `pollPlayFlow`, which waits for the death-recap book to finish animating
+before launching character select, and `pollCloseStrayJournal`, which force-closes a
+journal drawn over the character select. Neither has ever run on this build. The
+wedged endless page-turn on CHOOSE ADVENTURER that the first one was written to
+prevent was never actually being prevented.
+
+A `pcall` around a missing global is indistinguishable from a legitimate "nothing
+here", which is why this survived so long — it took a probe that printed the message
+instead of swallowing it. `GameManager()` and `JournalUI()` in `src/util.lua` now try
+`get_game_manager()` and then the `game_manager` global, latch the miss so a dead
+lookup is not repeated every frame, and report which accessor worked.
+
+It also parks the `max_page_count` hypothesis: that field cannot be read at all until
+one of those accessors resolves on this build.
+
+## 2.0.0-dev59
+
+The tutorial door is confirmed working in game, and the journal now opens hosted
+rather than killing the process. Four fixes, every one of them forced by a real
+capture rather than guessed at.
+
+### An empty override flag did the wrong useful thing
+
+A player who creates `mo_nojournalpages.on` to stop the crash got `mode=restore` —
+the engine's own page list, which is the non-crashing **control** for an experiment.
+The crash stops, and the journal silently shows *vanilla* pages instead of hdmod's.
+Empty now means `sameids`: the engine's count with the mod's own ids, which stops the
+crash *and* keeps the mod's content. `restore` is still there by writing it in.
+
+### The page-render probe burned the whole capture budget
+
+It fires every frame the journal is open, so the first non-crashing capture spent all
+400 lines on one identical line repeated — about a second of rendering. Useless by
+itself, and actively harmful: a crash after that point would have had nowhere left to
+write. Repeats are collapsed to one line plus a count.
+
+### journal_ui cannot be read when the chapter loads
+
+Every field came back `attempt to index a nil value` — the UI does not exist yet at
+`POST_LOAD_JOURNAL_CHAPTER`. `max_page_count`, the leading candidate for the size a
+grown list overflows, is now read at RENDER time, which is the one point it
+demonstrably exists because it is drawing.
+
+### An error message that was 87% path
+
+`ERR(Mods/Packs/Modded Online DEV/src/modHost.lua:245: attempt to` — sixty
+characters, fifty-two of them the path to the file doing the reporting. Lua's
+`file:line:` prefix is stripped and the message kept.
+
+## 2.0.0-dev58
+
+The first real capture of the journal crash arrived, and it settles three things and
+leaves one open. See HANDOFF.md #2 for the log and the reading.
+
+Settled: the engine offers **8** pages hosted; **no page render is ever attempted**
+(the page-render probe writes to the same file and never fired, so the process dies
+in the engine's page *setup*, not in a draw — previously an inference, now measured);
+and hdmod's own page clamp cannot engage in the camp because `screen` is CAMP not
+LEVEL and `HD_WORLDSTATE_STATE` is NORMAL not TUTORIAL, which is why it returns all
+20 pages there.
+
+That last point means the camp journal and the tutorial journal are different cases.
+In the tutorial both of those conditions hold — the second one only since dev55 — so
+hdmod clamps its own list and never hands over the long one.
+
+### Two fixes to the probe, from what the capture could not say
+
+* `journal_ui state=? page_shown=?` — a `?` says the read failed and not what it
+  failed on, which is a diagnostic that cannot itself be debugged. It now reports the
+  error, so "no such field on this build" and "journal_ui is nil at this point in the
+  load" stop looking identical.
+* **`max_page_count` is now read.** It is the leading hypothesis for the mechanism
+  and HANDOFF.md has flagged it unread for two sessions: the engine offers 8, hdmod
+  returns 20, and returning 8 with hdmod's own ids does not crash — so the growth is
+  what kills it, and something downstream is sized for the incoming count. If that
+  field reads 8, the fix is to raise it before returning a longer list rather than to
+  truncate the journal.
+
+## 2.0.0-dev57
+
+Two captures of the journal crash came back with the same file in them, from a
+session in May, and neither of us noticed for two rounds. Both reasons are fixed.
+
+### The repo was shipping a stale desync log
+
+`desync_log.txt` and `desync_log.prev.txt` are listed in `.gitignore` — and were
+committed anyway, which `.gitignore` does not undo. So every clone put a capture from
+somebody else's session into the pack folder, where it reads exactly like a real one:
+right filename, right format, plausible contents. Its header says `Modded Online 1.0`,
+hosts crossoverlunky rather than hdmod, talks to server 1.0.10, and ends with a clean
+`run end`. Now untracked.
+
+### The desync log could not have held this crash anyway
+
+`DesyncLog.init` runs from `InputSync.beginSession` — the log is opened and rotated
+only when a networked **run** starts. Opening the journal in the lobby camp happens
+before any run, so `DesyncLog.line` drops every line (`logPath` is nil) and
+`earlyEvent` buffers for a run header that never comes. The dev56 change routed the
+journal measurement to `earlyEvent`, which for this crash meant writing it into a
+buffer that dies with the process.
+
+`mo_journal.txt` is the sink that survives: opened and closed per line so it is
+flushed before the process dies, written whether or not a run is in progress, bounded
+at 400 lines, and mirrored to `spelunky.log` via `print` as a second independent sink.
+Journal *chapter* loads are rare, so a file handle per line costs nothing.
+
+It also records that the probe armed at all, so an empty file no longer means both
+"never armed" and "armed, journal never opened"; and the page-render probe writes
+there too, so whether the engine got as far as drawing a page — the fact that
+separates page SETUP from the first DRAW — leaves the dying process.
+
+## 2.0.0-dev56
+
+The journal crash is still not fixed. What is fixed is that **the workaround for it
+did nothing**, and that the one measurement needed to fix it properly no longer costs
+a file write every frame.
+
+### The documented workaround was inert
+
+HANDOFF.md tells you to create `mo_nojournalpages.on` to stop hdmod's journal killing
+the game. That override lives inside the callback `installJournalProbe` registers —
+and the registration was gated on `DesyncLog.tracing()` alone:
+
+```lua
+if not armed or rawget(_G, "ON") == nil or ON.POST_LOAD_JOURNAL_CHAPTER == nil then
+    return false
+end
+```
+
+So creating the flag you are told to create installed **nothing**: no callback, no
+override, the same crash, and no way to tell that apart from "the workaround does not
+work". It silently required a second, undocumented flag (`mo_trace.on`) that writes
+every frame. It now arms on its own flag.
+
+### The missing measurement has its own flag
+
+HANDOFF.md has called the same question open for two sessions — *does the engine
+offer 8 pages standalone too?* — and it decides which of two completely different
+chases is the real one. Nobody has taken it because the probe that answers it needed
+the per-frame tracer.
+
+`mo_journalprobe.on` arms the logging half alone. It overrides nothing, and the
+callback runs when a journal *chapter* loads rather than per frame, so it costs
+nothing to leave on. The `engine pages in:` line now goes to the **desync log** as
+well as the trace, so it survives without `mo_trace.on` at all.
+
+No flag and no tracer still installs nothing: the probe registers a
+`POST_LOAD_JOURNAL_CHAPTER` callback, and leaving that on for everyone would change
+the exact code path the crash lives in.
+
+## 2.0.0-dev55
+
+hdmod's tutorial door puts the party in the tutorial. **Both players need dev55, and
+the SERVER needs 1.0.11** — this is half a server fix and it does nothing without it.
+
+### The server was throwing the answer away
+
+dev54 already had the whole client-side mechanism: the camp door's destination rides
+along in `run_start`, and each machine matches it against its own
+`camplib.DOOR_TUTORIAL_UID` and sets `HD_WORLDSTATE_STATE = TUTORIAL`. Ten unit tests
+covered it. It never worked once in game, and nothing said why.
+
+`parse_start_dest` in `server/server.py`:
+
+```python
+if world == 1 and level == 1:
+    return None  # the main door: the default start, nothing to carry
+```
+
+hdmod spawns its tutorial door with `spawn_door(x, y, l, 1, 1, THEME.DWELLING)`. Its
+destination **is** 1-1 — so of every door in the game, the one door this feature
+exists for was the one the server discarded. `run_start` carried no `start`, every
+machine's adapter was handed `nil`, and it correctly did nothing. The adapter, the
+dispatch and the tests were all right; the field was empty before any of them ran.
+
+Dropping the collapse is safe because the client never sends a destination for the
+main exit: `pollCampDoor` records `false` for `FLOOR_DOOR_MAIN_EXIT` and only reads
+`get_target()` for `FLOOR_DOOR_STARTING_EXIT`. "The main door" arrives as an absent
+field, not as `[1, 1, theme]`. A present 1-1 is a real door that leads to 1-1, which
+is a different thing and is now kept.
+
+### Recognising the door and acting on it are now two steps
+
+`startDoor` has to run at `run_start`: it matches on the camp door, and the door is
+gone the moment we warp. But the mod's own load and reset callbacks run between that
+and generation, and hdmod's camp setup writes `HD_WORLDSTATE_STATE = NORMAL`. So
+recognition happens where the evidence is, and the *consequence* is re-applied at
+`PRE_LEVEL_GENERATION` while `levelOrdinal` is 0 — the last write before the world is
+built, gated exactly like the fresh-run kit reset and for the same reason. It never
+re-runs the door match: by then the camp is gone and the door's uid may have been
+recycled by another entity. The hits are dropped in `clearRunState`, so a recognised
+tutorial cannot leak into the next run.
+
+### It is no longer possible for this to fail silently
+
+The three things that made a whole session of work produce no evidence:
+
+* **`runStartedFromDoor` logged only a hit.** A dispatch that found nothing was
+  indistinguishable from one that never happened. Every outcome now reaches the
+  desync log, naming the destination that arrived and why each adapter said no.
+* **`pollCampDoor` never said what it hooked.** Now one line per camp listing each
+  door and its target — the other half of the pair, so "the door was never hooked"
+  and "the destination was lost on the way" can be told apart.
+* **An out-of-date server looks exactly like this bug.** A machine that readied at a
+  door and gets a `run_start` with no destination now says so, in a toast and in the
+  log, and names the server. It is deliberately NOT worked around by substituting our
+  own door: only the machine that pressed it knows it, so the peers would build a
+  different world. A wrong-but-identical run beats a right-for-one-player one.
+
+### Restarting inside the tutorial stays in the tutorial
+
+An instant restart re-sends the door the run began at — the server keeps it on the
+room so a restart returns to the same shortcut — but by then the camp is gone and
+`DOOR_TUTORIAL_UID` names a dead entity, so the match failed and the restart landed
+in an ordinary run. Reading the door's target is only possible while the camp is up;
+comparing against it is not, so the two are separated and the target is remembered
+per sandbox. It is a target, not a licence: a normal run started afterwards still
+sends no destination and is still left alone.
+
+### Two smaller things found on the way
+
+* **The adapter required `camplib` to be detected.** Detection runs once, right after
+  the mod's main chunk, so a global assigned any later made the adapter invisible for
+  the rest of the session. `worldlib.HD_WORLDSTATE_STATUS` already names hdmod;
+  `camplib` is what the adapter works on, not what identifies it, and is now looked up
+  where it is used.
+* **The main exit and a door leading to 1-1 shared the "1-1" label.** So
+  `everyoneSameDest` called them agreement, and pressing one while readied at the
+  other read as un-readying instead of moving your vote. The main exit is now `main`.
+
 ## 2.0.0-dev54
 
 The pack goes back to a WORKING state, not an empty one. **Both players need dev54.**
