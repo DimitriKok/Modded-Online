@@ -49,6 +49,34 @@ module.envs = {}
 --- @type table<string, table>
 module.controls = {}
 
+--- The journal chapter and page a hosted mod is opening RIGHT NOW, or nil.
+---
+--- Set by the sandbox's `show_journal` wrapper for the duration of the real call.
+--- Overlunky's `show_journal` loads the chapter SYNCHRONOUSLY -- it calls
+--- `on_open_journal_chapter`, which fires ON.POST_LOAD_JOURNAL_CHAPTER, and only
+--- AFTER that returns does it write `current_page = page` -- so this is readable from
+--- inside the chapter callback, which is the one moment the page list is decided and
+--- the one moment nothing else can tell which page is about to be shown.
+--- @type { chapter: integer, page: integer }?
+module.pendingJournalOpen = nil
+
+--- The journal page WINDOW in force, or nil.
+---
+--- The engine builds the story chapter with 8 pages, and growing that list past what
+--- the engine built is a native crash when hosted -- measured: 8 pages never crashes,
+--- 12 and 20 always do, on the camp's path and the tutorial's alike. hdmod's tutorial
+--- needs story pages 9-12, 13-16 and 17-20, so instead of growing the list to reach
+--- them, the engine is handed 8 pages that ARE those story entries (ids 600 + offset
+--- + 1 .. 600 + offset + 8), and the journal is pointed at the right one of them.
+---
+--- `offset` converts between the two numberings: the engine's page index is the full
+--- story page minus `offset`. hdmod reads `journal_ui.flipping_to_page` in full story
+--- numbering for its story lock, so the sandbox's `game_manager` adds it back on the
+--- way out. `token` is the pendingJournalOpen table that caused it, so a show_journal
+--- call only ever corrects the page for a window its OWN chapter load made.
+--- @type { chapter: integer, offset: integer, token: table }?
+module.journalWindow = nil
+
 --- @param packDir string
 --- @return table? # the sandbox, or nil if that pack is not hosted
 function module.envFor(packDir)
@@ -422,6 +450,82 @@ function module.installJournalProbe()
                     restore = true
                 end
             end)
+            -- A STORY PAGE PAST THE ENGINE'S COUNT IS REACHED BY WINDOWING, NOT GROWTH.
+            --
+            -- Overlunky's show_journal writes `current_page = page` after this
+            -- callback returns, with no bounds check, so the list must contain the
+            -- page being opened. hdmod's tutorial opens 10 on level 2, 14 on level 3
+            -- and 18 after it, against an engine list of 8.
+            --
+            -- dev61 let hdmod's own (longer) list through to reach them. That grew
+            -- the list, and growing it is the hosted crash: a capture on level 2
+            -- read `NOT overriding -- the mod is opening page 10` and died straight
+            -- after. 8 pages has never crashed, anywhere -- so hand the engine 8
+            -- pages that ARE the story entries being shown, and point the journal at
+            -- the right one of them once show_journal returns (see the sandbox's
+            -- show_journal). hdmod draws each page from its own id
+            -- (`page_number - page_offset`), so a window draws the right content.
+            --
+            -- The spread being opened becomes the window's FIRST spread: offset =
+            -- page - 2. That covers any story lock up to 8 pages, and keeps
+            -- left/right parity, because hdmod only ever opens an even page (its
+            -- locks start odd and open at start + 1). Any window page past the end
+            -- of hdmod's 20 story entries sits beyond the lock, where it never lets
+            -- the player flip, so it is never drawn.
+            --
+            -- Only the story chapter (8), because 600 is the story chapter's id base
+            -- in hdmod's numbering -- the same assumption `sameids` makes below.
+            if restore then
+                module.journalWindow = nil -- every chapter load decides afresh
+                local opening = module.pendingJournalOpen
+                local wantPage = nil
+                if opening ~= nil and tonumber(opening.chapter) == tonumber(chapter) then
+                    wantPage = tonumber(opening.page)
+                end
+                local have = 0
+                pcall(function()
+                    have = #pages
+                end)
+                if wantPage ~= nil and tonumber(chapter) == 8 and have > 0
+                    and wantPage > have then
+                    local offset = math.floor(wantPage) - 2
+                    if offset % 2 ~= 0 then
+                        offset = offset - 1 -- never flip which side a page is on
+                    end
+                    if offset < 0 then
+                        offset = 0
+                    end
+                    local window = {}
+                    for i = 1, have do
+                        window[i] = 600 + offset + i
+                    end
+                    module.journalWindow = { chapter = 8, offset = offset, token = opening }
+                    local said = string.format(
+                        "journal chapter %s: WINDOW -- the mod is opening page %d and the"
+                        .. " engine built %d, so it gets story pages %d..%d (ids %d..%d),"
+                        .. " opened at engine page %d. No growth.",
+                        tostring(chapter), wantPage, have, offset + 1, offset + have,
+                        window[1], window[have], wantPage - offset)
+                    pcall(DesyncLog.traceNote, "%s", said)
+                    pcall(DesyncLog.earlyEvent, "%s", said)
+                    journalNote("%s", said)
+                    return window
+                end
+                -- Any OTHER chapter opened past the engine's count: no window is
+                -- defined for it, and every clamp below returns the engine's count --
+                -- which is an index off the end, i.e. a crash that is certain. The
+                -- mod's own list is the only one containing the page, so it stands.
+                -- hdmod never does this today; this is so it cannot be reached.
+                if wantPage ~= nil and wantPage > have then
+                    local said = string.format(
+                        "journal chapter %s: NOT overriding -- opening page %d of %d and"
+                        .. " no window is defined for this chapter.",
+                        tostring(chapter), wantPage, have)
+                    pcall(DesyncLog.earlyEvent, "%s", said)
+                    journalNote("%s", said)
+                    return
+                end
+            end
             if restore then
                 -- The flag file's CONTENTS pick which property of the mod's
                 -- substitution to reproduce, so one launch answers one question:
@@ -1092,6 +1196,144 @@ function module.newSandbox(report, opts)
             end
             return realDefineTexture(tdef, ...)
         end
+    end
+
+    -- `show_journal`, so the journal workaround knows which page is being opened.
+    --
+    -- Overlunky's show_journal (src/game_api/screen.cpp) ends with
+    --     journal_ui->current_page = page; journal_ui->flipping_to_page = page;
+    -- and NO check against how many pages the chapter actually has. The workaround
+    -- clamps hdmod's story chapter to the engine's 8 pages, so when hdmod's tutorial
+    -- opened page 10 on entering level 2 the engine indexed past the end of an
+    -- 8-entry vector and the game died. Level 1 survived only because it opens at 6.
+    --
+    -- The page is set AFTER the chapter has loaded, so the chapter callback cannot
+    -- read it from the journal. Recording it here, around the real call, is the only
+    -- way the override can know it. Restored rather than cleared, so a show_journal
+    -- issued from inside another one (hdmod does this from its chapter-0 hook) does
+    -- not erase the outer call's page.
+    local realShowJournal = rawget(_G, "show_journal")
+    if not inert and type(realShowJournal) == "function" then
+        env.show_journal = function(chapter, page, ...)
+            local outer = module.pendingJournalOpen
+            local mine = { chapter = chapter, page = page }
+            module.pendingJournalOpen = mine
+            local ok, err = pcall(realShowJournal, chapter, page, ...)
+            module.pendingJournalOpen = outer
+            if ok then
+                -- If THIS call's chapter load windowed the list, the real
+                -- show_journal has just written the FULL story page into
+                -- current_page/flipping_to_page -- an index past the 8 the engine
+                -- holds. Correct it to the window position now, still inside the
+                -- mod's Lua callback, before the engine runs another frame and reads
+                -- it. `token` makes sure a stale window from an earlier call can
+                -- never move this one.
+                local w = module.journalWindow
+                local target = tonumber(page)
+                if w ~= nil and w.token == mine and target ~= nil and target > 0 then
+                    pcall(function()
+                        local ui = JournalUI()
+                        if ui ~= nil and tonumber(ui.chapter_shown) == w.chapter then
+                            ui.current_page = target - w.offset
+                            ui.flipping_to_page = target - w.offset
+                        end
+                    end)
+                end
+            end
+            if not ok then
+                error(err, 0)
+            end
+        end
+    end
+
+    -- ...and the mod's view of the journal, so a WINDOW is invisible to it.
+    --
+    -- hdmod's story lock reads `game_manager.journal_ui.flipping_to_page` and
+    -- compares it with `page_start + 1`, `page_start + page_count - 1` and its key
+    -- animation's page -- all in full story numbering. With a window in force the
+    -- engine's value is the window position, so it is handed back with the window's
+    -- offset added and the lock logic works unchanged.
+    --
+    -- Audited against hdmod before writing this: it never calls a method on
+    -- game_manager or journal_ui (so the proxy can never be passed as `self`), never
+    -- passes either to a function, and never WRITES a page field. Everything except
+    -- the two page fields, and everything at all while no window is in force, is the
+    -- real value. Only installed with the journal workaround on, so without the flag
+    -- the mod sees exactly what it always did.
+    if not inert and flagPresent("mo_nojournalpages.on") then
+        local PAGE_FIELDS = { current_page = true, flipping_to_page = true }
+        local function realGameManager()
+            return rawget(_G, "game_manager")
+        end
+        --- @param ui any
+        --- @return table?
+        local function activeWindow(ui)
+            local w = module.journalWindow
+            if w == nil then
+                return nil
+            end
+            local open, shown = false, nil
+            pcall(function()
+                open = ui.state ~= 0 -- JOURNALUI_STATE.INVISIBLE
+                shown = tonumber(ui.chapter_shown)
+            end)
+            if open and shown == w.chapter then
+                return w
+            end
+            return nil
+        end
+        local journalProxy = setmetatable({}, {
+            __index = function(_, key)
+                local gm = realGameManager()
+                if gm == nil then
+                    return nil
+                end
+                local ui = gm.journal_ui
+                if ui == nil then
+                    return nil
+                end
+                local value = ui[key]
+                if PAGE_FIELDS[key] and type(value) == "number" then
+                    local w = activeWindow(ui)
+                    if w ~= nil then
+                        return value + w.offset
+                    end
+                end
+                return value
+            end,
+            __newindex = function(_, key, value)
+                local gm = realGameManager()
+                if gm == nil or gm.journal_ui == nil then
+                    return
+                end
+                local ui = gm.journal_ui
+                if PAGE_FIELDS[key] and type(value) == "number" then
+                    local w = activeWindow(ui)
+                    if w ~= nil then
+                        value = value - w.offset
+                    end
+                end
+                ui[key] = value
+            end,
+        })
+        env.game_manager = setmetatable({}, {
+            __index = function(_, key)
+                if key == "journal_ui" then
+                    return journalProxy
+                end
+                local gm = realGameManager()
+                if gm == nil then
+                    return nil
+                end
+                return gm[key]
+            end,
+            __newindex = function(_, key, value)
+                local gm = realGameManager()
+                if gm ~= nil then
+                    gm[key] = value
+                end
+            end,
+        })
     end
 
     -- Determinism goes on LAST of the built-ins, so it chains the host's own

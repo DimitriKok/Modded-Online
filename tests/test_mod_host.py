@@ -1163,3 +1163,363 @@ def test_an_unknown_mode_still_falls_back_to_restore(tmp_path, fake_pack):
     rt = _probe_with_flag(tmp_path, "typo-here")
     rt.execute("res = fns[139](8, {2, 3, 4, 5})")
     assert [int(v) for v in rt.eval("res").values()] == [2, 3, 4, 5]
+
+
+# ---------------------------------------- never clamp below the page being opened
+#
+# Overlunky's show_journal (src/game_api/screen.cpp) ends with
+#     journal_ui->current_page = page; journal_ui->flipping_to_page = page;
+# and no check against the chapter's page count. The workaround clamps hdmod's story
+# chapter to the engine's 8 pages, and hdmod's tutorial opens page 10 on level 2 --
+# an index off the end of an 8-entry vector, and the reported "first floor fine,
+# crashed on the next one". Level 1 opens at 6, which is why it always survived.
+
+
+def _open_and_load(rt, open_chapter, open_page, load_chapter, engine_pages):
+    """Simulate show_journal(open_chapter, open_page) loading `load_chapter`."""
+    rt.execute("ModHost.pendingJournalOpen = { chapter = %d, page = %d }"
+               % (open_chapter, open_page))
+    rt.execute("res = fns[139](%d, {%s})" % (
+        load_chapter, ", ".join(str(p) for p in engine_pages)))
+    rt.execute("ModHost.pendingJournalOpen = nil")
+    return rt.eval("res")
+
+
+def test_tutorial_level_2_gets_a_window_not_a_longer_list(tmp_path, fake_pack):
+    """Opening page 10 against an engine list of 8. dev61 let hdmod's 12-page list
+    through to reach it -- and growing the list is the hosted crash (captured: the
+    game died straight after `NOT overriding -- the mod is opening page 10`). The
+    engine must get exactly as many pages as it built, and they must be the story
+    entries being shown."""
+    rt = _probe_with_flag(tmp_path, "sameids")
+    res = _open_and_load(rt, 8, 10, 8, range(2, 10))
+    got = [int(v) for v in res.values()]
+    assert len(got) == 8, "the list grew: %r" % got
+    assert got == list(range(609, 617)), got
+    assert int(rt.eval("ModHost.journalWindow.offset")) == 8
+
+
+def test_every_later_tutorial_page_gets_a_window(tmp_path, fake_pack):
+    """Level 3 opens 14 and the post-tutorial story opens 18."""
+    for page, first in ((14, 613), (18, 617)):
+        rt = _probe_with_flag(tmp_path, "sameids")
+        got = [int(v) for v in _open_and_load(rt, 8, page, 8, range(2, 10)).values()]
+        assert len(got) == 8 and got[0] == first, (page, got)
+
+
+def test_the_window_never_grows_the_list(tmp_path, fake_pack):
+    """Whatever page is opened, the count is the engine's own."""
+    for page in (10, 12, 14, 16, 18, 20):
+        rt = _probe_with_flag(tmp_path, "sameids")
+        res = _open_and_load(rt, 8, page, 8, range(2, 10))
+        assert len(list(res.values())) == 8, page
+
+
+def test_the_window_keeps_left_and_right_pages_on_their_sides(tmp_path, fake_pack):
+    """The engine alternates left/right down the list. An odd offset would put every
+    page on the wrong side."""
+    for page in (10, 11, 14, 18):
+        rt = _probe_with_flag(tmp_path, "sameids")
+        _open_and_load(rt, 8, page, 8, range(2, 10))
+        assert int(rt.eval("ModHost.journalWindow.offset")) % 2 == 0, page
+
+
+def test_the_opened_page_is_inside_the_window(tmp_path, fake_pack):
+    """current_page is set to (page - offset) and must land on 1..engine count."""
+    for page in (10, 14, 18):
+        rt = _probe_with_flag(tmp_path, "sameids")
+        _open_and_load(rt, 8, page, 8, range(2, 10))
+        offset = int(rt.eval("ModHost.journalWindow.offset"))
+        assert 1 <= page - offset <= 8, (page, offset)
+
+
+def test_a_non_story_chapter_past_the_end_is_never_clamped(tmp_path, fake_pack):
+    """No window is defined for it, and every clamp returns the engine's count --
+    a certain index off the end. The mod's own list must stand."""
+    rt = _probe_with_flag(tmp_path, "sameids")
+    assert _open_and_load(rt, 5, 40, 5, range(2, 12)) is None
+
+
+def test_a_window_is_dropped_by_the_next_chapter_load(tmp_path, fake_pack):
+    """Opening the journal from the menu afterwards must not inherit an old offset."""
+    rt = _probe_with_flag(tmp_path, "sameids")
+    _open_and_load(rt, 8, 10, 8, range(2, 10))
+    rt.execute("res = fns[139](8, {2, 3, 4, 5, 6, 7, 8, 9})")
+    assert rt.eval("ModHost.journalWindow") is None
+
+
+def test_tutorial_level_1_is_still_clamped(tmp_path, fake_pack):
+    """Page 6 fits in the engine's 8, so the workaround still applies -- which is
+    what keeps the camp's growth crash away."""
+    rt = _probe_with_flag(tmp_path, "sameids")
+    res = _open_and_load(rt, 8, 6, 8, range(2, 10))
+    assert [int(v) for v in res.values()] == list(range(601, 609))
+
+
+def test_the_last_page_that_fits_is_still_clamped(tmp_path, fake_pack):
+    """Page 8 of 8 is in range; only beyond the end is not."""
+    rt = _probe_with_flag(tmp_path, "sameids")
+    res = _open_and_load(rt, 8, 8, 8, range(2, 10))
+    assert res is not None and len(list(res.values())) == 8
+
+
+def test_a_journal_opened_from_the_menu_is_still_clamped(tmp_path, fake_pack):
+    """No show_journal in flight: nothing says a later page is wanted, so the
+    behaviour is exactly what it was."""
+    rt = _probe_with_flag(tmp_path, "sameids")
+    rt.execute("ModHost.pendingJournalOpen = nil")
+    rt.execute("res = fns[139](8, {2, 3, 4, 5, 6, 7, 8, 9})")
+    assert [int(v) for v in rt.eval("res").values()] == list(range(601, 609))
+
+
+def test_the_menu_chapter_loaded_on_the_way_is_not_confused_for_it(tmp_path, fake_pack):
+    """show_journal(STORY, 10) on a closed journal opens chapter 2 first. Chapter 2
+    is not the one being opened at page 10, so it is handled normally."""
+    rt = _probe_with_flag(tmp_path, "sameids")
+    rt.execute("ModHost.pendingJournalOpen = { chapter = 8, page = 10 }")
+    rt.execute("res = fns[139](2, {})")
+    rt.execute("ModHost.pendingJournalOpen = nil")
+    # the engine's own (empty) list, copied -- not a pass-through decision
+    assert rt.eval("res") is not None
+
+
+def test_without_the_flag_nothing_is_overridden_either_way(tmp_path, fake_pack):
+    """The pass-through only narrows the workaround; it never adds an override."""
+    (tmp_path / "mo_journalprobe.on").write_text("", encoding="utf-8")
+    rt = T_runtime(str(tmp_path).replace(chr(92), "/"))
+    rt.execute("DesyncLog = { tracing = function() return false end,"
+               " traceNote = function() end,"
+               " frameMark = function() end, frameDone = function() end }")
+    rt.execute("ON.POST_LOAD_JOURNAL_CHAPTER = 139")
+    rt.execute(CAPTURE_SET_CALLBACK)
+    rt.eval("ModHost.installJournalProbe")()
+    for page in (6, 10):
+        assert _open_and_load(rt, 8, page, 8, range(2, 10)) is None
+
+
+# -------------------------------------------------------- the show_journal wrapper
+
+
+SHOW_JOURNAL_STUB = """
+seenDuringCall = {}
+function show_journal(chapter, page)
+    local p = ModHost.pendingJournalOpen
+    seenDuringCall[#seenDuringCall + 1] =
+        p and (tostring(p.chapter) .. ":" .. tostring(p.page)) or "none"
+    if page == 99 then error("engine refused", 0) end
+    if page == 77 then innerOpen() end
+end
+"""
+
+
+def _hosted_env(fake_pack, inert=False):
+    fake_pack("main.lua", "")
+    rt = runtime()
+    rt.execute(SHOW_JOURNAL_STUB)
+    report = rt.eval("ModHost.host")("fake.mod", rt.table_from({"inert": inert}))
+    assert report["ok"] is True, report["err"]
+    return rt, rt.eval("ModHost.envFor")("fake.mod")
+
+
+def test_the_page_is_known_while_the_chapter_loads(fake_pack):
+    rt, env = _hosted_env(fake_pack)
+    env["show_journal"](8, 10)
+    assert [str(v) for v in rt.eval("seenDuringCall").values()] == ["8:10"]
+    assert rt.eval("ModHost.pendingJournalOpen") is None, "left set after the call"
+
+
+def test_a_nested_open_restores_the_outer_one(fake_pack):
+    """hdmod calls show_journal from inside its chapter-0 hook. The inner call must
+    not erase the outer call's page, and both must be gone afterwards."""
+    rt, env = _hosted_env(fake_pack)
+    rt.globals()["innerOpen"] = lambda: env["show_journal"](8, 2)
+    env["show_journal"](8, 77)
+    seen = [str(v) for v in rt.eval("seenDuringCall").values()]
+    assert seen == ["8:77", "8:2"], seen
+    assert rt.eval("ModHost.pendingJournalOpen") is None
+
+
+def test_an_engine_error_still_clears_the_page_and_propagates(fake_pack):
+    rt, env = _hosted_env(fake_pack)
+    raised = False
+    try:
+        env["show_journal"](8, 99)
+    except Exception:
+        raised = True
+    assert raised, "an error from the real show_journal was swallowed"
+    assert rt.eval("ModHost.pendingJournalOpen") is None, "left set after an error"
+
+
+def test_inert_hosting_does_not_wrap_it(fake_pack):
+    """Inert mode must not reach the engine through anything of ours."""
+    rt, env = _hosted_env(fake_pack, inert=True)
+    assert rt.eval("rawget")(env, "show_journal") is None
+
+
+# --------------------------------------- the invariant the clamp's safety rests on
+
+
+def test_every_hdmod_lock_that_opens_within_8_also_ends_within_8():
+    """Clamping is only safe for a lock whose WHOLE range fits, not just its first
+    page. Read from hdmod's own source so a future lock cannot quietly break it."""
+    import re
+    src_path = PACK.parent / "fyi.hdmod" / "lib" / "journal" / "hdmod_journal.lua"
+    if not src_path.exists():
+        pytest.skip("hdmod is not installed next to this pack")
+    src = src_path.read_text(encoding="utf-8", errors="replace")
+    locks = [(int(s), int(c)) for s, c in
+             re.findall(r"start\s*=\s*(\d+)\s*,\s*count\s*=\s*(\d+)", src)]
+    assert locks, "no story locks found -- the pattern no longer matches hdmod"
+    engine_count = 8
+    for start, count in locks:
+        opens_at = start + 1          # schedule_story_on_fade_in: page_number + 1
+        ends_at = start + count - 1
+        if opens_at <= engine_count:
+            assert ends_at <= engine_count, (
+                "lock {start=%d, count=%d} opens within the engine's %d pages but"
+                " ends at %d: the clamp would cut it short"
+                % (start, count, engine_count, ends_at))
+
+
+# ------------------------------------------- the window, end to end: engine + mod
+#
+# Overlunky's show_journal writes the FULL story page into current_page and
+# flipping_to_page. With a window in force that is past the end of the engine's 8
+# pages, so the wrapper corrects it to the window position before the engine runs
+# a frame -- and hdmod, whose story lock reads flipping_to_page in full numbering,
+# is handed the value with the offset added back.
+
+
+ENGINE_JOURNAL = """
+game_manager = {
+    journal_ui = {
+        state = 0, chapter_shown = 2, current_page = 0, flipping_to_page = 0,
+        arrow_left = { y = 0 }, arrow_right = { y = 0 },
+    },
+    game_props = { input_menu = 0 },
+}
+function JournalUI() return game_manager.journal_ui end
+-- Overlunky's show_journal, as far as it matters here: load the chapter (which is
+-- where the probe decides on a window) and then write the page, unchecked.
+loadWindow = nil
+function show_journal(chapter, page)
+    local ui = game_manager.journal_ui
+    ui.state = 1
+    ui.chapter_shown = chapter
+    if loadWindow ~= nil then
+        ModHost.journalWindow = { chapter = chapter, offset = loadWindow,
+                                  token = ModHost.pendingJournalOpen }
+    end
+    ui.current_page = page
+    ui.flipping_to_page = page
+end
+"""
+
+
+def _windowed_mod(tmp_path, fake_pack, flag=True):
+    if flag:
+        (tmp_path / "mo_nojournalpages.on").write_text("sameids", encoding="utf-8")
+    fake_pack("main.lua", "")
+    rt = runtime(pack_root=str(tmp_path).replace(chr(92), "/"))
+    rt.execute(ENGINE_JOURNAL)
+    report = rt.eval("ModHost.host")("fake.mod", rt.table_from({"inert": False}))
+    assert report["ok"] is True, report["err"]
+    return rt, rt.eval("ModHost.envFor")("fake.mod")
+
+
+def test_the_engine_is_pointed_inside_the_window(tmp_path, fake_pack):
+    """Level 2: show_journal(STORY, 10) with offset 8 must leave the ENGINE at page
+    2 of its 8 -- not 10, which is the out-of-bounds index that crashed."""
+    rt, env = _windowed_mod(tmp_path, fake_pack)
+    rt.execute("loadWindow = 8")
+    env["show_journal"](8, 10)
+    assert int(rt.eval("game_manager.journal_ui.current_page")) == 2
+    assert int(rt.eval("game_manager.journal_ui.flipping_to_page")) == 2
+
+
+def test_no_window_means_the_page_is_left_alone(tmp_path, fake_pack):
+    """Level 1 (page 6) is clamped, not windowed: the engine keeps what it was given."""
+    rt, env = _windowed_mod(tmp_path, fake_pack)
+    rt.execute("loadWindow = nil; ModHost.journalWindow = nil")
+    env["show_journal"](8, 6)
+    assert int(rt.eval("game_manager.journal_ui.current_page")) == 6
+
+
+def test_a_stale_window_never_moves_a_later_call(tmp_path, fake_pack):
+    """A window left over from an earlier open belongs to that open. Moving a later
+    call's page by its offset would point the journal at the wrong place."""
+    rt, env = _windowed_mod(tmp_path, fake_pack)
+    rt.execute("ModHost.journalWindow = { chapter = 8, offset = 8, token = {} }")
+    rt.execute("loadWindow = nil")
+    env["show_journal"](8, 6)
+    assert int(rt.eval("game_manager.journal_ui.current_page")) == 6
+
+
+def test_the_mod_reads_full_story_numbering_through_a_window(tmp_path, fake_pack):
+    rt, env = _windowed_mod(tmp_path, fake_pack)
+    rt.execute("loadWindow = 8")
+    env["show_journal"](8, 10)
+    assert int(env["game_manager"]["journal_ui"]["flipping_to_page"]) == 10
+    assert int(env["game_manager"]["journal_ui"]["current_page"]) == 10
+
+
+def test_hdmods_story_lock_arithmetic_holds_on_level_2(tmp_path, fake_pack):
+    """hdmod's lock for level 2 is {start = 9, count = 4}. Its LEFT block fires at
+    `flipping_to_page <= start + 1` and its exit conversion at
+    `flipping_to_page >= start + count - 1`. Those have to fire on the same spreads
+    they would with the full list, or the player can flip out of the lock."""
+    rt, env = _windowed_mod(tmp_path, fake_pack)
+    rt.execute("loadWindow = 8")
+    env["show_journal"](8, 10)
+    ui = env["game_manager"]["journal_ui"]
+    start, count = 9, 4
+    assert ui["flipping_to_page"] <= start + 1, "LEFT not blocked on the first spread"
+    rt.execute("game_manager.journal_ui.flipping_to_page = 4")  # engine flips right
+    assert ui["flipping_to_page"] >= start + count - 1, "exit not reached on the last spread"
+
+
+def test_closing_the_journal_returns_raw_values(tmp_path, fake_pack):
+    rt, env = _windowed_mod(tmp_path, fake_pack)
+    rt.execute("loadWindow = 8")
+    env["show_journal"](8, 10)
+    rt.execute("game_manager.journal_ui.state = 0")
+    assert int(env["game_manager"]["journal_ui"]["flipping_to_page"]) == 2
+
+
+def test_another_chapter_on_screen_returns_raw_values(tmp_path, fake_pack):
+    rt, env = _windowed_mod(tmp_path, fake_pack)
+    rt.execute("loadWindow = 8")
+    env["show_journal"](8, 10)
+    rt.execute("game_manager.journal_ui.chapter_shown = 5")
+    assert int(env["game_manager"]["journal_ui"]["flipping_to_page"]) == 2
+
+
+def test_everything_else_is_the_real_object(tmp_path, fake_pack):
+    """hdmod hides the flip arrows and rewrites menu input through game_manager.
+    Those must reach the real journal and the real game props."""
+    rt, env = _windowed_mod(tmp_path, fake_pack)
+    rt.execute("loadWindow = 8")
+    env["show_journal"](8, 10)
+    gm = env["game_manager"]
+    gm["journal_ui"]["arrow_left"]["y"] = 100.0
+    gm["game_props"]["input_menu"] = 7
+    assert float(rt.eval("game_manager.journal_ui.arrow_left.y")) == 100.0
+    assert int(rt.eval("game_manager.game_props.input_menu")) == 7
+    assert int(gm["journal_ui"]["state"]) == 1
+    assert int(gm["journal_ui"]["chapter_shown"]) == 8
+
+
+def test_a_page_write_through_the_mod_lands_in_engine_numbering(tmp_path, fake_pack):
+    """hdmod never writes a page field today. If anything ever does, it writes in the
+    numbering it reads in, and the engine must get the window position."""
+    rt, env = _windowed_mod(tmp_path, fake_pack)
+    rt.execute("loadWindow = 8")
+    env["show_journal"](8, 10)
+    env["game_manager"]["journal_ui"]["flipping_to_page"] = 12
+    assert int(rt.eval("game_manager.journal_ui.flipping_to_page")) == 4
+
+
+def test_without_the_flag_the_mod_sees_the_real_game_manager(tmp_path, fake_pack):
+    """No workaround, no proxy: the mod's view is exactly what it always was."""
+    rt, env = _windowed_mod(tmp_path, fake_pack, flag=False)
+    assert rt.eval("rawget")(env, "game_manager") is None
