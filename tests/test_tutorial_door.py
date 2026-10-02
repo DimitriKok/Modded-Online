@@ -21,6 +21,7 @@ Run:  python -m pytest tests/test_tutorial_door.py -q
 from __future__ import annotations
 
 import pathlib
+import re
 import sys
 
 import lupa
@@ -364,5 +365,8 @@ def test_both_halves_of_the_mod_were_bumped_together():
     generate different worlds."""
     srv = (PACK / "server" / "server.py").read_text(encoding="utf-8")
     net = (PACK / "src" / "netCore.lua").read_text(encoding="utf-8")
-    assert 'SERVER_VERSION = "1.0.11"' in srv
-    assert 'local EXPECTED_SERVER_VERSION = "1.0.11"' in net
+    server_version = re.search(r'^SERVER_VERSION = "([0-9.]+)"', srv, re.M).group(1)
+    expected = re.search(r'local EXPECTED_SERVER_VERSION = "([0-9.]+)"', net).group(1)
+    assert server_version == expected
+    # 1.0.11 is the server half of the tutorial door; any later build carries it
+    assert tuple(int(x) for x in server_version.split(".")) >= (1, 0, 11)

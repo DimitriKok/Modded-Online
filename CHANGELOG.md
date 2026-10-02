@@ -1,5 +1,85 @@
 # Changelog
 
+## 2.0.0-dev63
+
+Two bugs from the first full two-player run of hdmod's tutorial. **Server 1.0.12.**
+The client half of the second fix works against a 1.0.11 server too.
+
+### The tutorial's floors desynced from 1-2 onward
+
+Both logs agreed on 1-1 and on the first generation of 1-2 (`ent=2020350654` on both
+machines). What broke it:
+
+1. hdmod opens a story journal at the start of every tutorial floor and holds the game
+   in its fade pause until that player closes it. Each player closes theirs whenever
+   they finish reading.
+2. The peer closed first, engaged sequence 2 and waited for the host's inputs. The host
+   was still reading: its gate cannot engage while its sim is held, so it kept
+   resending its sequence-1 inputs.
+3. After 4 s the peer's stall detector saw a live peer on a different sequence, read it
+   as "they're stuck below us" and asked for a resync warp. Nothing had diverged yet.
+4. The warp reached the host **while its journal was still open**. When the journal
+   closes, hdmod resumes its fade with `state.loading = FADE.IN`, which overwrote the
+   `FADE.OUT` that `warp()` had just started. So the host never regenerated 1-2. Its
+   gate took hdmod's fade as the warp's load boundary and engaged the rebased sequence
+   on the old floor. The peer regenerated (`ent=1257534570`). The logs show
+   `FLOOR DESYNC` on 1-2 and 1-3 and `POSITION DESYNC` in between.
+
+Gameplay looked synced because the inputs stayed in lockstep. The two worlds under
+those inputs were different, which is why killing the peer still worked but the
+desync notices kept coming.
+
+Fixed at both points:
+
+- **A held peer is not a desync** (`src/inputSync.lua`). Input packets now carry
+  `h = 1` while the sender's sim is held by a load, a fade or a content mod's own
+  pause. `stallDesyncRole` skips a peer that said so within the last 3 s. The 3 s
+  covers the packets sent after hdmod reopens its fade but before the new sequence
+  engages. A peer that stays on another sequence after its hold ends is detected
+  exactly as before, just later. The death screen and other run screens outside the
+  gate are not marked held. Packets from a running machine are byte-identical to
+  dev62's.
+- **A resync warp waits out a mod's own pause** (`src/eventSync.lua`,
+  `applyPendingWarp`). It was already deferred while a load fade was in flight. Now it
+  also waits while the fade pause (2) is up with no load, which is the same condition
+  as inputSync's `modUiPause`. It holds the whole payload, so the rebase and the warp
+  still happen together once the journal closes and hdmod's fade finishes.
+
+### "Waiting for everyone to pick a character..." after the tutorial
+
+After the tutorial both players reach the camp on the same frame (both logs show
+`run ending` then `lobby ready announced ... roomStarted=true` at `11:1305`). Each
+machine sends `endrun` and then `ready`, and the server receives the two machines'
+messages interleaved. So the first finisher's `ready` arrived before the last
+finisher's `endrun`, and that `endrun` reopened the room and cleared every ready. The
+client announces readiness once per camp visit, so it never sent it again. The lobby
+stayed at `1 / 2 READY` and the host's door refused to start.
+
+- **Server 1.0.12** (`server/server.py`): `Client.readied_after_leaving` records a
+  ready sent after the player left the run. Both reopen paths (everyone ended the
+  adventure, and a party wipe) keep that ready and clear the rest, which is still
+  True from before the run. `SERVER_VERSION` and `EXPECTED_SERVER_VERSION` are 1.0.12.
+- **Client self-heal** (`module.pollReadyHeal`, `src/eventSync.lua`): in the lobby,
+  after this camp visit has announced, and only once the room has **reopened**
+  (`roomStarted == false`), if the lobby list shows our ready differing from ours,
+  resend it, at most once a second. It never resends into a started room, because a
+  ready there asks to rejoin the running game. This also covers a lost `ready`
+  datagram, since `ready` is one unacknowledged UDP send. It also fixes the bug on a
+  server that has not been redeployed.
+
+### Tests
+
+- `tests/test_journal_pause_sync.py`: the detector with a held, a running and a
+  formerly held peer; `h` on the wire only when held; `preUpdate`'s held decision
+  (mod pause, load, running, death screen); the warp held inside the pause and
+  applied after it.
+- `tests/test_ready_heal.py`: the resend, its rate limit, never into a started room,
+  public-room door votes, malformed lobby lists.
+- `server/test_server.py`: "finishing the run together keeps a ready sent from the
+  camp". Five of its checks fail against 1.0.11.
+- `tests/test_tutorial_door.py`: the version check now asserts the two halves are
+  equal and at least 1.0.11, instead of pinning 1.0.11.
+
 ## 2.0.0-dev62
 
 Tutorial level 2 still crashed under dev61. **dev61's fix was the wrong shape;

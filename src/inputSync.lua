@@ -152,6 +152,15 @@ local droppedKit = {}      -- netSlot -> true (their bombs/ropes/powerups alread
 local inputBuf = {}        -- netSlot -> { [seq] = { [offset] = INPUTS } }
 local remoteLastSeq = {}   -- netSlot -> seq carried by their latest input packet
 local remoteLastRxMs = {}  -- netSlot -> when that packet arrived (get_ms)
+-- netSlot -> when their latest packet said their sim was HELD (a load, a fade, or
+-- a content mod's own pause such as hdmod's story journal) rather than running.
+-- A held machine cannot advance its sequence, so the seq it carries is not
+-- evidence of a divergent timeline; stallDesyncRole skips it. See sendRecentInputs.
+local remoteHeldMs = {}
+local HELD_GRACE_MS = 3000
+-- This machine's sim is held by the engine or a mod, not by the lockstep gate.
+-- Set every PRE_UPDATE by the gate and put on the wire with our inputs.
+local localHeld = false
 local myRecorded = -1      -- highest offset recorded locally in current seq
 local playersSpawned = false
 local stallStartMs = nil
@@ -239,6 +248,8 @@ function module.beginSession(slots, delay)
     droppedKit = {}
     remoteLastSeq = {}
     remoteLastRxMs = {}
+    remoteHeldMs = {}
+    localHeld = false
     checksums = {}
     desyncReported = false
     desyncStreak = 0
@@ -458,6 +469,7 @@ function module.rebase(newSeq)
     -- (or misclassify ahead/behind), turning one recovery into a warp loop.
     remoteLastSeq = {}
     remoteLastRxMs = {}
+    remoteHeldMs = {}
     dbgf("lockstep rebased to sequence %d", seq)
 end
 
@@ -465,7 +477,13 @@ end
 --- running on a HIGHER sequence (they advanced through a door we never saw).
 --- "ahead" = live peers are stuck below ours (WE advanced; we know where the
 --- stuck floor's exit leads). A peer that is merely loading is silent, and a
---- peer on our own sequence is just lag — neither classifies.
+--- peer on our own sequence is just lag — neither classifies. Nor does a peer
+--- whose packets say its sim is HELD: it is still on its old sequence because a
+--- load, a fade or a content mod's own pause is holding it, not because it went
+--- somewhere else. hdmod's tutorial opens a story journal on every floor and
+--- freezes the game until that player closes it; whoever closes first waits on
+--- the other, and that wait used to read as "stuck below us" after 4 s -- a resync
+--- warp nobody needed, which then landed inside the other player's open journal.
 --- @return "ahead"|"behind"|nil
 function module.stallDesyncRole()
     if stallStartMs == nil or get_ms() - stallStartMs < 4000 then
@@ -476,7 +494,9 @@ function module.stallDesyncRole()
         if netSlot ~= Network.slot and goneSlots[netSlot] == nil then
             local theirSeq = remoteLastSeq[netSlot]
             local lastRx = remoteLastRxMs[netSlot]
-            if theirSeq ~= nil and theirSeq ~= seq
+            local heldAt = remoteHeldMs[netSlot]
+            local held = heldAt ~= nil and get_ms() - heldAt < HELD_GRACE_MS
+            if theirSeq ~= nil and theirSeq ~= seq and not held
                 and lastRx ~= nil and get_ms() - lastRx < 2000 then
                 if theirSeq > seq then
                     anyBehind = true -- someone is past us
@@ -515,7 +535,10 @@ local function sendRecentInputs()
     for f = base, myRecorded do
         list[#list + 1] = mine[f] or 0
     end
-    Network.sendState({ s = seq, f = base, i = list })
+    -- `h`: our sim is held (see localHeld), so the peer must not read the seq we
+    -- are stuck on as a desync. Absent rather than 0 when running, so a packet
+    -- from a build without it means exactly what it always did.
+    Network.sendState({ s = seq, f = base, i = list, h = localHeld and 1 or nil })
     -- While stalled, prove we are still putting the frames the peer is waiting on
     -- back on the wire. If this says we resend offsets covering theirs and their rx
     -- counter never moves, the packets are not crossing and it is not lockstep.
@@ -549,6 +572,9 @@ local function onRemoteInputs(netSlot, data)
     -- and that they are alive: the stall-desync detector reads these
     remoteLastSeq[netSlot] = theirSeq
     remoteLastRxMs[netSlot] = get_ms()
+    if tonumber(data.h) == 1 then
+        remoteHeldMs[netSlot] = get_ms()
+    end
     perSlot[theirSeq] = perSlot[theirSeq] or {}
     local base = math.floor(tonumber(data.f) or 0)
     for k, buttons in ipairs(data.i) do
@@ -1175,6 +1201,9 @@ local function preUpdate()
         end
         awaitLoadBoundary = false -- the awaited boundary is here
         engaged = false -- re-engage with a fresh sequence on the next screen
+        -- held only by a load: a run screen outside the gate (death screen,
+        -- camp) is not a pause, and must still classify as it always did
+        localHeld = levelState.loading ~= FADE.NONE
         return
     end
     -- The menu pause (flag 1) fires when a player opens the pause menu OR the
@@ -1228,8 +1257,10 @@ local function preUpdate()
                 pauseSlots[coopIndex].buttons_gameplay = 0
             end
         end
+        localHeld = true -- a mod's own pause (modUiPause) lands here too
         return -- a real engine pause: the sim won't tick, don't advance anything
     end
+    localHeld = false
     if awaitLoadBoundary then
         return true -- a reset/rebase warp is in flight: hold until it loads
     end

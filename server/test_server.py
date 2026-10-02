@@ -961,6 +961,87 @@ async def run_tests():
         client.send({"t": "leave"})
     await asyncio.sleep(0.3)
 
+    print("finishing the run together keeps a ready sent from the camp:")
+    # The end of hdmod's tutorial (or any run every player leaves on the same
+    # frame): each machine sends endrun then ready, and the server interleaves the
+    # two machines. The first finisher's ready lands BEFORE the last finisher's
+    # endrun reopens the room; the reopen used to clear it, the client never sent
+    # it again, and the host's door waited "for everyone to pick a character".
+    rf1 = await start_fake_client("RF1", 26943)
+    rf2 = await start_fake_client("RF2", 26944)
+    await rf1.create_room()
+    await rf2.join_room(rf1.room)
+    rf1.send({"t": "ready", "ready": True, "char": 194})
+    rf2.send({"t": "ready", "ready": True, "char": 195})
+    await asyncio.sleep(0.2)
+    rf1.send({"t": "start"})
+    await asyncio.sleep(0.4)
+    rf_room = protocol.rooms.get(rf1.room)
+    check(rf_room is not None and rf_room.started, "the run started")
+    rf2.send({"t": "endrun"})
+    await asyncio.sleep(0.15)
+    rf2.send({"t": "ready", "ready": True, "char": 195})  # peer is back in the camp
+    await asyncio.sleep(0.15)
+    rf1.send({"t": "endrun"})  # the last finisher: this one reopens the room
+    await asyncio.sleep(0.15)
+    rf1.send({"t": "ready", "ready": True, "char": 194})
+    await asyncio.sleep(0.3)
+    if rf_room is not None:
+        by_name = {c.name: c for c in rf_room.clients.values()}
+        check(not rf_room.started, "everyone ended the adventure: the lobby reopened")
+        check(by_name["RF2"].ready,
+              "a ready sent from the camp before the room reopened survives the reopen")
+        check(by_name["RF1"].ready, "the last finisher's ready after the reopen counts")
+        check(all(c.ready for c in rf_room.clients.values()),
+              "so the host's door can start the next run")
+        rf1.send({"t": "start"})
+        await asyncio.sleep(0.4)
+        check(rf_room.started, "and it does")
+        # Ready from BEFORE a run must still be cleared by the reopen: these two
+        # leave without readying from the camp, so nobody should read as ready.
+        rf1.send({"t": "endrun"})
+        rf2.send({"t": "endrun"})
+        await asyncio.sleep(0.4)
+        check(not rf_room.started, "everyone left again: reopened")
+        check(not any(c.ready for c in rf_room.clients.values()),
+              "a ready left over from before the run is still cleared by the reopen")
+        # A ready sent BEFORE the endrun (UDP reordered it ahead) was readiness for
+        # the run being left, not for the next one: cleared.
+        rf1.send({"t": "ready", "ready": True})
+        rf2.send({"t": "ready", "ready": True})
+        await asyncio.sleep(0.2)
+        rf1.send({"t": "start"})
+        await asyncio.sleep(0.4)
+        rf2.send({"t": "endrun"})
+        await asyncio.sleep(0.15)
+        rf2.send({"t": "ready", "ready": True})  # readied for the NEXT run...
+        await asyncio.sleep(0.15)
+        rf2.send({"t": "ready", "ready": False})  # ...then changed their mind
+        await asyncio.sleep(0.15)
+        rf1.send({"t": "endrun"})
+        await asyncio.sleep(0.3)
+        by_name = {c.name: c for c in rf_room.clients.values()}
+        check(not by_name["RF2"].ready, "the LATEST readiness from the camp is the one kept")
+        # The party-wipe reopen (reset) keeps it the same way.
+        rf1.send({"t": "ready", "ready": True})
+        rf2.send({"t": "ready", "ready": True})
+        await asyncio.sleep(0.2)
+        rf1.send({"t": "start"})
+        await asyncio.sleep(0.4)
+        rf2.send({"t": "endrun"})
+        await asyncio.sleep(0.15)
+        rf2.send({"t": "ready", "ready": True})
+        await asyncio.sleep(0.15)
+        rf1.send({"t": "reset"})
+        await asyncio.sleep(0.3)
+        by_name = {c.name: c for c in rf_room.clients.values()}
+        check(not rf_room.started, "a party wipe reopened the room")
+        check(by_name["RF2"].ready and not by_name["RF1"].ready,
+              "the reset reopen keeps the camp ready and clears the in-run player's")
+    for client in (rf1, rf2):
+        client.send({"t": "leave"})
+    await asyncio.sleep(0.3)
+
     print("host give-up hand-off (End Adventure) keeps a private room open:")
     gh = await start_fake_client("GiveUpHost", 26924)
     gp = await start_fake_client("GiveUpPeer", 26925)
