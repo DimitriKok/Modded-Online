@@ -45,7 +45,7 @@ PROTOCOL_VERSION = 1
 # is then simply absent, and the symptom is a client-side mystery. That cost
 # several rounds of debugging a "waiting for other players" hang that had already
 # been fixed, on a server that did not have the fix.
-SERVER_VERSION = "1.0.11"
+SERVER_VERSION = "1.0.12"
 DEFAULT_PORT = 26000
 MAX_PLAYERS_PER_ROOM = 4
 # how long a silent client stays in the room before being dropped. Kept
@@ -188,6 +188,11 @@ class Client:
         # playing with this slot stood still, and the run is over once everyone
         # has. Reset at each run start.
         self.left_run = False
+        # `ready` as this player set it AFTER leaving the run, i.e. standing in the
+        # camp for the next one. The lobby reopening when the last player leaves
+        # keeps this one and clears the rest: `ready` alone cannot tell the two
+        # apart, because it is still True from before the run started.
+        self.readied_after_leaving = False
         # a matchmaker who dropped into a game ALREADY in progress and hasn't yet
         # readied to join it. They sit in the room (in the camp) but stay OUT of
         # the run's roster until they ready up; then the next run start includes
@@ -542,6 +547,8 @@ class ModdedOnlineServer(asyncio.DatagramProtocol):
             client.char = char
         # which camp door they are standing at (None = main door / 1-1)
         client.start_dest = parse_start_dest(msg.get("dest"))
+        if room.started and client.left_run:
+            client.readied_after_leaving = client.ready
         # A player readying up while a run they are NOT part of is in progress commits
         # to (re)joining it: a fresh late-joiner, OR someone who left the run (End
         # Adventure / disconnect) and came back to the camp. Both carry left_run=True.
@@ -661,6 +668,7 @@ class ModdedOnlineServer(asyncio.DatagramProtocol):
         rejoining = sorted(c.slot for c in participants if c.left_run)
         for c in participants:
             c.left_run = False  # fresh run: everyone (incl. a readied late-joiner) is back in
+            c.readied_after_leaving = False
 
         # The Spelunky adventure seed is a pair of ints (set_adventure_seed(first, second)).
         # A fresh run gets a random 31-bit pair (comfortably integer-typed in every Lua
@@ -908,7 +916,9 @@ class ModdedOnlineServer(asyncio.DatagramProtocol):
         room.seed = None
         room.last_restart_at = 0.0  # a reopened room is a fresh restart opportunity
         for member in room.clients.values():
-            member.ready = False
+            # see on_endrun: a player already back in the camp and readied stays so
+            member.ready = member.readied_after_leaving
+            member.readied_after_leaving = False
             member.left_run = False
         log.info("room %s: run over, lobby reopened", room.code)
         self.push_lobby(room)
@@ -923,6 +933,8 @@ class ModdedOnlineServer(asyncio.DatagramProtocol):
         if client is None or not room.started or client.left_run:
             return
         client.left_run = True
+        # anything readied before this was readiness for the run being left
+        client.readied_after_leaving = False
         log.info("room %s: %s ended their adventure (slot %d)", room.code, client.name, client.slot)
         # Ending your adventure leaves the RUN but not the ROOM, so drop_client
         # never runs and its promotion never fired. The room went on naming a run
@@ -943,9 +955,18 @@ class ModdedOnlineServer(asyncio.DatagramProtocol):
             room.started = False
             room.seed = None
             room.last_restart_at = 0.0  # a reopened room is a fresh restart opportunity
+            # Keep the readiness of whoever is ALREADY back in the camp and readied.
+            # Every player who finishes the run reaches the camp at the same moment
+            # and sends endrun then ready from the same frame; the server sees them
+            # interleaved, so the first finisher's ready lands BEFORE the last
+            # finisher's endrun reopens the room. Clearing every ready here wiped
+            # it, the client (which announces once per camp visit) never sent it
+            # again, and the host's door said "Waiting for everyone to pick a
+            # character..." forever. Ready from before the run is still cleared.
             for c in room.clients.values():
                 c.left_run = False
-                c.ready = False
+                c.ready = c.readied_after_leaving
+                c.readied_after_leaving = False
             log.info("room %s: everyone ended the adventure, lobby reopened", room.code)
         self.push_lobby(room)
 

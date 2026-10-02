@@ -6,9 +6,10 @@ them.
 
 ## Start here
 
-**Build: `2.0.0-dev55` → `dev62`. The server must be redeployed at `1.0.11`.**
-Section 3's fix is half a server fix and does nothing without it; a client on an
-older server now says so in a toast and in the log. Check with
+**Build: `2.0.0-dev55` → `dev63`. The server must be redeployed at `1.0.12`.**
+Section 3's fix is half a server fix and does nothing without it (1.0.11 or later).
+Section 6 has a server half too, but its client half works on its own. A client on a
+server other than the one it expects says so in a toast and in the log. Check with
 `py server/server_version.py` (exit 0 = the server matches this pack).
 
 | # | Bug | State |
@@ -17,6 +18,8 @@ older server now says so in a toast and in the log. Check with
 | 2 | hdmod's journal crashes the game when hosted | **NOT FIXED.** Workaround works — see section 2 |
 | 3 | The tutorial door started an ordinary run | **FIXED**, confirmed in game |
 | 4 | The tutorial crashed entering level 2 | **FIXED** in dev62 by windowing, confirmed in game. dev61's fix was tested and failed — see section 2, "Tutorial level 2" |
+| 5 | Multiplayer tutorial: floors desynced from 1-2 on | **FIXED** in dev63, not yet confirmed in game — section 5 |
+| 6 | After the tutorial, the camp door waited "for everyone to pick a character" | **FIXED** in dev63 / server 1.0.12, not yet confirmed in game — section 6 |
 
 **Git state:** everything is on `origin/fix/peer-save-restore`; the patch-delivered
 commits from the no-push-access session have landed. `git log --oneline
@@ -331,6 +334,46 @@ the join branch of `run_start` never reads it. Someone joining a tutorial in pro
 therefore does not get `HD_WORLDSTATE_STATE` set, and their floor generates as an
 ordinary level. Untested and out of scope here — it needs the destination carried on
 the join path and the hits re-established on the joiner.
+
+## 5. The tutorial's floors desynced in multiplayer — FIXED in dev63, NOT YET CONFIRMED IN GAME
+
+This one showed up as `FLOOR DESYNC` from 1-2 onward, and later `POSITION DESYNC`,
+while the gameplay looked synced. The cause was hdmod's per-floor story journal. Each
+player closes it on their own time, and whoever closes first waits for the other. That
+wait looked like a desync to the stall detector after 4 s, which then requested a
+resync warp. The warp reached the other player while their journal was still open.
+hdmod's journal close writes `state.loading = FADE.IN`, which cancelled the warp on
+that machine only, so one machine regenerated the floor and the other didn't. The full
+chain, with log lines, is in CHANGELOG `2.0.0-dev63`.
+
+Fixed twice. Input packets carry `h = 1` while the sim is held, and the detector
+ignores held peers. A resync warp also waits out a mod's own pause.
+
+**To confirm:** play the tutorial with two players and have one of them read each
+journal for a long time (more than 10 s). The other player should see "waiting for
+players" until the first one closes it, with **no** `RESYNC WARP` line and no
+`FLOOR DESYNC` in either log.
+
+**Reading the logs:** the `[time seq:offset]` stamp is cached per engine frame, and
+the frame counter stops while the journal holds the game. So every line logged during
+a journal shows the time of the frame it opened on. On the host in this session,
+`RESYNC WARP` was stamped 18:58:41 but happened about 8 s later. Line it up with the
+other log by event, not by stamp.
+
+## 6. "Waiting for everyone to pick a character..." after the tutorial — FIXED in dev63 / server 1.0.12, NOT YET CONFIRMED IN GAME
+
+Both players finish the run on the same frame, and each sends `endrun` and then
+`ready`. The server interleaves the two machines, so one player's `ready` arrived
+before the other player's `endrun` reopened the room. The reopen cleared it, and the
+client never resent it. Server 1.0.12 keeps a ready sent after leaving the run. The
+client also resends its ready whenever the reopened room's lobby list disagrees with
+it, so this is fixed even before the server is redeployed.
+
+**To confirm:** finish the tutorial with two players. The lobby should reach
+`2 / 2 READY` in the camp, and the host's door should start the run. If it doesn't,
+look for `lobby ready RESENT` in the log of the player shown as not ready.
+
+---
 
 ## Diagnostic tooling (flags and the files they write)
 

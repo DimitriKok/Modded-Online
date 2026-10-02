@@ -2907,6 +2907,17 @@ local function applyPendingWarp()
     if get_local_state().loading ~= FADE.NONE then
         return -- wait out the in-flight load, then warp
     end
+    -- ...and wait out a content mod's own pause (the fade pause, 2, raised with no
+    -- load in flight -- inputSync's modUiPause). hdmod's story journal is one: when
+    -- the player closes it, hdmod writes `state.loading = FADE.IN` to resume its
+    -- fade, which overwrites the FADE.OUT that warp() just started. The warp is
+    -- silently cancelled on this machine only, the gate takes hdmod's fade as the
+    -- warp's load boundary and engages the rebased sequence on the OLD floor, while
+    -- every other machine regenerates it: a FLOOR DESYNC for the rest of the run.
+    -- Holding the payload keeps rebase and warp together; they run once it closes.
+    if (get_local_state().pause & 2) ~= 0 then
+        return
+    end
     local p = pendingWarp
     pendingWarp = nil
     pendingRunSeed = { math.floor(tonumber(p.a) or 0), math.floor(tonumber(p.b) or 0) }
@@ -4224,12 +4235,60 @@ function announceLobbyReady()
             myReady = not Network.isPublicRoom()
             myReadyDest = nil -- back in camp: readied at the main exit again
             Network.setReady(myReady, myPickedChar, nil)
+            module.readyHealMs = get_ms() -- this IS the send; give it time to land
             if DesyncLog ~= nil then
                 DesyncLog.event("lobby ready announced: ready=%s public=%s roomStarted=%s",
                     tostring(myReady), tostring(Network.isPublicRoom()),
                     tostring(Network.roomStarted))
             end
         end
+end
+
+--- Put our readiness back when the server's copy of it no longer matches.
+---
+--- announceLobbyReady sends it ONCE per camp visit, as a single datagram, and the
+--- server can lose it two ways: the datagram is dropped, or the lobby reopens on
+--- top of it. The second is the ordinary end of a run: every player reaches the
+--- camp on the same frame and sends endrun, then ready. The server interleaves the
+--- machines, so the first finisher's ready arrives before the last finisher's
+--- endrun, and a server before 1.0.12 cleared every ready when that endrun reopened
+--- the room. Our sentReady said it was done, so nothing was ever sent again: one
+--- player showed as not ready for good and the host's door answered "Waiting for
+--- everyone to pick a character..." with both characters picked.
+---
+--- Only once the room has REOPENED (`roomStarted == false`): readying while a run
+--- is in progress asks the server to fold us back into that run (join_pending),
+--- which is not something to repeat on a timer. Module-scoped: this file's main
+--- chunk is at Lua's 200-local limit.
+module.readyHealMs = 0
+function module.pollReadyHeal()
+    if not sentReady or Network.phase ~= Network.PHASE.LOBBY or Network.isInRun() then
+        return
+    end
+    if Network.roomStarted ~= false or type(Network.lobbyPlayers) ~= "table" then
+        return
+    end
+    local mine = nil
+    for _, player in ipairs(Network.lobbyPlayers) do
+        if type(player) == "table" and player.slot == Network.slot then
+            mine = player
+        end
+    end
+    if mine == nil or (mine.ready == true) == myReady then
+        return
+    end
+    -- one datagram a second until the lobby push agrees: the first resend crosses
+    -- the push that would have confirmed it, and resending the same value is a no-op
+    local now = get_ms()
+    if now - module.readyHealMs < 1000 then
+        return
+    end
+    module.readyHealMs = now
+    Network.setReady(myReady, myPickedChar, myReadyDest)
+    if DesyncLog ~= nil then
+        DesyncLog.event("lobby ready RESENT: server has ready=%s, ours is %s",
+            tostring(mine.ready == true), tostring(myReady))
+    end
 end
 
 Network.onEvent("run_start", onRunStart)
@@ -4369,6 +4428,7 @@ set_callback(function()
         DesyncLog.frameMark("guiframe:eventSync")
     end
     SafeCall("eventSync:pollLobbyReady", pollLobbyReady)
+    SafeCall("eventSync:pollReadyHeal", module.pollReadyHeal)
     SafeCall("eventSync:pollPlayFlow", pollPlayFlow)
     SafeCall("eventSync:pollCloseStrayJournal", pollCloseStrayJournal)
     -- ...and own the journal render hook's lifetime, so it is absent outside a
