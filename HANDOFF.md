@@ -16,7 +16,7 @@ older server now says so in a toast and in the log. Check with
 | 1 | A peer kept the room host's progression after leaving | **FIXED**, shipped (`ef0b102`, PR #1) |
 | 2 | hdmod's journal crashes the game when hosted | **NOT FIXED.** Workaround works — see section 2 |
 | 3 | The tutorial door started an ordinary run | **FIXED**, confirmed in game |
-| 4 | The tutorial crashed entering level 2 | **Fixed in dev62 by windowing; NOT yet confirmed in game.** dev61's fix was tested and failed — see section 2, "Tutorial level 2" |
+| 4 | The tutorial crashed entering level 2 | **FIXED** in dev62 by windowing, confirmed in game. dev61's fix was tested and failed — see section 2, "Tutorial level 2" |
 
 **Git state:** everything is on `origin/fix/peer-save-restore`; the patch-delivered
 commits from the no-push-access session have landed. `git log --oneline
@@ -102,7 +102,7 @@ opening page 10`. **Growth is fatal when hosted on every path — camp and tutor
 pages has never crashed; 12 and 20 always have.** Do not retry any fix that grows the
 list.
 
-**dev62 (current, not yet confirmed in game): a window, never growth.** When hdmod
+**dev62 (current, confirmed in game): a window, never growth.** When hdmod
 opens a story page past 8, the engine gets 8 pages that *are* the story entries being
 shown (`offset = page - 2`), the sandbox's `show_journal` points the journal at
 `page - offset` right after the real call, and the sandbox's `game_manager` adds the
