@@ -13,7 +13,7 @@
 
 meta = {
     name = "Modded Online (loader build)",
-    version = "2.0.0-dev63",
+    version = "2.0.0-dev64",
     description = "Play scriptable mods together via a self-hosted server",
     author = "EatYoCake + DoctorPuppy",
     online_safe = false, -- not for the *official* online — that's the point
@@ -199,6 +199,15 @@ else
         ModHost.onProgress = nil
         bootStep("hosted " .. packDir)
     end
+end
+
+-- The window in which a fresh run's QUEST_FLAG.RESET is shown to the hosted mods
+-- (see EventSync.showRunReset). Its closing callbacks must run AFTER the hosted mods'
+-- own PRE_LOAD_SCREEN / PRE_LEVEL_GENERATION callbacks and before the engine's load,
+-- and callbacks run in registration order -- so it is registered here, after hosting.
+if EventSync ~= nil and EventSync.installRunResetWindow ~= nil then
+    bootStep("eventSync: run start window for the hosted mods")
+    SafeCall("main/installRunResetWindow", EventSync.installRunResetWindow)
 end
 
 -- A probe over the journal-chapter load, armed by mo_trace.on, mo_journalprobe.on

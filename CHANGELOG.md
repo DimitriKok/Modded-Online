@@ -1,5 +1,146 @@
 # Changelog
 
+## 2.0.0-dev64
+
+Three bugs from the first full run after hdmod's tutorial, plus one found in the same
+capture. The server is unchanged; 1.0.12 is still the build to run.
+
+### Mama Tunnel's donations ran on one machine only
+
+hdmod's shortcut donations (`lib/shortcut.lua`) ride on the vanilla Mama Tunnel dialog
+on a TRANSITION, and that dialog is driven by the engine's MENU input,
+`game_manager.game_props.input_menu`. The engine fills that field from each machine's own
+devices. The lockstep gate fed the player slots and never touched it, so her dialog only
+advanced on the machine whose player pressed. hdmod's `donate()` takes the bombs from
+player 1 first, so the machine that pressed took the host's bomb and the other machine
+never did. The capture shows player 1 with 4 bombs on the host's machine after the
+transition, a bomb count that never matched again. It also shows a `POSITION DESYNC` on
+that transition (`8:600`), while one machine's party stood in her dialog and the other's
+walked.
+
+Fixed in `src/inputSync.lua`. On a transition, the menu input now travels with the
+gameplay input:
+
+- **Recorded with the gameplay input.** Each player's menu input goes into the same
+  per-frame record, above bit 16. `buttons_gameplay` is 16 bits, so the INPUTS bits
+  and the sentinel are untouched. A level's records are bit-for-bit what they were.
+- **Applied to the party.** On every simulated transition frame, `input_menu` and
+  `input_menu_previous` hold the party's menu input, meaning everyone's presses
+  together. This happens in our `PRE_UPDATE`, which runs before the engine's update
+  and before hdmod's donation check (callbacks run in registration order).
+- **Device value restored after the update.** The journal and pause menu read the
+  field after the update (hdmod's own journal lock relies on that), so they still
+  answer this player's own presses.
+- **Synced buttons:** SELECT, BACK, LEFT, RIGHT, UP and DOWN. JOURNAL, DELETE and
+  RANDOM stay local.
+- **Presses into a player's own UI are not shared.** Presses made into a player's own
+  pause menu, journal or chat box are not recorded. While a player's pause menu is
+  open, that frame gets no menu input on any machine, because hdmod only handles a
+  donation while `pause_ui.visibility == 0` on its own machine.
+- **Taps during a stall are latched.** The gate records each frame once, so a tap
+  that came and went while the gate was stalled used to be lost. It now lands in the
+  next frame recorded.
+- **The transition hold covers it too.** The first second of a transition already
+  holds gameplay input neutral; it now holds menu input neutral as well.
+- **Both fields are written, or neither.** `input_menu_previous` is written before
+  `input_menu`, because overriding the current input without its previous one would
+  read a held press as a new press every frame. If this build refuses either write,
+  the sync switches itself off for the session and says so in the log, instead of
+  overriding half the pair.
+
+### The tutorial came back after the first real run
+
+hdmod's prologue lives in the engine's `savegame.tutorial_state` (0 nothing, 1 journal
+got, 2 key spawned, 3 door unlocked, 4 complete), and `camplib.is_prologue_active()` is
+`tutorial_state <= 2`. hdmod never writes it; the engine moves it on when the key
+unlocks the camp's main exit and the first adventure starts through it. Online that
+door is inert (`can_enter` is false), so neither happened. The capture shows
+`prologue=true ... tutorial=2` on the death screen after a full run, and every camp
+after that replays the rope entry and the journal and keeps the main door locked.
+
+Fixed in `src/determinism.lua` with a new hdmod adapter, `hd-prologue-exit`, beside
+`hd-tutorial-door`. A run started from the main exit completes the prologue (state 4),
+the way walking through that door would have. It only does so where the door could
+have opened:
+
+- **State 3:** the door is already unlocked.
+- **State 2, camp right after the tutorial:** this is the camp where hdmod hands the
+  party the key (`is_post_tutorial`).
+- **State 2, tutorial finished before:** hdmod's tutorial record list is not empty.
+  This also rescues a save that already lost the key once, like the host's save now.
+
+States 0 and 1, and a party that never finished the tutorial, are left alone,
+because in the game itself the door would still be locked. Every input to that
+decision is identical on every machine.
+
+### The Udjat key and chest on two floors, sometimes two keys
+
+hdmod places its own Udjat key and chest (one level of 1-2 to 1-4, chosen once per
+run). At the start of each run it also raises quest flags 17, 18 and 19 (Udjat eye,
+black market and drill "already spawned"), so the game never places its own on top.
+That run setup (`lib/flags.lua`) is gated on `QUEST_FLAG.RESET` in
+`PRE_LEVEL_GENERATION`.
+
+`applyFreshRunReset` zeroes `quest_flags` in both `PRE_LOAD_SCREEN` and
+`PRE_LEVEL_GENERATION`, and our callbacks run before the hosted mod's, so hdmod never
+saw the flag. The game then placed its own key and chest as well. The capture shows
+it on the run's floors:
+
+| Floor | Key | Chest | Quest flags | Whose |
+|---|---|---|---|---|
+| 1-2 | yes | yes | 17 clear | hdmod's pair |
+| 1-3 | yes | no | 17 now set | the game's own |
+
+Flag 18 is never set, because hdmod's block never ran.
+
+hdmod's other run setup on that flag was lost the same way: its per-run feat counters,
+its character-unlock coffins, its custom-entity carry-over and Yang's turkey pen.
+
+Fixed in `src/eventSync.lua`. On a fresh run's first load, our early `PRE_LOAD_SCREEN`
+and `PRE_LEVEL_GENERATION` callbacks raise the flag again after our reset, for the
+hosted mods' callbacks (`showRunReset`). A callback that `main.lua` registers after
+hosting lowers it again before the engine acts on the load (`installRunResetWindow`).
+The engine sees exactly what it did before, every machine raises the flag at the same
+point of the same ordered run start, and `POST_LEVEL_GENERATION` is a backstop.
+
+The flag is only raised when all of these hold:
+
+- the level ordinal is 0;
+- the load is a LEVEL;
+- the machine is in a run, with no restart pending;
+- the closing callback is installed.
+
+The other installed packs were checked: Randomizer reads the flag only in
+`ON.LOADING`/`ON.TRANSITION` (outside the window), Pit of 100 Trials clears it itself,
+and 2.5 resets per-run state on it.
+
+### Also: two camps' doors at once
+
+`campDoors` was emptied when a run ended but not when a camp was rebuilt without one,
+for example going back to the menu and character select and then the camp again. The
+previous camp's door uids stayed in it, and the capture logged `camp doors hooked:
+1561=..., 1567=main exit, 1587=..., 1593=main exit`. Uids are recycled every level,
+so pressing UP beside whatever entity inherited one could ready up or start the run.
+`pollCampDoor` now empties the table when it hooks a camp.
+
+### Tests
+
+- `tests/test_transition_menu_sync.py`: two simulated machines run the real
+  `preUpdate`, exchange records and must see the same menu input on every frame. It
+  also covers:
+  - one player's press reaching both machines on the same frame;
+  - DOWN/LEFT being synced;
+  - the hold, the stall latch and the post-update restore;
+  - JOURNAL staying local;
+  - pause, journal and chat exclusions;
+  - the record layout.
+- `tests/test_run_reset_window.py`: the engine's dispatch order around our early
+  callback, hdmod's run setup and our late callback, every gate condition, and the
+  wiring (shown after our reset, installed after hosting, the post-generation
+  backstop).
+- `tests/test_prologue_exit.py`: every `tutorial_state` and key case.
+- `tests/test_camp_doors.py`: a rebuilt camp holds only its own doors.
+
 ## 2.0.0-dev63
 
 Two bugs from the first full two-player run of hdmod's tutorial. **Server 1.0.12.**

@@ -1,12 +1,12 @@
 # Handoff — where this branch stands
 
-Read `LOADER.md` first for what the loader build is. This file covers the three bugs
+Read `LOADER.md` first for what the loader build is. This file covers the bugs
 worked on in this branch, plus the state a new session needs before touching any of
 them.
 
 ## Start here
 
-**Build: `2.0.0-dev55` → `dev63`. The server must be redeployed at `1.0.12`.**
+**Build: `2.0.0-dev55` → `dev64`. The server must be redeployed at `1.0.12`.**
 Section 3's fix is half a server fix and does nothing without it (1.0.11 or later).
 Section 6 has a server half too, but its client half works on its own. A client on a
 server other than the one it expects says so in a toast and in the log. Check with
@@ -18,8 +18,11 @@ server other than the one it expects says so in a toast and in the log. Check wi
 | 2 | hdmod's journal crashes the game when hosted | **NOT FIXED.** Workaround works — see section 2 |
 | 3 | The tutorial door started an ordinary run | **FIXED**, confirmed in game |
 | 4 | The tutorial crashed entering level 2 | **FIXED** in dev62 by windowing, confirmed in game. dev61's fix was tested and failed — see section 2, "Tutorial level 2" |
-| 5 | Multiplayer tutorial: floors desynced from 1-2 on | **FIXED** in dev63, not yet confirmed in game — section 5 |
-| 6 | After the tutorial, the camp door waited "for everyone to pick a character" | **FIXED** in dev63 / server 1.0.12, not yet confirmed in game — section 6 |
+| 5 | Multiplayer tutorial: floors desynced from 1-2 on | The journal half is **FIXED** in dev63 (no resync at a journal any more). **Still open:** a `POSITION DESYNC` on tutorial 1-2 with a resync at 1-3 — section 5 |
+| 6 | After the tutorial, the camp door waited "for everyone to pick a character" | **FIXED** in dev63 / server 1.0.12, confirmed in game (the run after the tutorial started) |
+| 7 | Mama Tunnel's donation happened on one machine only (bombs desynced) | **FIXED** in dev64, not yet confirmed in game — section 7 |
+| 8 | The tutorial came back after the first real run | **FIXED** in dev64, not yet confirmed in game — section 8 |
+| 9 | Udjat key and chest on two floors, sometimes two keys | **FIXED** in dev64, not yet confirmed in game — section 9 |
 
 **Git state:** everything is on `origin/fix/peer-save-restore`; the patch-delivered
 commits from the no-push-access session have landed. `git log --oneline
@@ -335,7 +338,7 @@ therefore does not get `HD_WORLDSTATE_STATE` set, and their floor generates as a
 ordinary level. Untested and out of scope here — it needs the destination carried on
 the join path and the hits re-established on the joiner.
 
-## 5. The tutorial's floors desynced in multiplayer — FIXED in dev63, NOT YET CONFIRMED IN GAME
+## 5. The tutorial's floors desynced in multiplayer — journal half FIXED in dev63; a POSITION DESYNC on tutorial 1-2 is STILL OPEN
 
 This one showed up as `FLOOR DESYNC` from 1-2 onward, and later `POSITION DESYNC`,
 while the gameplay looked synced. The cause was hdmod's per-floor story journal. Each
@@ -354,13 +357,26 @@ journal for a long time (more than 10 s). The other player should see "waiting f
 players" until the first one closes it, with **no** `RESYNC WARP` line and no
 `FLOOR DESYNC` in either log.
 
+**What the dev63 capture showed:** the journal half held. On tutorial 1-2 the host
+waited on the peer's journal without a resync. A separate problem remains. At `2:600`
+on tutorial 1-2 there is a `POSITION DESYNC`: player 2's hp is 3 on the host's
+machine, and the positions differ. Later, at 1-3, the host waited on a peer that was
+evidently still on 1-2, and the resync warp fired (`RESYNC WARP -> 1-3, rebase
+seq=11`). Two things are still unexplained:
+
+- what moved a player differently on tutorial 1-2;
+- why the host's own regeneration of 1-3 (`ent=1863546056`) differs from its first
+  generation (`ent=520830476`).
+
+Both need the peer's log from a capture like that one.
+
 **Reading the logs:** the `[time seq:offset]` stamp is cached per engine frame, and
 the frame counter stops while the journal holds the game. So every line logged during
 a journal shows the time of the frame it opened on. On the host in this session,
 `RESYNC WARP` was stamped 18:58:41 but happened about 8 s later. Line it up with the
 other log by event, not by stamp.
 
-## 6. "Waiting for everyone to pick a character..." after the tutorial — FIXED in dev63 / server 1.0.12, NOT YET CONFIRMED IN GAME
+## 6. "Waiting for everyone to pick a character..." after the tutorial — FIXED in dev63 / server 1.0.12, CONFIRMED IN GAME
 
 Both players finish the run on the same frame, and each sends `endrun` and then
 `ready`. The server interleaves the two machines, so one player's `ready` arrived
@@ -374,6 +390,63 @@ it, so this is fixed even before the server is redeployed.
 look for `lobby ready RESENT` in the log of the player shown as not ready.
 
 ---
+
+## 7. Mama Tunnel's donation happened on one machine only — FIXED in dev64, NOT YET CONFIRMED IN GAME
+
+Her dialog on a TRANSITION, and hdmod's donations on top of it (`lib/shortcut.lua`),
+are driven by `game_manager.game_props.input_menu`. That is the engine's MENU input,
+read from each machine's own devices, and the gate never touched it. So the dialog
+advanced only where the player pressed. hdmod's `donate()` takes from player 1 first,
+so one machine took the host's bomb and the other never did.
+
+dev64 sends the menu input along with the gameplay input (above bit 16 of each
+frame's record). On every simulated transition frame the engine reads the party's
+menu input, and the device's own value is put back at `POST_UPDATE` for the journal
+and pause menu. The full design is in CHANGELOG `2.0.0-dev64`.
+
+**To confirm:** one player gives Mama Tunnel a bomb while the other player does
+nothing. Both machines should show the same bomb counts afterwards and the same
+dialog, and there should be no `POSITION DESYNC` on that transition.
+
+**Known narrow gap:** a player who opens their pause menu at the exact moment the
+other player confirms a donation. The other player's press could then land in the
+handful of frames already sent before the pause menu opened. The window is the input
+delay, about 7 frames.
+
+## 8. The tutorial came back after the first real run — FIXED in dev64, NOT YET CONFIRMED IN GAME
+
+hdmod's prologue is the engine's `savegame.tutorial_state`: 0 nothing, 1 journal got,
+2 key spawned, 3 door unlocked, 4 complete. hdmod treats 2 or lower as "prologue
+active". The engine advances it when the key unlocks the camp's main exit and the
+first run goes through that door. Online that door is inert, so the state stayed at
+2. The `hd-prologue-exit` adapter in `src/determinism.lua` now sets it to 4 when a
+run starts from the main exit and the door could have opened, which means one of:
+
+- the state is already 3;
+- it is the camp right after the tutorial;
+- hdmod has a tutorial record.
+
+The host's save today is at 2 with a tutorial record, so the next real run started
+from the main exit completes the prologue without redoing the tutorial.
+
+**To confirm:** start a run from the main exit. In the next camp the log's journal
+probe should read `prologue=false`, and the line `mod host: hd-prologue-exit: ... 2 -> 4`
+should be in the log.
+
+## 9. Udjat key and chest on two floors, sometimes two keys — FIXED in dev64, NOT YET CONFIRMED IN GAME
+
+hdmod switches the game's own Udjat eye off with quest flag 17 (and 18 for the black
+market, 19 for the drill) in its run setup. That setup is gated on `QUEST_FLAG.RESET`
+in `PRE_LEVEL_GENERATION`. Our `applyFreshRunReset` zeroed `quest_flags` first, so
+the setup never ran, and the game placed its own key and chest next to hdmod's.
+
+dev64 shows `RESET` to the hosted mods on the run's first load, between our early
+callbacks and a late one that `main.lua` registers after hosting. The engine never
+sees the flag.
+
+**To confirm:** run 1-1 to 1-4. Exactly one floor should have one key and one chest,
+and the floor dumps' `quest_flags` should include quest flags 17, 18 and 19 (mask `0x70000`)
+from 1-1 on.
 
 ## Diagnostic tooling (flags and the files they write)
 
