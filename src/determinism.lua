@@ -698,5 +698,113 @@ module.register({
     end,
 })
 
+--- The engine's own prologue progress, `savegame.tutorial_state`: 0 nothing, 1
+--- journal got, 2 key spawned, 3 door unlocked, 4 complete.
+--- @return integer?
+local function prologueState()
+    local save = rawget(_G, "savegame")
+    if save == nil then
+        return nil
+    end
+    local ok, value = pcall(function() return save.tutorial_state end)
+    if not ok or tonumber(value) == nil then
+        return nil
+    end
+    return math.floor(tonumber(value))
+end
+
+--- How many tutorial runs hdmod has on record. Its records are written the moment the
+--- tutorial's last level is finished, and kept in its save.
+--- @param env table
+--- @return integer
+local function tutorialRecordCount(env)
+    local records = rawget(env, "tutorialrecordslib")
+    if type(records) ~= "table" or type(rawget(records, "get_tutorial_records")) ~= "function" then
+        return 0
+    end
+    local ok, list = pcall(records.get_tutorial_records)
+    if not ok or type(list) ~= "table" then
+        return 0
+    end
+    return #list
+end
+
+--- The HD mod's prologue ends when the camp's main exit is unlocked with the key the
+--- mod hands the party after its tutorial -- and online, that door is inert.
+---
+--- The engine keeps the prologue in `savegame.tutorial_state` and hdmod only reads
+--- it: `camplib.is_prologue_active()` is `tutorial_state <= 2`. The engine moves it
+--- to 3 when the key unlocks the main exit and to 4 when the first adventure starts
+--- through it. Online the main exit is inert (`can_enter` is false, see
+--- eventSync's hookMainDoor), so neither happens -- the party's run starts from
+--- the ready-up instead -- and the state stays at 2. The prologue then never ends:
+--- every camp after that run replays the rope entry, drops the journal again and
+--- keeps the main door locked, so the party is sent back through the tutorial. That
+--- is the reported "it still tried to give the tutorial journal and make the player
+--- do the tutorial".
+---
+--- So a run started from the main exit completes the prologue as walking through
+--- that door would have: state 4. Only where the door could have opened. At 3 it
+--- already has. At 2 the key has to be in the party's hands, which hdmod arranges in
+--- exactly one place -- the camp right after its tutorial (`is_post_tutorial`, the
+--- condition it spawns the key on) -- or the tutorial has been finished before (its
+--- record list is not empty), which is what rescues a save that went through this
+--- once already and lost the key with that camp. A prologue that has not reached the
+--- key (0 or 1) is left alone, and so is a party that never finished the tutorial:
+--- in the game itself the door would still be locked.
+---
+--- Every input is identical on every machine -- the start door rides on run_start,
+--- the tutorial ran in lockstep and set `is_post_tutorial` and its record on all of
+--- them, and a peer plays on the host's `savegame` fields -- so every machine makes
+--- the same decision. Matched on `worldlib` for the same reason the tutorial door
+--- adapter is: detection happens once, right after the mod's main chunk.
+module.register({
+    name = "hd-prologue-exit",
+    detect = function(env)
+        local world = rawget(env, "worldlib")
+        return type(world) == "table"
+            and type(rawget(world, "HD_WORLDSTATE_STATUS")) == "table"
+    end,
+    --- @return boolean # recognised, and a reason string when it was not
+    startDoor = function(env, dest)
+        if type(dest) == "table" and dest[1] ~= nil then
+            return false, "a camp door, not the main exit"
+        end
+        local was = prologueState()
+        if was == nil then
+            return false, "no savegame to read the prologue from"
+        end
+        if was >= 4 then
+            return false, "the prologue is already complete"
+        end
+        if was < 2 then
+            return false, string.format("prologue at %d: the key is not reachable yet", was)
+        end
+        local why
+        if was == 3 then
+            why = "the door was already unlocked"
+        else
+            local camp = rawget(env, "camplib")
+            if type(camp) == "table" and rawget(camp, "is_post_tutorial") == true then
+                why = "the camp right after the tutorial, where the party holds the key"
+            elseif tutorialRecordCount(env) > 0 then
+                why = string.format("the tutorial has been finished %d time(s) before",
+                    tutorialRecordCount(env))
+            else
+                return false, "prologue at 2 and the tutorial was never finished:"
+                    .. " the door would still be locked"
+            end
+        end
+        rawget(_G, "savegame").tutorial_state = 4
+        local DesyncLog = rawget(_G, "DesyncLog")
+        if DesyncLog ~= nil and DesyncLog.earlyEvent ~= nil then
+            pcall(DesyncLog.earlyEvent,
+                "mod host: hd-prologue-exit: the run left through the main exit,"
+                .. " prologue %d -> 4 (%s)", was, why)
+        end
+        return true
+    end,
+})
+
 Determinism = module
 return module

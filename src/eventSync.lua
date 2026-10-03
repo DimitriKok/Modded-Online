@@ -2286,6 +2286,74 @@ function applyFreshRunReset()
         st.presence_flags = 0
     end)
 end
+-- ------------------------------------------- the run start, for the hosted mods
+--
+-- In the game a new run reaches its first level with QUEST_FLAG.RESET raised, and a
+-- content mod reads that as "a new run starts here". hdmod does its run setup on it,
+-- in PRE_LOAD_SCREEN and PRE_LEVEL_GENERATION: it raises quest flags 17, 18 and 19
+-- (Udjat eye, black market and drill already spawned) so the game never places its
+-- OWN Udjat key and chest, black market or drill on top of the mod's; it settles
+-- Yang's turkey pen; it resets its per-run feat counters and character-unlock coffins.
+--
+-- applyFreshRunReset zeroes quest_flags in both of those callbacks, and ours run
+-- before the hosted mod's (registration order), so the mod never saw the flag. The
+-- game then placed its own Udjat key and chest as well as hdmod's -- "keys and chests
+-- on both floors, sometimes two keys" -- and the floor dumps show exactly that:
+-- flag 17 raised by the game itself on the floor it placed them, 18 never at all.
+--
+-- So on the run's first load the flag is raised again for the hosted mods, AFTER our
+-- reset, and taken down again by a callback registered after the hosted mods
+-- (installRunResetWindow, from main.lua) -- before the engine acts on the load, so
+-- the engine sees exactly what it always did. Every machine raises it at the same
+-- point of the same ordered run start, so the mods' setup is identical everywhere.
+-- Module fields, not locals: this chunk is at Lua's 200-local limit.
+module.runResetShown = false   -- raised by us, and not yet taken down
+module.runResetWindow = false  -- the late callbacks that take it down are installed
+
+--- Raise QUEST_RESET for the hosted mods' callbacks, on a fresh run's first load
+--- only: the window applyFreshRunReset works in (levelOrdinal 0, before the first
+--- floor engages), loading a LEVEL. Never without the late callbacks installed: the
+--- flag must not outlive the hosted mods' callbacks, or the engine would act on it.
+function module.showRunReset()
+    if not module.runResetWindow or levelOrdinal ~= 0 then
+        return
+    end
+    if not runActive or not Network.isInRun() or get_ms() < awaitingRestartUntil then
+        return
+    end
+    local st = get_local_state()
+    if st.screen_next ~= SCREEN.LEVEL then
+        return
+    end
+    st.quest_flags = st.quest_flags | QUEST_RESET
+    module.runResetShown = true
+end
+
+--- Take QUEST_RESET down again, if we are the ones who raised it.
+function module.hideRunReset()
+    if not module.runResetShown then
+        return
+    end
+    module.runResetShown = false
+    local st = get_local_state()
+    st.quest_flags = st.quest_flags & ~QUEST_RESET
+end
+
+--- Called from main.lua AFTER the hosted mods are loaded, so these run after their
+--- PRE_LOAD_SCREEN and PRE_LEVEL_GENERATION callbacks and before the engine's load.
+function module.installRunResetWindow()
+    if module.runResetWindow then
+        return
+    end
+    set_callback(function()
+        SafeCall("eventSync:hideRunReset", module.hideRunReset)
+    end, ON.PRE_LOAD_SCREEN)
+    set_callback(function()
+        SafeCall("eventSync:hideRunReset", module.hideRunReset)
+    end, ON.PRE_LEVEL_GENERATION)
+    module.runResetWindow = true
+end
+
 --- Enforce the shared seed and roster BEFORE a level starts loading — by
 --- generation time the engine may already have derived the layout, and it
 --- rebuilds the party from the roster at every level load.
@@ -3615,6 +3683,16 @@ local function pollCampDoor()
     -- Terra doors that start a run deeper in). All of them are made inert online
     -- and drive readying up instead, so a shortcut follows exactly the same rules
     -- as a normal start rather than dropping one player into a solo run.
+    --
+    -- This camp's doors only. The table was emptied when a run ended and not when a
+    -- camp was rebuilt without one -- back to the menu and character select, then
+    -- the camp again -- so the uids of the previous camp's doors stayed in it. Uids
+    -- are recycled with every level, so one of those could name any entity in the
+    -- new camp, and pressing UP beside it would have readied or started the run.
+    -- A capture showed exactly that list: `1561=..., 1567=main exit, 1587=...,
+    -- 1593=main exit` -- two camps' doors at once.
+    campDoors = {}
+    mainDoorUid = nil
     local hooked = false
     for _, doorType in ipairs({ ENT_TYPE.FLOOR_DOOR_MAIN_EXIT, ENT_TYPE.FLOOR_DOOR_STARTING_EXIT }) do
         for _, uid in ipairs(get_entities_by(doorType, MASK.FLOOR, LAYER.BOTH)) do
@@ -4339,6 +4417,8 @@ set_callback(function()
         DesyncLog.enter("preLoadScreen")
     end
     SafeCall("eventSync:onPreLoadScreen", onPreLoadScreen)
+    -- last, after our reset: what the hosted mods' own callbacks see next
+    SafeCall("eventSync:showRunReset", module.showRunReset)
     if DesyncLog ~= nil then
         DesyncLog.leave("preLoadScreen")
     end
@@ -4403,6 +4483,8 @@ set_callback(function()
     -- install the unlock-coffin suppression BEFORE generation runs add_coffin
     SafeCall("eventSync:suppressUnlockCoffins", suppressUnlockCoffins)
     SafeCall("eventSync:onPreLevelGeneration", onPreLevelGeneration)
+    -- last, after our reset: what the hosted mods' own callbacks see next
+    SafeCall("eventSync:showRunReset", module.showRunReset)
     if DesyncLog ~= nil then
         DesyncLog.leave("preLevelGeneration")
     end
@@ -4411,6 +4493,10 @@ set_callback(function()
     if DesyncLog ~= nil then
         DesyncLog.enter("postLevelGeneration")
     end
+    -- Backstop: the late PRE_LEVEL_GENERATION callback has taken QUEST_RESET down
+    -- already. If anything ever stopped it, it still must not reach the level, where
+    -- the restart guards would read it as a player's instant restart.
+    SafeCall("eventSync:hideRunReset", module.hideRunReset)
     SafeCall("eventSync:onPostLevelGeneration", onPostLevelGeneration)
     -- generation is over, so the unlock-coffin hook has served its purpose; release
     -- it here, the one place the ThemeInfo it sits on is guaranteed still alive

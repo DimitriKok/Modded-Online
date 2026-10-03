@@ -50,6 +50,49 @@ local RESEND_INTERVAL_MS = 40
 -- cutscene (4) keeps the engine running, so it stays gated and synced.
 local ENGINE_PAUSE_MASK = 1 | 2 | 8 | 16 | 32
 
+-- ------------------------------------------------- a transition's menu input
+--
+-- Mama Tunnel's dialogue on a TRANSITION -- and hdmod's shortcut donations, which
+-- ride on it -- is driven by the engine's MENU input, `game_props.input_menu`,
+-- which the engine reads from this machine's own devices. The gate feeds the player
+-- slots and never touched it. So her dialogue advanced on the machine whose player
+-- pressed, and only there: hdmod's donation takes the bombs from player 1 first, so
+-- one machine took the host's bombs and the other never did -- a bomb count that
+-- never agreed again -- and the party stood frozen in her dialogue on one machine
+-- while it walked on the other (the POSITION DESYNC on that transition).
+--
+-- So on a transition the menu input travels with the gameplay input: recorded into
+-- the same per-frame value, above the INPUTS bits (buttons_gameplay is 16 bits, so
+-- nothing there ever reaches bit 16), and on every simulated transition frame the
+-- engine and hdmod read the PARTY's menu input -- everyone's presses together --
+-- instead of this machine's. It is written in our PRE_UPDATE, which runs before
+-- hdmod's (registration order; see the late input guard) and before the engine's
+-- update consumes it. The device's own value goes back at POST_UPDATE: the journal
+-- and the pause menu read it after the update (hdmod's own journal lock writes the
+-- leader's buttons at POST_UPDATE for exactly that reason), so they keep answering
+-- this player's own presses.
+local MENU_SHIFT = 16
+-- SELECT | BACK | LEFT | RIGHT | UP | DOWN: what her dialogue answers to. JOURNAL
+-- is left out -- opening a journal is this player's own business -- and so are
+-- DELETE and RANDOM, which only the seed and character screens read.
+local MENU_SYNC_MASK = 1 | 2 | 32 | 64 | 128 | 256
+-- In a record's menu field: the recorder's pause menu was open. hdmod handles a
+-- donation press only while `pause_ui.visibility == 0`, read on each machine, so a
+-- press reaching a machine whose pause menu is up would run vanilla's dialogue
+-- there and hdmod's everywhere else. A frame carrying this gets no menu input on
+-- ANY machine.
+local MENU_UI_OPEN = 1 << 9
+local GAMEPLAY_MASK = 0xFFFF
+local menuAgreedPrev = 0       -- the agreed menu input of the last simulated transition frame
+local menuLatch = 0            -- presses since the last frame we recorded (a tap during a stall)
+local menuDevicePrev = 0       -- the device's menu input last frame, for the latch's edges
+local menuRestorePending = false
+local menuRestoreNow = 0       -- the device's synced bits, put back at POST_UPDATE
+local menuRestorePrev = 0
+-- A build that refuses either write switches this off for the session rather than
+-- override half of the pair (see writeMenuFields).
+local menuSyncBroken = false
+
 -- was a CONTENT MOD freezing the game for its own UI last frame? Only used to
 -- log the transition, so a desync around such a menu can be lined up between two
 -- machines (see DesyncLog).
@@ -250,6 +293,10 @@ function module.beginSession(slots, delay)
     remoteLastRxMs = {}
     remoteHeldMs = {}
     localHeld = false
+    menuAgreedPrev = 0
+    menuLatch = 0
+    menuDevicePrev = 0
+    menuRestorePending = false
     checksums = {}
     desyncReported = false
     desyncStreak = 0
@@ -677,6 +724,8 @@ local function engage()
     seq = seq + 1
     offset = 0
     myRecorded = INPUT_DELAY - 1
+    menuAgreedPrev = 0
+    menuLatch = 0
     for _, netSlot in pairs(coopSlots) do
         inputBuf[netSlot][seq] = inputBuf[netSlot][seq] or {}
         for f = 0, INPUT_DELAY - 1 do
@@ -1143,11 +1192,136 @@ end
 
 
 
+--- The engine's menu input and whether this player's own menus are up. A named
+--- function rather than a closure, so the per-frame pcall allocates nothing.
+--- @param gm userdata
+--- @return integer, boolean, boolean
+local function readMenuFields(gm)
+    return math.floor(tonumber(gm.game_props.input_menu) or 0),
+        (tonumber(gm.pause_ui.visibility) or 0) ~= 0,
+        (tonumber(gm.journal_ui.state) or 0) ~= 0
+end
+
+--- This machine's menu input for the frame being recorded, as a record's menu
+--- field (see MENU_SHIFT). On a transition only: everywhere else it is 0, so a
+--- level's records are exactly what they always were.
+---
+--- A press made into this player's own pause menu, journal or chat box is not
+--- recorded -- it belongs to a screen nobody else can see -- and an open pause menu
+--- is flagged instead (see MENU_UI_OPEN). A press that came and went while the gate
+--- was stalled is latched into the next frame recorded: the gate records each frame
+--- once, so a quick tap during a stall would otherwise never reach anyone.
+--- @param typing boolean # this player is typing in the chat box
+--- @return integer
+local function localMenuField(typing)
+    if engagedScreen ~= SCREEN.TRANSITION then
+        menuLatch = 0
+        return 0
+    end
+    local gm = GameManager ~= nil and GameManager() or nil
+    if gm == nil then
+        return 0
+    end
+    local ok, device, pauseOpen, journalOpen = pcall(readMenuFields, gm)
+    if not ok then
+        return 0
+    end
+    device = device & MENU_SYNC_MASK
+    local pressed = device & ~menuDevicePrev
+    menuDevicePrev = device
+    if pauseOpen or journalOpen or typing then
+        menuLatch = 0
+        return pauseOpen and MENU_UI_OPEN or 0
+    end
+    menuLatch = menuLatch | pressed
+    return device | menuLatch
+end
+
+--- One frame's record: the gameplay INPUTS in the low 16 bits, the menu field above.
+--- @param gameplay integer
+--- @param menuField integer
+--- @return integer
+local function packRecord(gameplay, menuField)
+    return (gameplay & GAMEPLAY_MASK) | (menuField << MENU_SHIFT)
+end
+
+--- Write the pair. `previous` FIRST: the engine and hdmod find a press by comparing
+--- the two, so the current input overridden without its previous one would read a
+--- held press as a new one on every frame -- worse than not syncing at all. If the
+--- first write is refused nothing has changed; if the second is, the caller puts the
+--- first back.
+--- @param props userdata
+--- @param now integer
+--- @param prev integer
+local function writeMenuFields(props, now, prev)
+    props.input_menu_previous = prev
+    props.input_menu = now
+end
+
+--- Hand the engine -- and hdmod, whose PRE_UPDATE runs after this one -- the party's
+--- menu input for this simulated transition frame instead of this machine's, and
+--- arm the restore of the device's own value at POST_UPDATE.
+--- @param field integer # every player's record menu field for this frame, OR-ed
+local function applyAgreedMenu(field)
+    if menuSyncBroken then
+        return
+    end
+    local menu = field & MENU_SYNC_MASK
+    if (field & MENU_UI_OPEN) ~= 0 then
+        menu = 0 -- someone's pause menu is up (see MENU_UI_OPEN)
+    end
+    local gm = GameManager ~= nil and GameManager() or nil
+    if gm == nil then
+        return
+    end
+    local props = gm.game_props
+    local deviceNow = math.floor(tonumber(props.input_menu) or 0)
+    local devicePrev = math.floor(tonumber(props.input_menu_previous) or 0)
+    local ok, err = pcall(writeMenuFields, props, (deviceNow & ~MENU_SYNC_MASK) | menu,
+        (devicePrev & ~MENU_SYNC_MASK) | menuAgreedPrev)
+    if not ok then
+        menuSyncBroken = true
+        pcall(writeMenuFields, props, deviceNow, devicePrev)
+        errorf("transition menu input cannot be written on this build (%s);"
+            .. " Mama Tunnel's dialogue is not synced this session", tostring(err))
+        if DesyncLog ~= nil then
+            DesyncLog.event("transition menu sync DISABLED: %s", tostring(err))
+        end
+        return
+    end
+    menuRestoreNow = deviceNow & MENU_SYNC_MASK
+    menuRestorePrev = devicePrev & MENU_SYNC_MASK
+    menuRestorePending = true
+    menuAgreedPrev = menu
+end
+
+--- POST_UPDATE: give the menus that read after the update this player's own input
+--- back. Only the bits applyAgreedMenu replaced, so anything else that wrote the
+--- field in between keeps its write.
+local function restoreDeviceMenu()
+    if not menuRestorePending then
+        return
+    end
+    menuRestorePending = false
+    local gm = GameManager ~= nil and GameManager() or nil
+    if gm == nil then
+        return
+    end
+    local props = gm.game_props
+    writeMenuFields(props,
+        (math.floor(tonumber(props.input_menu) or 0) & ~MENU_SYNC_MASK) | menuRestoreNow,
+        (math.floor(tonumber(props.input_menu_previous) or 0) & ~MENU_SYNC_MASK)
+            | menuRestorePrev)
+end
+
 --- Runs before every simulation tick. Returning true SKIPS the tick — that
 --- is the lockstep gate: the world only advances when every player's input
 --- for this frame is known, so all machines simulate identical histories.
 --- @return boolean? # true to hold the simulation this render frame
 local function preUpdate()
+    -- A restore still armed here means the last update's POST_UPDATE never came, and
+    -- the engine has read the device again since: there is nothing left to put back.
+    menuRestorePending = false
     if not active or not Network.isInRun() then
         return
     end
@@ -1282,9 +1456,12 @@ local function preUpdate()
     local raw = myModValue or slots[1].buttons_gameplay or 0
     -- typing in chat: record neutral so our keystrokes drive the chat box, not
     -- the spelunker. Applied to the synced stream, so every machine sees us idle.
-    if Chat ~= nil and Chat.isTyping ~= nil and Chat.isTyping() then
+    local typing = Chat ~= nil and Chat.isTyping ~= nil and Chat.isTyping()
+    if typing then
         raw = 0
     end
+    -- read every frame, stalled or not, so a tap during a stall is latched
+    local menuField = localMenuField(typing == true)
     local target = offset + INPUT_DELAY
     -- our own slot must be in this run's roster to record into. If it isn't
     -- (a botched / mismatched join — e.g. two game instances on ONE PC sharing a
@@ -1298,7 +1475,8 @@ local function preUpdate()
     end
     myBuf[seq] = myBuf[seq] or {}
     if myBuf[seq][target] == nil then
-        myBuf[seq][target] = raw
+        myBuf[seq][target] = packRecord(raw, menuField)
+        menuLatch = 0 -- delivered
     end
     if target > myRecorded then
         myRecorded = target
@@ -1341,6 +1519,7 @@ local function preUpdate()
     local hold = inTransition and offset < TRANSITION_HOLD
     lastInjected = {}
     local tag = sentinelSupported and SENTINEL or 0
+    local agreedMenu = 0
     -- FIXED coopIndex order (1..4), never pairs(coopSlots): pairs() order is not
     -- guaranteed identical across machines, and filterGameplayInput carries
     -- per-player state (door-hold edges, layer-travel bookings) — the same reason
@@ -1349,7 +1528,9 @@ local function preUpdate()
     for coopIndex = 1, 4 do
         local netSlot = coopSlots[coopIndex]
         if netSlot ~= nil then
-            local value = hold and 0 or inputBuf[netSlot][seq][offset]
+            local packed = hold and 0 or inputBuf[netSlot][seq][offset]
+            local value = packed & GAMEPLAY_MASK
+            agreedMenu = agreedMenu | (packed >> MENU_SHIFT)
             -- deterministic input filter (e.g. layer-door presses become custom
             -- teleports): a pure function of the synced stream and synced world,
             -- so it transforms the input identically on every machine
@@ -1363,6 +1544,10 @@ local function preUpdate()
                 slots[coopIndex].buttons = value
             end
         end
+    end
+    -- ...and on a transition the party's menu input, for Mama Tunnel's dialogue
+    if inTransition then
+        SafeCall("inputSync:applyAgreedMenu", applyAgreedMenu, agreedMenu)
     end
 
     -- Take a departed player's spelunker out of the world on every remaining
@@ -2107,6 +2292,11 @@ if ON.POST_UPDATE ~= nil then
     set_callback(function()
         if DesyncLog ~= nil then
             DesyncLog.frameDone("engineUpdate")
+        end
+        -- after the update consumed the party's menu input, before the journal and
+        -- pause menu read theirs (see MENU_SHIFT)
+        if menuRestorePending then
+            SafeCall("inputSync:restoreDeviceMenu", restoreDeviceMenu)
         end
     end, ON.POST_UPDATE)
 end
