@@ -13,7 +13,7 @@
 
 meta = {
     name = "Modded Online (loader build)",
-    version = "2.0.0-dev64",
+    version = "2.0.0-dev65",
     description = "Play scriptable mods together via a self-hosted server",
     author = "EatYoCake + DoctorPuppy",
     online_safe = false, -- not for the *official* online — that's the point
@@ -102,6 +102,8 @@ local MODULES = {
     "src.saveShare",
     "src.inputSync",
     "src.eventSync",
+    -- desync logs to the server's Discord, for players who opted in
+    "src.logShip",
     "src.menuUI",
     "src.chat",
     -- The determinism guarantees a hosted mod runs under. Loaded before modHost,

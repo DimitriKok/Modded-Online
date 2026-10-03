@@ -6,7 +6,7 @@ them.
 
 ## Start here
 
-**Build: `2.0.0-dev55` → `dev64`. The server must be redeployed at `1.0.12`.**
+**Build: `2.0.0-dev55` → `dev65`. The server must be redeployed at `1.0.13`.**
 Section 3's fix is half a server fix and does nothing without it (1.0.11 or later).
 Section 6 has a server half too, but its client half works on its own. A client on a
 server other than the one it expects says so in a toast and in the log. Check with
@@ -20,9 +20,11 @@ server other than the one it expects says so in a toast and in the log. Check wi
 | 4 | The tutorial crashed entering level 2 | **FIXED** in dev62 by windowing, confirmed in game. dev61's fix was tested and failed — see section 2, "Tutorial level 2" |
 | 5 | Multiplayer tutorial: floors desynced from 1-2 on | The journal half is **FIXED** in dev63 (no resync at a journal any more). **Still open:** a `POSITION DESYNC` on tutorial 1-2 with a resync at 1-3 — section 5 |
 | 6 | After the tutorial, the camp door waited "for everyone to pick a character" | **FIXED** in dev63 / server 1.0.12, confirmed in game (the run after the tutorial started) |
-| 7 | Mama Tunnel's donation happened on one machine only (bombs desynced) | **FIXED** in dev64, not yet confirmed in game — section 7 |
-| 8 | The tutorial came back after the first real run | **FIXED** in dev64, not yet confirmed in game — section 8 |
-| 9 | Udjat key and chest on two floors, sometimes two keys | **FIXED** in dev64, not yet confirmed in game — section 9 |
+| 7 | Mama Tunnel's donation happened on one machine only (bombs desynced) | **FIXED** in dev64; the dev64 session "seemed to work" — section 7 |
+| 8 | The tutorial came back after the first real run | **FIXED** in dev64; the dev64 session "seemed to work" — section 8 |
+| 9 | Udjat key and chest on two floors, sometimes two keys | **FIXED** in dev64; the dev64 session "seemed to work" — section 9 |
+| 10 | Jungle floors desynced (2-4: one extra frog on a lily pad) | **FIXED** in dev65, not yet confirmed in game — section 10 |
+| 11 | Desync logs sent to a Discord channel automatically (opt-in) | **NEW** in dev65 / server 1.0.13, first version, not yet tried against a real Discord — section 11 |
 
 **Git state:** everything is on `origin/fix/peer-save-restore`; the patch-delivered
 commits from the no-push-access session have landed. `git log --oneline
@@ -391,7 +393,7 @@ look for `lobby ready RESENT` in the log of the player shown as not ready.
 
 ---
 
-## 7. Mama Tunnel's donation happened on one machine only — FIXED in dev64, NOT YET CONFIRMED IN GAME
+## 7. Mama Tunnel's donation happened on one machine only — FIXED in dev64; the dev64 session seemed to work
 
 Her dialog on a TRANSITION, and hdmod's donations on top of it (`lib/shortcut.lua`),
 are driven by `game_manager.game_props.input_menu`. That is the engine's MENU input,
@@ -413,7 +415,7 @@ other player confirms a donation. The other player's press could then land in th
 handful of frames already sent before the pause menu opened. The window is the input
 delay, about 7 frames.
 
-## 8. The tutorial came back after the first real run — FIXED in dev64, NOT YET CONFIRMED IN GAME
+## 8. The tutorial came back after the first real run — FIXED in dev64; the dev64 session seemed to work
 
 hdmod's prologue is the engine's `savegame.tutorial_state`: 0 nothing, 1 journal got,
 2 key spawned, 3 door unlocked, 4 complete. hdmod treats 2 or lower as "prologue
@@ -433,7 +435,7 @@ from the main exit completes the prologue without redoing the tutorial.
 probe should read `prologue=false`, and the line `mod host: hd-prologue-exit: ... 2 -> 4`
 should be in the log.
 
-## 9. Udjat key and chest on two floors, sometimes two keys — FIXED in dev64, NOT YET CONFIRMED IN GAME
+## 9. Udjat key and chest on two floors, sometimes two keys — FIXED in dev64; the dev64 session seemed to work
 
 hdmod switches the game's own Udjat eye off with quest flag 17 (and 18 for the black
 market, 19 for the drill) in its run setup. That setup is gated on `QUEST_FLAG.RESET`
@@ -447,6 +449,62 @@ sees the flag.
 **To confirm:** run 1-1 to 1-4. Exactly one floor should have one key and one chest,
 and the floor dumps' `quest_flags` should include quest flags 17, 18 and 19 (mask `0x70000`)
 from 1-1 on.
+
+## 10. Jungle floors desynced: the water snapshot was lost in the move to hosting — FIXED in dev65, NOT YET CONFIRMED IN GAME
+
+Both logs of the dev64 session (room BITO) matched from 1-1 to 2-3. On 2-4 every PRNG
+stream was identical at `gen[pre]` and `gen[post]`, and still the peer had one more
+frog (`MONS_CRITTERCRAB`) on one more lily pad (`ITEM_LEAF`) at the first frame. The
+party had split by `15:720`, with player 2 dead on the host's machine and alive on
+the peer's. 3-1 and the resync warp to 3-2 follow from that.
+
+hdmod places lily pads, frogs, kelp and anchovies at `ON.LEVEL`, rolling the PRNG
+only where `is_liquid_at` sees open water. The engine simulates water on worker
+threads, so two machines disagree on the waterline a frame or two in. The injected
+shim fixed this in v21 with a `POST_LEVEL_GENERATION` snapshot. Hosting the mod
+instead of injecting into it dropped the fix, and dev65 puts it back in
+`src/determinism.lua`.
+
+**To confirm:** play through the Jungle with two players. No `FLOOR DESYNC` should
+appear on 2-x, and the per-floor `entities:` lines should match between the two logs.
+
+**If 2-x still differs:** look at whether the extra entities are lily pads or frogs.
+`create_lillypad_procedural` also reads where the `FX_WATER_SURFACE` effects are. If
+those turn out to differ between machines too, they need the same treatment. The old
+shim never needed it, so it isn't done here.
+
+## 11. Desync logs to Discord — NEW in dev65 / server 1.0.13
+
+There's an opt-in option, **Send desync logs to the server's Discord**, in
+Playlunky's options for Modded Online. When it's on, a run that desynced sends its
+log to the server at run end, and the server posts it to a Discord channel. It
+counts as desynced when there was a `FLOOR DESYNC`, a `POSITION DESYNC` or a resync
+warp here, or another player reported one.
+
+The parts:
+
+- **Client:** `src/logShip.lua`.
+- **Server:** `on_logup` and `DiscordForwarder` in `server/server.py`.
+- **Setup:** `server/DISCORD.md`.
+
+The bot token goes in `server/discord_config.json` or `MO_DISCORD_BOT_TOKEN`, and
+that file is git-ignored.
+
+**Not tried against a real Discord yet.** Every test uses a fake HTTP opener. The
+first real try:
+
+1. Set up a bot as in `server/DISCORD.md`.
+2. Start the server and check that it prints `desync logs from players who opted in:
+   posted to Discord by the bot, in channel ...`.
+3. Tick the option in both games.
+4. Force a desync: for example, run with `mo_nodeterminism.on` on one machine only,
+   then delete the file afterwards.
+
+**Room for later:**
+
+- A "send my last log now" button, for a run that crashed (the log is on disk as
+  `desync_log.prev.txt` after the relaunch).
+- Sending logs for runs that didn't desync but felt wrong.
 
 ## Diagnostic tooling (flags and the files they write)
 

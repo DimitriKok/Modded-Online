@@ -35,6 +35,8 @@
 
 # Local settings.
 /config.json
+# The server's Discord bot token / webhook (see server/DISCORD.md). A secret.
+/server/discord_config.json
 
 __pycache__/
 *.pyc

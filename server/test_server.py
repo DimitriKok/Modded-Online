@@ -10,6 +10,7 @@ Run:  py test_server.py
 from __future__ import annotations
 
 import asyncio
+import base64
 import json
 import math
 import random
@@ -1039,6 +1040,89 @@ async def run_tests():
         check(by_name["RF2"].ready and not by_name["RF1"].ready,
               "the reset reopen keeps the camp ready and clears the in-run player's")
     for client in (rf1, rf2):
+        client.send({"t": "leave"})
+    await asyncio.sleep(0.3)
+
+    print("desync logs go to Discord only when the server is set up for it:")
+
+    class RecordingForwarder:
+        """Stands in for DiscordForwarder: records what would have been posted."""
+        enabled = True
+
+        def __init__(self):
+            self.posts = []
+
+        def describe(self):
+            return "recording"
+
+        def post(self, content, filename, data):
+            self.posts.append((content, filename, data))
+            return True, "posted"
+
+    async def expect_logup(client, op, timeout=3.0):
+        while True:
+            msg = await client.expect("logup", timeout)
+            if msg.get("op") == op:
+                return msg
+
+    lg1 = await start_fake_client("LOGHOST", 26945)
+    lg2 = await start_fake_client("LOGPEER", 26946)
+    lg_joined = await lg1.create_room()
+    check(lg_joined.get("logs") is False, "a server without Discord tells the client so on join")
+    await lg2.join_room(lg1.room)
+    lg2.send({"t": "logup", "op": "begin", "u": "u0", "n": 1, "bytes": 3, "meta": {}})
+    refused = await expect_logup(lg2, "refused")
+    check("does not post" in refused.get("why", ""), "...and refuses a log it cannot forward")
+
+    recorder = RecordingForwarder()
+    saved_discord = protocol.discord
+    protocol.discord = recorder
+    log_text = ("[20:25:58 15:0] server=26.186.94.66:26000 a line of the run\n" * 300).encode()
+    encoded = base64.b64encode(log_text).decode()
+    pieces = [encoded[i:i + 900] for i in range(0, len(encoded), 900)]
+    meta = {"reason": "FLOOR DESYNC seq 15", "version": "2.0.0-test", "seed": "036AEAA9-D53A4E4B"}
+    lg2.send({"t": "logup", "op": "begin", "u": "u1", "n": len(pieces), "bytes": len(log_text),
+              "meta": meta})
+    ready = await expect_logup(lg2, "ready")
+    check(ready.get("upto") == 0, "an opted-in log is accepted")
+    # out of order, with one piece sent twice
+    for index in [*range(len(pieces), 0, -1), 3]:
+        lg2.send({"t": "logup", "op": "part", "u": "u1", "i": index, "d": pieces[index - 1]})
+    done = await expect_logup(lg2, "done", timeout=5.0)
+    check(done.get("ok") is True and done.get("why") == "posted", "the whole log arrives and is posted")
+    check(len(recorder.posts) == 1, "posted exactly once, duplicates and all")
+    if recorder.posts:
+        content, filename, data = recorder.posts[0]
+        check("FLOOR DESYNC seq 15" in content and "LOGPEER" in content
+              and "036AEAA9-D53A4E4B" in content, "the message says what desynced and whose log it is")
+        check(filename.startswith(f"desync_{lg1.room}_s2_LOGPEER_") and filename.endswith(".txt"),
+              "the file is named after the room, slot and player")
+        check(b"26.186.94.66" not in data and data == srv.redact_log(log_text),
+              "the server's address is taken out before posting")
+    # a client whose done was lost asks again with a part: it gets the answer back
+    lg2.send({"t": "logup", "op": "part", "u": "u1", "i": 1, "d": pieces[0]})
+    again = await expect_logup(lg2, "done")
+    check(again.get("ok") is True and len(recorder.posts) == 1, "a repeat gets the answer, not a second post")
+
+    lg2.send({"t": "logup", "op": "begin", "u": "u2", "n": 1, "bytes": 9, "meta": {}})
+    await expect_logup(lg2, "ready")
+    lg2.send({"t": "logup", "op": "part", "u": "u2", "i": 1, "d": base64.b64encode(b"short").decode()})
+    damaged = await expect_logup(lg2, "done")
+    check(damaged.get("ok") is False and "damaged" in damaged.get("why", ""),
+          "a log that does not add up is reported, not posted")
+    for n in range(3, 10):
+        lg2.send({"t": "logup", "op": "begin", "u": f"u{n}", "n": 1, "bytes": 3, "meta": {}})
+        reply = await lg2.expect("logup")
+        while reply.get("op") not in ("ready", "refused"):
+            reply = await lg2.expect("logup")
+        if reply.get("op") == "refused":
+            break
+    check(reply.get("op") == "refused" and "this hour" in reply.get("why", ""),
+          "six logs an hour per player, no more")
+    lg1.send({"t": "logup", "op": "part", "u": "nobody", "i": 1, "d": "AAAA"})
+    check(len(recorder.posts) == 1, "a part for an upload that never began is ignored")
+    protocol.discord = saved_discord
+    for client in (lg1, lg2):
         client.send({"t": "leave"})
     await asyncio.sleep(0.3)
 

@@ -3004,6 +3004,10 @@ local function applyPendingWarp()
         DesyncLog.event("RESYNC WARP -> %s-%s (theme %s) on host seed, rebase seq=%s ord=%d",
             tostring(p.w), tostring(p.l), tostring(p.t), tostring(p.q), levelOrdinal)
     end
+    -- a party that needed resyncing had desynced: this run's log is one to send
+    if LogShip ~= nil and LogShip.noteDesync ~= nil then
+        pcall(LogShip.noteDesync, string.format("RESYNC WARP to %s-%s", tostring(p.w), tostring(p.l)))
+    end
     toast(string.format("Players desynced — resyncing to floor %s-%s!",
         tostring(p.w), tostring(p.l)))
     moWarp(math.floor(tonumber(p.w) or 1), math.floor(tonumber(p.l) or 1),

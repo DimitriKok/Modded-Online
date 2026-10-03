@@ -49,6 +49,10 @@ mod — just enable it alongside your content mods.
   session used (`server=`). To be sure you are on the fixed server, host with
   **Dedicated server** and Server IP `127.0.0.1` — that one is auto-launched from
   this pack, and any older instance still running is replaced first.
+- **Desync logs to Discord** (opt-in): tick **Send desync logs to the server's
+  Discord** in Playlunky's options for Modded Online and a run that desyncs sends
+  its log to the server, which posts it to the Discord channel its operator set
+  up. Server owners: see `server/DISCORD.md`.
 - Settings persist in `config.json` next to this file.
 - Console: set `MO_DEBUG = true` in the in-game console for verbose logs.
 

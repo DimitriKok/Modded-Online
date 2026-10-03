@@ -582,6 +582,9 @@ function module.init()
     logPath = nil
     -- the append handle belongs to the OLD path; make the next write reopen
     writeReset()
+    if LogShip ~= nil and LogShip.runStarted ~= nil then
+        pcall(LogShip.runStarted)
+    end
     local mode = everInit and "a" or "w"
     -- Detect the per-frame trace flag file (see traceActive). Checked here rather
     -- than every frame; a truthy result is cached for the session.
@@ -797,6 +800,11 @@ end
 
 function module.close()
     module.line("run end")
+    -- after the run's last line: if it desynced and the player opted in, this is
+    -- the log that goes to the server's Discord (see LogShip)
+    if LogShip ~= nil and LogShip.runEnded ~= nil then
+        SafeCall("desyncLog:logShip", LogShip.runEnded)
+    end
     -- Disarm the frame trace with the run. It was armed in init() and never
     -- cleared, so after one networked session the GUIFRAME marks -- registered at
     -- load and never removed -- kept writing on the MAIN MENU, where the frame
@@ -809,6 +817,41 @@ function module.close()
         end
     end)
     traceHandle = nil
+end
+
+--- This run's section of the log: from its own `=== Modded Online ... run start`
+--- header to the end. The file holds every run of the launch (later runs append),
+--- and only this one is the run the log is being read for.
+--- @return string? # nil when there is no log open
+function module.currentRunText()
+    if logPath == nil then
+        return nil
+    end
+    local text = nil
+    pcall(function()
+        local f = io.open(logPath, "rb")
+        if f == nil then
+            return
+        end
+        text = f:read("*a")
+        f:close()
+    end)
+    if type(text) ~= "string" or text == "" then
+        return nil
+    end
+    local from, pos = nil, 1
+    while true do
+        local at = text:find("\n=== Modded Online ", pos, true)
+        if at == nil then
+            break
+        end
+        from = at + 1
+        pos = at + 1
+    end
+    if from ~= nil then
+        text = text:sub(from)
+    end
+    return text
 end
 
 --- Dump the freshly generated floor on EVERY machine: the run-state that gates
@@ -1031,6 +1074,9 @@ function module.floorMismatch(s, mine, host)
         s,
         (mine.seed ~= host.seed) and "DIFFER" or "ok", mine.seed, host.seed,
         (mine.ent ~= host.ent) and "DIFFER" or "ok", mine.ent, host.ent)
+    if LogShip ~= nil and LogShip.noteDesync ~= nil then
+        pcall(LogShip.noteDesync, string.format("FLOOR DESYNC seq %d", s))
+    end
 end
 
 --- Player positions drifted out of sync (position checksum). Dumps live spots.
@@ -1038,6 +1084,9 @@ function module.positionDesync(key, mineHash, theirHash, streak)
     module.line(
         "*** POSITION DESYNC at %s: local hash %d vs remote %d (streak %d) — a mod moved a player non-deterministically",
         key, mineHash, theirHash, streak)
+    if LogShip ~= nil and LogShip.noteDesync ~= nil then
+        pcall(LogShip.noteDesync, "POSITION DESYNC at " .. tostring(key))
+    end
     pcall(function()
         for coopIndex = 1, 4 do
             local p = get_player(coopIndex, false)
