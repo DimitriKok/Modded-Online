@@ -1,5 +1,116 @@
 # Changelog
 
+## 2.0.0-dev65
+
+A Jungle desync fix and the first version of sending desync logs to Discord.
+**Server 1.0.13**: the log upload needs it. On an older server, the game simply
+holds on to its log.
+
+### The 2-4 desync: the water snapshot came back
+
+The capture (room BITO) showed:
+
+- **1-1 to 2-3 matched.** Every floor matched, and both machines left 2-3 on the
+  same frame (`13:2588`).
+- **2-4 generated identically.** All ten PRNG streams were identical at both
+  `gen[pre]` and `gen[post]`.
+- **The first frame differed.** The peer had one more `MONS_CRITTERCRAB` and one
+  more `ITEM_LEAF` (1553 entities against 1551).
+- **The party split by `15:720`.** On the host player 2 was dead; on the peer they
+  were alive somewhere else. 3-1 then generated differently from a different party,
+  and the resync warp to 3-2 followed.
+
+The extra pair is one frog on one lily pad. hdmod's frogs are `MONS_CRITTERCRAB` and
+its lily pads are `ITEM_LEAF`. Both are placed at `ON.LEVEL` by `add_jungle_deco`,
+which rolls the shared PRNG only where `is_liquid_at` says there is open water.
+
+Spelunky 2 simulates liquid across worker threads, so two machines a frame or two
+into a level don't agree on the exact waterline tiles. One tile of difference
+changes how many times `LEVEL_DECO` is drawn, and everything after it moves.
+
+This is the bug the injected shim fixed in **v21**. It answered `is_liquid_at` during
+a mod's `ON.LEVEL` callbacks from a snapshot taken at `POST_LEVEL_GENERATION`, before
+any physics has run. Moving from injecting into the mod to hosting it carried
+everything else over (ordered `pairs`, the anchors, the clock, the mod's own
+`math.random`) but not this. The log header says `shims=fyi.hdmod=hosted`, and
+nothing in `src/` outside the old shim mentioned liquid at all.
+
+`src/determinism.lua` now does it again for hosted mods:
+
+- **The snapshot** is taken at `POST_LEVEL_GENERATION`, registered ahead of every
+  callback the mod registers.
+- **The mod's `ON.LEVEL` callbacks** read `is_liquid_at` from that snapshot. The
+  window closes even if a callback throws.
+- **Everything else** still reaches the engine: piranhas, drowning, water a bomb
+  displaced.
+- **It applies to the same mods as before:** hdmod (by its `POSTTILE_STARTBOOL`
+  global) and run-plan mods, and only in a room. A dry floor and solo play keep the
+  engine's answer.
+
+### Desync logs to Discord (new, opt-in)
+
+A new option, **Send desync logs to the server's Discord**, lives in Playlunky's
+options for Modded Online and is off by default. With it on, a run that desynced
+sends its log to the Modded Online server when the run ends. The server posts it as
+a `.txt` file to the Discord channel its operator set up, with a bot or a webhook.
+Setup is in `server/DISCORD.md`.
+
+- **What counts as desynced:** a `FLOOR DESYNC`, a `POSITION DESYNC` or a resync warp
+  on this machine. The first machine to see one tells the room (a `desyncseen` event),
+  so every player who opted in sends their side, and the host's log goes too even
+  though only peers see a `FLOOR DESYNC`. The pair lands together under the same room
+  and seed.
+- **What is sent:** this run's own section of `desync_log.txt`, from its
+  `=== Modded Online` header. A run longer than 4 MB keeps its start and its end and
+  says what it cut.
+- **How it travels:** `src/logShip.lua` sends base64 parts of 900 characters over the
+  existing UDP connection. The server acknowledges them cumulatively; lost parts are
+  resent and parts may arrive in any order. A log waiting for a server that forwards
+  logs is kept for 30 minutes (two at most), including across leaving a room.
+  Unticking the option stops an upload in progress.
+- **Server (`on_logup`):**
+  - It accepts only from a room's members, and only when Discord is configured.
+    `joined` now tells the client whether it is (`logs`).
+  - Limits: 4 MB per log, 6 logs per player per hour, 4 posts in flight.
+  - It replaces IPv4 addresses with `x.x.x.x` and the account name in Windows user
+    paths with `<user>`, and posts with mentions disabled.
+  - The bot token comes from the environment or `server/discord_config.json`, which
+    is git-ignored. It is never logged or sent to a client.
+  - Discord's rate limit is waited out. A closing server waits up to 20 s for posts
+    still in flight.
+- **New netCore hooks:** `Network.sendServer` and `Network.onServerMessage` let a
+  module talk to the server rather than the room.
+
+### Also
+
+- **`packopts=` ignores Modded Online's own `mo_` options.** These are the mod
+  picker, the texture escape hatch and the new log option: per-player choices that
+  build nothing. Hashing them made two machines' digests differ whenever two players
+  simply chose differently. The count in that line drops accordingly.
+
+### Tests
+
+- `tests/test_liquid_snapshot.py`: two machines whose water settled differently roll
+  identically; without the snapshot they would not. Gameplay still sees live water,
+  and solo play, mods that don't build levels and dry floors are untouched. The
+  window closes on a throw, and each floor gets its own snapshot.
+- `tests/test_log_ship.py`:
+  - base64 against Python's;
+  - what triggers an upload, the room announcement and the option;
+  - a full upload with lost parts, the window and per-frame cap;
+  - refusal, keeping the log for the next server, stopping when unticked;
+  - giving up, asking again for a lost answer;
+  - trimming, and this run's section of the log.
+- `tests/test_discord_logs.py`: redaction, the message and filename, the
+  configuration, the exact HTTP request for a bot and a webhook, rate-limit retries
+  and error reporting. Nothing talks to Discord.
+- `server/test_server.py`: the upload end to end on the real UDP server:
+  - refused with no Discord;
+  - parts out of order and repeated, posted once;
+  - a lost answer asked for again;
+  - a damaged log reported;
+  - the hourly limit.
+
 ## 2.0.0-dev64
 
 Three bugs from the first full run after hdmod's tutorial, plus one found in the same

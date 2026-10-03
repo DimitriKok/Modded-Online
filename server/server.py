@@ -18,6 +18,10 @@ datagram. Clients therefore declare the port their own udp_listen runs on
 in their `hello` message; the server pushes datagrams to
 (observed source IP, declared listen port).
 
+Desync logs: a player who opts in (the game's "Send desync logs" option) uploads
+the log of a run that desynced, and this server posts it to the Discord channel
+its operator configured -- see DISCORD.md. The game itself only has UDP.
+
 Run:  py server.py [--port 26000] [--verbose]
 """
 
@@ -25,13 +29,19 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import base64
 import json
 import logging
 import math
+import os
 import random
+import re
+import secrets
 import socket
 import string
 import time
+import urllib.error
+import urllib.request
 
 PROTOCOL_VERSION = 1
 # This server's build, reported to every client so it can tell whether the server
@@ -45,7 +55,7 @@ PROTOCOL_VERSION = 1
 # is then simply absent, and the symptom is a client-side mystery. That cost
 # several rounds of debugging a "waiting for other players" hang that had already
 # been fixed, on a server that did not have the fix.
-SERVER_VERSION = "1.0.12"
+SERVER_VERSION = "1.0.13"
 DEFAULT_PORT = 26000
 MAX_PLAYERS_PER_ROOM = 4
 # how long a silent client stays in the room before being dropped. Kept
@@ -162,6 +172,210 @@ def now() -> float:
     return time.monotonic()
 
 
+# ---------------------------------------------------------------- desync logs
+#
+# The game has no HTTP of its own -- only UDP to this server -- so a log can only
+# leave a player's machine by itself through here. Only players who switched the
+# option on ever send one, and only a server whose operator configured Discord ever
+# accepts one (see DISCORD.md). Everything the client sends is untrusted.
+
+LOG_MAX_BYTES = 4 * 1024 * 1024    # one upload, decoded
+LOG_PART_CHARS = 1200              # base64 per datagram (the client sends 900)
+LOG_MAX_PARTS = 8000               # 4 MB in 900-char parts is ~6200
+LOG_UPLOADS_PER_HOUR = 6           # per client
+LOG_UPLOAD_IDLE_S = 60.0           # an upload that stops arriving is dropped
+LOG_POSTS_IN_FLIGHT = 4            # Discord posts running at once, server-wide
+LOG_SHUTDOWN_WAIT_S = 20.0         # how long a closing server waits for them
+DISCORD_API = "https://discord.com/api/v10"
+DISCORD_CONTENT_MAX = 1900         # Discord's limit is 2000
+DISCORD_CONFIG_FILE = "discord_config.json"
+DISCORD_WEBHOOK_PREFIXES = tuple(
+    f"https://{host}/api/webhooks/"
+    for host in ("discord.com", "discordapp.com", "canary.discord.com", "ptb.discord.com"))
+
+_BASE64_PART = re.compile(r"^[A-Za-z0-9+/]*={0,2}$")
+_IPV4 = re.compile(rb"(?<![0-9.])(?:[0-9]{1,3}\.){3}[0-9]{1,3}(?![0-9.])")
+_USER_DIR = re.compile(rb"([A-Za-z]:[\\/]+Users[\\/]+)[^\\/\r\n]+", re.IGNORECASE)
+
+
+def redact_log(data: bytes) -> bytes:
+    """Take out what identifies a player's PC rather than the game: IPv4 addresses
+    (the header names the server, a stall line can name a peer) and the account name
+    in a Windows user path. Nothing else is changed."""
+    data = _IPV4.sub(b"x.x.x.x", data)
+    return _USER_DIR.sub(rb"\1<user>", data)
+
+
+def _clean_field(value, limit: int) -> str:
+    """One untrusted field for a Discord message: printable, no code-span breakers,
+    bounded."""
+    text = "".join(ch for ch in str(value) if ch.isprintable())
+    text = text.replace("`", "'").replace("@", "@\u200b")
+    return text[:limit]
+
+
+def log_filename(room: str, slot: int, name: str, when: float | None = None) -> str:
+    safe_name = re.sub(r"[^A-Za-z0-9_-]", "", str(name))[:24] or "player"
+    safe_room = re.sub(r"[^A-Za-z0-9]", "", str(room))[:8] or "room"
+    stamp = time.strftime("%Y%m%d-%H%M%S", time.gmtime(when))
+    return f"desync_{safe_room}_s{int(slot)}_{safe_name}_{stamp}.txt"
+
+
+def describe_log(meta: dict, name: str, room: str, slot: int, is_host: bool) -> str:
+    """The message that goes with the file. Every client value is cleaned, and the
+    post itself disables mentions, so a player name cannot ping anyone."""
+    lines = [
+        f"**Desync log** \u00b7 {_clean_field(meta.get('reason', 'desync'), 200)}",
+        f"Player `{_clean_field(name, 32)}` (slot {int(slot)}"
+        + (", world host" if is_host else "") + f") \u00b7 room `{_clean_field(room, 8)}`"
+        + f" \u00b7 run seed `{_clean_field(meta.get('seed', '?'), 40)}`",
+        f"Modded Online `{_clean_field(meta.get('version', '?'), 40)}`"
+        f" \u00b7 server `{SERVER_VERSION}`",
+    ]
+    mods = _clean_field(meta.get("mods", ""), 400)
+    if mods:
+        lines.append(f"Mods: `{mods}`")
+    return "\n".join(lines)[:DISCORD_CONTENT_MAX]
+
+
+class DiscordForwarder:
+    """Posts one text file to one Discord channel, as a bot or through a webhook.
+
+    Configured only by the server's operator, never by a client: the environment
+    (MO_DISCORD_BOT_TOKEN + MO_DISCORD_CHANNEL_ID, or MO_DISCORD_WEBHOOK_URL) or the
+    same keys in discord_config.json beside this file. The token is never logged,
+    never put in a reply to a client and never part of an error message.
+
+    `post` blocks (HTTP), so the server runs it on a worker thread.
+    """
+
+    def __init__(self, bot_token: str | None = None, channel_id: str | None = None,
+                 webhook_url: str | None = None, opener=None, sleep=None):
+        self.problem = None
+        self.bot_token = (bot_token or "").strip() or None
+        self.channel_id = str(channel_id or "").strip() or None
+        self.webhook_url = (webhook_url or "").strip() or None
+        if self.channel_id is not None and not self.channel_id.isdigit():
+            self.problem = "the channel id must be the channel's number (Developer Mode -> Copy Channel ID)"
+            self.channel_id = None
+        if self.webhook_url is not None and not self.webhook_url.startswith(DISCORD_WEBHOOK_PREFIXES):
+            self.problem = "the webhook url is not a Discord webhook url"
+            self.webhook_url = None
+        if self.bot_token is not None and self.channel_id is None and self.webhook_url is None:
+            self.problem = self.problem or "a bot token needs a channel id to post to"
+        self._open = opener or urllib.request.urlopen
+        self._sleep = sleep or time.sleep
+
+    @property
+    def enabled(self) -> bool:
+        return self.webhook_url is not None or (
+            self.bot_token is not None and self.channel_id is not None)
+
+    def describe(self) -> str:
+        if self.webhook_url is not None:
+            return "posted to Discord through a webhook"
+        if self.enabled:
+            return f"posted to Discord by the bot, in channel {self.channel_id}"
+        return "not forwarded (no Discord configured -- see DISCORD.md)"
+
+    @classmethod
+    def from_environment(cls, config_dir: str, environ=None) -> "DiscordForwarder":
+        """Environment first, then discord_config.json in `config_dir`."""
+        environ = os.environ if environ is None else environ
+        settings = {}
+        path = os.path.join(config_dir, DISCORD_CONFIG_FILE)
+        problem = None
+        if os.path.exists(path):
+            try:
+                with open(path, encoding="utf-8") as fh:
+                    loaded = json.load(fh)
+                if isinstance(loaded, dict):
+                    settings = loaded
+                else:
+                    problem = f"{DISCORD_CONFIG_FILE} is not a JSON object"
+            except (OSError, ValueError) as exc:
+                problem = f"could not read {DISCORD_CONFIG_FILE}: {exc}"
+        forwarder = cls(
+            bot_token=environ.get("MO_DISCORD_BOT_TOKEN") or settings.get("bot_token"),
+            channel_id=environ.get("MO_DISCORD_CHANNEL_ID") or settings.get("channel_id"),
+            webhook_url=environ.get("MO_DISCORD_WEBHOOK_URL") or settings.get("webhook_url"),
+        )
+        forwarder.problem = forwarder.problem or problem
+        return forwarder
+
+    def build_request(self, content: str, filename: str, data: bytes) -> urllib.request.Request:
+        boundary = "----ModdedOnline" + secrets.token_hex(12)
+        payload = {
+            "content": content,
+            "allowed_mentions": {"parse": []},
+            "attachments": [{"id": 0, "filename": filename}],
+        }
+        crlf = b"\r\n"
+        body = b"".join([
+            b"--", boundary.encode(), crlf,
+            b'Content-Disposition: form-data; name="payload_json"', crlf,
+            b"Content-Type: application/json", crlf, crlf,
+            json.dumps(payload).encode("utf-8"), crlf,
+            b"--", boundary.encode(), crlf,
+            b'Content-Disposition: form-data; name="files[0]"; filename="',
+            filename.encode("ascii", "replace"), b'"', crlf,
+            b"Content-Type: text/plain; charset=utf-8", crlf, crlf,
+            data, crlf,
+            b"--", boundary.encode(), b"--", crlf,
+        ])
+        headers = {
+            "Content-Type": f"multipart/form-data; boundary={boundary}",
+            "User-Agent": f"DiscordBot (https://github.com/DimitriKok/Modded-Online, {SERVER_VERSION})",
+        }
+        if self.webhook_url is not None:
+            url = self.webhook_url + ("&" if "?" in self.webhook_url else "?") + "wait=true"
+        else:
+            url = f"{DISCORD_API}/channels/{self.channel_id}/messages"
+            headers["Authorization"] = f"Bot {self.bot_token}"
+        return urllib.request.Request(url, data=body, headers=headers, method="POST")
+
+    def post(self, content: str, filename: str, data: bytes) -> tuple[bool, str]:
+        """Returns (posted, why). Retries Discord's rate limit and a dropped
+        connection a few times; anything else is reported, not retried."""
+        if not self.enabled:
+            return False, "this server does not post logs to Discord"
+        for attempt in range(4):
+            request = self.build_request(content, filename, data)
+            try:
+                with self._open(request, timeout=30) as response:
+                    status = getattr(response, "status", 200)
+                    if 200 <= status < 300:
+                        return True, "posted"
+                    return False, f"Discord answered HTTP {status}"
+            except urllib.error.HTTPError as exc:
+                detail = ""
+                try:
+                    detail = exc.read().decode("utf-8", "replace")
+                except Exception:
+                    detail = ""
+                if exc.code == 429:
+                    wait = 2.0
+                    try:
+                        wait = float(json.loads(detail).get("retry_after", wait))
+                    except (ValueError, AttributeError, TypeError):
+                        pass
+                    self._sleep(min(max(wait, 0.5), 15.0))
+                    continue
+                message = ""
+                try:
+                    message = str(json.loads(detail).get("message", ""))[:120]
+                except (ValueError, AttributeError, TypeError):
+                    pass
+                return False, f"Discord answered HTTP {exc.code}" + (f": {message}" if message else "")
+            except (urllib.error.URLError, OSError) as exc:
+                if attempt < 2:
+                    self._sleep(2.0)
+                    continue
+                reason = getattr(exc, "reason", exc)
+                return False, f"could not reach Discord: {reason}"
+        return False, "Discord kept rate-limiting the upload"
+
+
 class Client:
     """One connected game client."""
 
@@ -210,6 +424,11 @@ class Client:
         # reliable channel bookkeeping
         self.next_client_seq = 1  # next unduplicated event seq expected from this client
         self.acked_up_to = 0      # highest server event seq this client has acked
+        # desync log upload in progress (see on_logup), the last one finished, and
+        # when this client's recent uploads began (the per-hour limit)
+        self.log_upload = None
+        self.log_done = None
+        self.log_times: list[float] = []
 
     @property
     def push_addr(self):
@@ -291,7 +510,7 @@ class Room:
 
 
 class ModdedOnlineServer(asyncio.DatagramProtocol):
-    def __init__(self, dedicated: bool = False):
+    def __init__(self, dedicated: bool = False, discord: DiscordForwarder | None = None):
         # dual-stack: one transport per address family (IPv4 + IPv6). IPv6
         # lets players host on CGNAT connections (5G home internet) where
         # IPv4 port forwarding is impossible.
@@ -306,6 +525,10 @@ class ModdedOnlineServer(asyncio.DatagramProtocol):
         # leaves — rooms just close and it waits for the next one. Auto-launched
         # local servers leave this off so they clean themselves up when done.
         self.dedicated = dedicated
+        # Where desync logs go. Off unless the operator configured Discord: the
+        # default object refuses every upload (see on_logup).
+        self.discord = discord if discord is not None else DiscordForwarder()
+        self.posts_in_flight = 0
 
     # ---------------------------------------------------------------- plumbing
 
@@ -467,6 +690,8 @@ class ModdedOnlineServer(asyncio.DatagramProtocol):
             "mod": room.mod_name, "modv": room.mod_version,
             # reliable-channel baseline for a late-joiner: skip the backlog
             "base": base,
+            # will a desync log sent here reach a Discord channel?
+            "logs": self.discord.enabled,
         })
         self.push_lobby(room)
 
@@ -970,6 +1195,145 @@ class ModdedOnlineServer(asyncio.DatagramProtocol):
             log.info("room %s: everyone ended the adventure, lobby reopened", room.code)
         self.push_lobby(room)
 
+    # ---------------------------------------------------------------- desync logs
+
+    def on_logup(self, msg, addr):
+        """A desync log, in pieces:
+            {"t":"logup","op":"begin","u":id,"n":parts,"bytes":size,"meta":{...}}
+            {"t":"logup","op":"part","u":id,"i":1..n,"d":base64}
+        Answered with op "ready" / "refused" / "ack" (upto = parts held in a row from
+        the first) / "done" (ok, why) once Discord has answered."""
+        room, client = self.find_client(msg, addr)
+        if client is None:
+            return
+        upload_id = str(msg.get("u", ""))[:40]
+        if not upload_id:
+            return
+        op = msg.get("op")
+        if op == "begin":
+            self._logup_begin(room, client, upload_id, msg)
+        elif op == "part":
+            self._logup_part(room, client, upload_id, msg)
+
+    def _logup_reply(self, client: Client, upload_id: str, op: str, **fields):
+        reply = {"t": "logup", "op": op, "u": upload_id}
+        reply.update(fields)
+        self.send(client.push_addr, reply)
+
+    def _logup_finished(self, client: Client, upload_id: str) -> bool:
+        """Answer a repeat for an upload that already completed, so a client whose
+        ack or done was lost stops resending."""
+        done = client.log_done
+        if done is None or done.get("u") != upload_id:
+            return False
+        self._logup_reply(client, upload_id, "ack", upto=done.get("n", 0))
+        if "ok" in done:
+            self._logup_reply(client, upload_id, "done", ok=done["ok"], why=done["why"])
+        return True
+
+    def _logup_begin(self, room: Room, client: Client, upload_id: str, msg: dict):
+        if self._logup_finished(client, upload_id):
+            return
+        if not self.discord.enabled:
+            self._logup_reply(client, upload_id, "refused",
+                              why="this server does not post desync logs to Discord")
+            return
+        current = client.log_upload
+        if current is not None and current["u"] == upload_id:
+            self._logup_reply(client, upload_id, "ready", upto=current["upto"])
+            return
+        try:
+            parts = int(msg.get("n", 0))
+            size = int(msg.get("bytes", 0))
+        except (TypeError, ValueError):
+            return
+        if not (1 <= parts <= LOG_MAX_PARTS and 1 <= size <= LOG_MAX_BYTES):
+            self._logup_reply(client, upload_id, "refused", why="that log is too large to send")
+            return
+        if parts * LOG_PART_CHARS < math.ceil(size / 3) * 4:
+            return  # cannot hold the size it claims: malformed
+        cutoff = now() - 3600.0
+        client.log_times = [t for t in client.log_times if t > cutoff]
+        if len(client.log_times) >= LOG_UPLOADS_PER_HOUR:
+            self._logup_reply(client, upload_id, "refused",
+                              why="too many desync logs from you this hour")
+            return
+        meta = msg.get("meta")
+        client.log_times.append(now())
+        client.log_upload = {
+            "u": upload_id, "n": parts, "bytes": size, "parts": [None] * parts,
+            "got": 0, "upto": 0, "meta": meta if isinstance(meta, dict) else {},
+            "last": now(),
+        }
+        log.info("room %s: %s is sending a desync log (%d bytes in %d parts)",
+                 room.code, client.name, size, parts)
+        self._logup_reply(client, upload_id, "ready", upto=0)
+
+    def _logup_part(self, room: Room, client: Client, upload_id: str, msg: dict):
+        upload = client.log_upload
+        if upload is None or upload["u"] != upload_id:
+            self._logup_finished(client, upload_id)
+            return
+        try:
+            index = int(msg.get("i", 0))
+        except (TypeError, ValueError):
+            return
+        data = msg.get("d")
+        if not (1 <= index <= upload["n"]) or not isinstance(data, str):
+            return
+        if len(data) > LOG_PART_CHARS or not _BASE64_PART.match(data):
+            return
+        upload["last"] = now()
+        if upload["parts"][index - 1] is None:
+            upload["parts"][index - 1] = data
+            upload["got"] += 1
+            while upload["upto"] < upload["n"] and upload["parts"][upload["upto"]] is not None:
+                upload["upto"] += 1
+        self._logup_reply(client, upload_id, "ack", upto=upload["upto"])
+        if upload["got"] == upload["n"]:
+            self._logup_complete(room, client, upload)
+
+    def _logup_complete(self, room: Room, client: Client, upload: dict):
+        upload_id = upload["u"]
+        client.log_upload = None
+        client.log_done = {"u": upload_id, "n": upload["n"]}
+        try:
+            data = base64.b64decode("".join(upload["parts"]), validate=True)
+        except (ValueError, TypeError):
+            data = None
+        if data is None or len(data) != upload["bytes"]:
+            client.log_done.update(ok=False, why="the log arrived damaged")
+            self._logup_reply(client, upload_id, "done", ok=False, why="the log arrived damaged")
+            return
+        if self.posts_in_flight >= LOG_POSTS_IN_FLIGHT:
+            client.log_done.update(ok=False, why="the server is busy posting other logs")
+            self._logup_reply(client, upload_id, "done", ok=False,
+                              why="the server is busy posting other logs")
+            return
+        content = describe_log(upload["meta"], client.name, room.code, client.slot,
+                               client.slot == room.run_host_slot)
+        filename = log_filename(room.code, client.slot, client.name)
+        self._post_log(client, upload_id, content, filename, redact_log(data))
+
+    def _post_log(self, client: Client, upload_id: str, content: str, filename: str, data: bytes):
+        loop = asyncio.get_running_loop()
+        self.posts_in_flight += 1
+        future = loop.run_in_executor(None, self.discord.post, content, filename, data)
+
+        def finished(fut):
+            self.posts_in_flight -= 1
+            try:
+                ok, why = fut.result()
+            except Exception as exc:  # the worker itself failed: never leave the client waiting
+                ok, why = False, f"posting failed: {type(exc).__name__}"
+            client.log_done = {"u": upload_id, "n": client.log_done.get("n", 0)
+                               if client.log_done else 0, "ok": ok, "why": why}
+            log.info("desync log from %s %s: %s", client.name,
+                     "POSTED" if ok else "NOT posted", why)
+            self._logup_reply(client, upload_id, "done", ok=ok, why=why)
+
+        future.add_done_callback(finished)
+
     def on_ping(self, msg, addr):
         room, client = self.find_client(msg, addr)
         if client is None:
@@ -1058,7 +1422,16 @@ class ModdedOnlineServer(asyncio.DatagramProtocol):
                         timeout = max(timeout, LOADING_GRACE_S)
                     if now() - client.last_seen > timeout:
                         self.drop_client(room, client, "timed out")
+                    # an upload that stopped arriving holds up to 4 MB: let it go
+                    upload = client.log_upload
+                    if upload is not None and now() - upload["last"] > LOG_UPLOAD_IDLE_S:
+                        client.log_upload = None
                 self.flush_events(room)
+        # A log that finished arriving is posted on a worker thread; closing now
+        # would throw it away with the process.
+        deadline = now() + LOG_SHUTDOWN_WAIT_S
+        while self.posts_in_flight > 0 and now() < deadline:
+            await asyncio.sleep(0.2)
         log.info("server stopped (the host closed the session)")
 
     def new_room_code(self) -> str:
@@ -1082,7 +1455,11 @@ async def main():
                         format="%(asctime)s %(levelname)s %(message)s")
 
     loop = asyncio.get_running_loop()
-    protocol = ModdedOnlineServer(dedicated=args.dedicated)
+    discord = DiscordForwarder.from_environment(os.path.dirname(os.path.abspath(__file__)))
+    if discord.problem:
+        log.warning("Discord: %s", discord.problem)
+    log.info("desync logs from players who opted in: %s", discord.describe())
+    protocol = ModdedOnlineServer(dedicated=args.dedicated, discord=discord)
     try:
         transport4, _ = await loop.create_datagram_endpoint(
             lambda: protocol, local_addr=(args.host, args.port))

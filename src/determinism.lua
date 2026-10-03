@@ -339,7 +339,7 @@ function module.install(env, opts)
     local matched = {}
     local runPlan = false
     local lastRunSeed = nil
-    local stats = { reseeds = 0, newRuns = 0, anchored = 0 }
+    local stats = { reseeds = 0, newRuns = 0, anchored = 0, liquidTiles = 0 }
     local control -- forward: checkNewRun hands it to adapters
 
     -- ---------------------------------------------------------------- primitives
@@ -385,6 +385,68 @@ function module.install(env, opts)
         return module.floorBase()
     end
 
+    -- ------------------------------------------- deterministic water at ON.LEVEL
+    --
+    -- Spelunky 2 simulates liquid across worker threads, so two machines two frames
+    -- into a level do NOT agree on the exact tiles at a waterline. That would be
+    -- harmless if mods only drew water; the HD mod instead makes SPAWN decisions
+    -- from it at ON.LEVEL -- lily pads, the frogs sitting on them, kelp, anchovy
+    -- flocks -- in the form
+    --
+    --   if validlib.is_valid_lillypad_spawn(x, y, l) and prng:random_chance(7, LEVEL_DECO) then
+    --
+    -- and `and` short-circuits, so one tile of disagreement along a shoreline
+    -- changes HOW MANY times the shared PRNG is drawn and every draw after it lands
+    -- elsewhere. So the mod's ON.LEVEL callbacks get their answers from a snapshot
+    -- taken at POST_LEVEL_GENERATION, where no physics update has run yet and the
+    -- water is a pure function of the shared seed and layout. Gameplay checks --
+    -- piranhas, drowning, water a bomb displaced -- still reach the engine.
+    --
+    -- The injected shim has done this since v21. Hosting a mod instead of injecting
+    -- into it left it behind, and the capture showed exactly the old symptom again:
+    -- every PRNG stream identical at gen[pre] and gen[post] on 2-4, then one extra
+    -- frog on one extra lily pad on one machine at the first frame (+1 crab, +1
+    -- leaf), the party split by 15:720 and every floor after it differed.
+    --
+    -- Only for a mod that builds its own levels (see detectAdapters), as the shim
+    -- had it, and only in a room: alone, the mod gets the engine's own answer.
+    local liquidSnap = nil     -- tile key -> true, this floor's generated water
+    local liquidWindow = false -- inside one of the mod's ON.LEVEL callbacks
+    local ownLevels = false    -- the mod generates its own levels
+    local realIsLiquidAt = env.is_liquid_at -- the engine's, through the sandbox
+
+    local function liquidLookup(x, y)
+        return liquidSnap[math.floor(x + 0.5) * 4096 + math.floor(y + 0.5)] == true
+    end
+
+    if type(realIsLiquidAt) == "function" then
+        env.is_liquid_at = function(x, y, ...)
+            if liquidWindow and liquidSnap ~= nil then
+                local ok, hit = pcall(liquidLookup, x, y)
+                if ok then
+                    return hit
+                end
+            end
+            return realIsLiquidAt(x, y, ...)
+        end
+    end
+
+    --- Run one of the mod's ON.LEVEL callbacks with the snapshot answering. The
+    --- window is closed again even if the callback throws: left open, every later
+    --- gameplay liquid check would read the snapshot.
+    local function liquidWindowed(cb)
+        return function(...)
+            local was = liquidWindow
+            liquidWindow = true
+            local ok, ret = pcall(cb, ...)
+            liquidWindow = was
+            if not ok then
+                error(ret, 0)
+            end
+            return ret
+        end
+    end
+
     local hostSetCallback = rawget(env, "set_callback") or set_callback
 
     env.set_callback = function(cb, id)
@@ -421,6 +483,10 @@ function module.install(env, opts)
             -- same seed: identical level seed, different tiles, enemies and areas.
             stats.anchored = stats.anchored + 1
             cb = module.anchor(cb, loadBase)
+        elseif id == ON.LEVEL then
+            -- whatever the mod decides at ON.LEVEL from the water, it decides from
+            -- the same water on every machine (see liquidSnap)
+            cb = liquidWindowed(cb)
         end
         return hostSetCallback(cb, id)
     end
@@ -482,10 +548,51 @@ function module.install(env, opts)
         gen.randomseed(module.floorBase() ~ (clock.rawSimFrame() * 2654435761))
     end
 
+    --- POST_LEVEL_GENERATION, before the mod's own: snapshot this floor's water for
+    --- the mod's ON.LEVEL pass. Registered here, ahead of every callback the mod
+    --- registers, so it is in place before anything of the mod's can read it.
+    local function snapshotLiquid()
+        liquidSnap = nil
+        stats.liquidTiles = 0
+        if not ownLevels or not isActive() or type(realIsLiquidAt) ~= "function" then
+            return
+        end
+        pcall(function()
+            local left, top, right, bottom = get_bounds()
+            -- generous whole-tile bounds; y runs downward, so top > bottom
+            left, right = math.floor(left) - 1, math.ceil(right) + 1
+            bottom, top = math.floor(bottom) - 1, math.ceil(top) + 1
+            local snap, wet = {}, 0
+            for y = bottom, top do
+                for x = left, right do
+                    if realIsLiquidAt(x, y) then
+                        snap[x * 4096 + y] = true
+                        wet = wet + 1
+                    end
+                end
+            end
+            -- A dry floor keeps the engine's own answer: there is nothing to make
+            -- deterministic, and a mod that adds water of its own after generation
+            -- must not be told the level is dry.
+            if wet > 0 then
+                liquidSnap = snap
+            end
+            stats.liquidTiles = wet
+        end)
+        -- One line per wet floor, so a capture shows the snapshot was in force: the
+        -- two machines must print the SAME count here, or generation already differed.
+        local desyncLog = rawget(_G, "DesyncLog")
+        if stats.liquidTiles > 0 and desyncLog ~= nil and desyncLog.event ~= nil then
+            pcall(desyncLog.event, "liquid snapshot for the hosted mod's ON.LEVEL: %d wet tiles",
+                stats.liquidTiles)
+        end
+    end
+
     set_callback(onLoading, ON.LOADING)
     set_callback(onFloor, ON.PRE_LEVEL_GENERATION)
     set_callback(onFrame, ON.GAMEFRAME)
     set_callback(clock.invalidate, ON.PRE_LOAD_SCREEN)
+    set_callback(snapshotLiquid, ON.POST_LEVEL_GENERATION)
 
     control = {
         newRun = checkNewRun,
@@ -501,6 +608,11 @@ function module.install(env, opts)
                     matched[#matched + 1] = adapter
                     if adapter.name == "run-plan" then
                         runPlan = true
+                    end
+                    -- the two kinds of mod that build their own levels, which is
+                    -- exactly the set the shim gave the water snapshot to
+                    if adapter.name == "run-plan" or adapter.name == "posttile-start" then
+                        ownLevels = true
                     end
                 end
             end

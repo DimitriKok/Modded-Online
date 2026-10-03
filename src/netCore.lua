@@ -82,6 +82,9 @@ local module = {
     --- lobbies ready up per-player via the main door and auto-start when all are
     --- ready; private lobbies auto-ready and the host starts via the door.
     roomPublic = nil,
+    --- does the server we joined post desync logs to a Discord channel? From its
+    --- `joined` reply; false on a server too old to say (see LogShip).
+    serverForwardsLogs = false,
 }
 
 local CONFIG_PATH = PackPath("config.json")
@@ -161,7 +164,7 @@ local serverVersionWarned = false  -- one warning per session, not per reconnect
 -- mod version told everyone to "update the server" every time -- for a server that
 -- was already correct. Bump this ONLY when server/server.py actually changes, and
 -- keep it equal to SERVER_VERSION there.
-local EXPECTED_SERVER_VERSION = "1.0.12"
+local EXPECTED_SERVER_VERSION = "1.0.13"
 local lastLoadingNoticeMs = 0
 -- how often the "I am about to load" warning may repeat while a load is pending
 local LOADING_NOTICE_MS = 500
@@ -794,10 +797,18 @@ function module.packOptionsHash(packName)
             return
         end
         -- hash the option KEYS AND VALUES in sorted order, so the digest is stable
-        -- regardless of the order the mod happened to serialise them in
+        -- regardless of the order the mod happened to serialise them in.
+        -- Modded Online's OWN options (`mo_`: the mod picker, the texture escape
+        -- hatch, sending desync logs) are this player's choices and feed nothing a
+        -- world is built from. A hosted mod's options live in our pack next to
+        -- them, so hashing them too made two machines' digests differ whenever two
+        -- players simply chose differently -- a false lead in every comparison.
         local keys = {}
         for k in pairs(parsed.options) do
-            keys[#keys + 1] = tostring(k)
+            local key = tostring(k)
+            if key:sub(1, 3) ~= "mo_" then
+                keys[#keys + 1] = key
+            end
         end
         table.sort(keys)
         local joined = ""
@@ -989,6 +1000,27 @@ function module.sendState(data)
         return
     end
     sendToServer({ t = "state", d = data })
+end
+
+--- A message for the SERVER itself, not the room: it is answered by the server
+--- and never relayed to the other players. The desync-log upload (LogShip) is
+--- the one user; its replies arrive through module.onServerMessage.
+--- @param msg table # must carry `t`; room and cid are filled in here
+function module.sendServer(msg)
+    if not module.isActive() then
+        return
+    end
+    sendToServer(msg)
+end
+
+--- Who handles a server message type this file does not handle itself.
+--- @type table<string, function>
+local serverHandlers = {}
+
+--- @param kind string # the message's `t`
+--- @param fn fun(msg: table)
+function module.onServerMessage(kind, fn)
+    serverHandlers[kind] = fn
 end
 
 --- @param host string
@@ -1472,6 +1504,7 @@ function module.leave(handoff)
     module.playerNames = {}
     module.roomStarted = nil
     module.roomPublic = nil
+    module.serverForwardsLogs = false
     resetChannel()
     stopLaunchedProcesses()
     route = nil
@@ -1607,6 +1640,7 @@ local function handleMessage(msg)
         -- surfaces as a client-side mystery. Say so plainly instead: a stale
         -- server is otherwise indistinguishable from a bug in the game.
         module.serverVersion = type(msg.srv) == "string" and msg.srv or nil
+        module.serverForwardsLogs = msg.logs == true
         if module.serverVersion ~= EXPECTED_SERVER_VERSION and not serverVersionWarned then
             serverVersionWarned = true
             local shown = module.serverVersion or "older than 1.0.63"
@@ -1686,6 +1720,11 @@ local function handleMessage(msg)
             -- the session is gone: leave cleanly (this also closes the
             -- auto-launched bridge); eventSync notices and cleans up the run
             module.leave()
+        end
+    else
+        local handler = serverHandlers[tostring(msgType)]
+        if handler ~= nil then
+            SafeCall("netCore:" .. tostring(msgType), handler, msg)
         end
     end
 end
