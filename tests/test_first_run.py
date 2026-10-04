@@ -1,14 +1,19 @@
-"""The popups shown the first time Modded Online starts (src/menuUI.lua, FIRST_RUN).
+"""The popups (src/menuUI.lua): the first-run sequence and the restart notice.
 
-Three of them, over the main menu and in the menu's own style:
+The first time Modded Online starts, four popups come up over the title screen and
+main menu, in the menu's own style:
 
-1. "Modded Online 2": a notice, answered with I UNDERSTAND.
-2. "Automatically Send Desync Errors": YES switches on AUTOMATICALLY SEND LOGS, NO
+1. "Modded Online 2": how to set mods up, answered with I UNDERSTAND.
+2. "Modded Online 2": a notice about the mod itself, answered with I UNDERSTAND.
+3. "Automatically Send Desync Errors": YES switches on AUTOMATICALLY SEND LOGS, NO
    leaves it off.
-3. "Automatically Sync Data": the same for AUTOMATICALLY SYNC DATA.
+4. "Automatically Sync Data": the same for AUTOMATICALLY SYNC DATA.
 
 They come once. Each answer is saved as it is given; `firstRunDone` is saved only
 after the last, so closing the game half way through shows them again.
+
+"Restart Required" follows any change to the mods played online (setupUI asks for
+it). It waits for the first-run popups, and never covers a level.
 
 These run the shipped menu against a stubbed engine: keys are pressed, a GUI frame
 runs, and what was drawn is read back.
@@ -26,6 +31,9 @@ PACK = pathlib.Path(__file__).resolve().parent.parent
 MENU_UI = (PACK / "src" / "menuUI.lua").read_text(encoding="utf-8")
 
 # The words exactly as they were asked for.
+TEXT_0 = ("To use modded online, ensure all script mods (other than modded online) are "
+          "disabled. To play a mod, please enable it under playlunky options and restart "
+          "the game.")
 TEXT_1 = ("This mod has used ai heavily in the development in it; thus, it will contain "
           "bugs and issues. The old version of the mod would corrupt any mods you used it "
           "with. Please reinstall any mods you used the original modded online with. If you "
@@ -39,6 +47,8 @@ TEXT_3 = ("Some mods use custom save data. Right now, we do not interfere with a
           "files; thus, any progress you make in modded online does not transfer to the "
           "mod. There is a sync data button in modded online setting or you can opt to "
           "enable automatic save syncing. Do you want to enable Automatic Syncing?")
+RESTART_TEXT = ("Restart the game for this change to take effect. Playlunky only loads mods "
+                "when the game starts.")
 
 ENV = """
 function rgba(r, g, b, a) return (r << 24) | (g << 16) | (b << 8) | a end
@@ -59,6 +69,7 @@ FADE = { NONE = 0 }
 screenNow = SCREEN.MENU
 function get_local_state() return { screen = screenNow, loading = FADE.NONE } end
 saved = {}
+inRun = false
 Network = {
     config = { hideRoomCode = false, testPlayer = 0, autoSendLogs = false, autoSyncSave = false,
                firstRunDone = false },
@@ -70,7 +81,7 @@ Network = {
     MAX_TEST_PLAYERS = 3,
     launchTestPlayer = function() end,
     stopTestPlayers = function() end,
-    isInRun = function() return false end,
+    isInRun = function() return inRun end,
     isActive = function() return false end,
     phase = 0,
     PHASE = { CONNECTING = 1 },
@@ -94,12 +105,14 @@ ctx = {
 }
 """
 
-PAUSE_MS = 600          # FIRST_RUN_INPUT_DELAY_MS: presses before this are ignored
-RELEASE_MS = 300        # FIRST_RUN_RELEASE_MS: the keyboard stays ours this long after
+PAUSE_MS = 600          # POPUP_INPUT_DELAY_MS: presses before this are ignored
+RELEASE_MS = 300        # POPUP_RELEASE_MS: the keyboard stays ours this long after
 TEXT_X = -0.385         # POPUP_TEXT_X: the menu's left edge plus its margin
 TEXT_WIDTH = 0.77       # POPUP_TEXT_W
 CHAR = 0.00035          # the stub's width per character per point (charW)
 FALLBACK_CHAR = 0.0009  # menuUI's estimate when there is no draw_text_size
+CHIP = ["[O]  MODDED ONLINE"]
+BUTTONS = (1, 1, 2, 2)  # how many buttons each first-run popup has
 
 
 def runtime(**config):
@@ -144,34 +157,54 @@ def answer(rt, *keys):
     return drawn
 
 
+def through_the_notices(rt):
+    """Answer the two notices; returns the frame that shows the third popup."""
+    frame(rt)
+    answer(rt, "Z")
+    return answer(rt, "Z")
+
+
 def config(rt, key):
     return rt.eval("Network.config.%s" % key)
 
 
-def test_the_first_popup_is_the_notice():
+def texts(drawn):
+    return [str(d["text"]) for d in drawn]
+
+
+# -------------------------------------------------------------- the four popups
+
+def test_the_first_popup_says_how_to_set_mods_up():
     rt = runtime()
     shown = popup(frame(rt), 1)
     assert shown["title"] == "MODDED ONLINE 2"
-    assert " ".join(shown["lines"]) == TEXT_1
+    assert " ".join(shown["lines"]) == TEXT_0
     assert shown["rows"] == ["> I UNDERSTAND"]
     assert shown["footer"] == "Z / ENTER select"
     assert rt.eval("ioState.wantkeyboard") is True, "the game's own menu saw the keys"
 
 
-def test_the_second_popup_asks_about_sending_logs():
+def test_the_second_popup_is_the_notice_about_the_mod():
     rt = runtime()
     frame(rt)
-    shown = popup(answer(rt, "Z"), 2)
+    shown = popup(answer(rt, "Z"), 1)
+    assert shown["title"] == "MODDED ONLINE 2"
+    assert " ".join(shown["lines"]) == TEXT_1
+    assert shown["rows"] == ["> I UNDERSTAND"]
+
+
+def test_the_third_popup_asks_about_sending_logs():
+    rt = runtime()
+    shown = popup(through_the_notices(rt), 2)
     assert shown["title"] == "AUTOMATICALLY SEND DESYNC ERRORS"
     assert " ".join(shown["lines"]) == TEXT_2
     assert shown["rows"] == ["> YES", "NO"]
     assert shown["footer"] == "ARROWS move     Z / ENTER select"
 
 
-def test_the_third_popup_asks_about_syncing():
+def test_the_fourth_popup_asks_about_syncing():
     rt = runtime()
-    frame(rt)
-    answer(rt, "Z")
+    through_the_notices(rt)
     shown = popup(answer(rt, "Z"), 2)
     assert shown["title"] == "AUTOMATICALLY SYNC DATA"
     assert " ".join(shown["lines"]) == TEXT_3
@@ -180,8 +213,7 @@ def test_the_third_popup_asks_about_syncing():
 
 def test_yes_switches_a_setting_on_and_no_leaves_it_off():
     rt = runtime()
-    frame(rt)
-    answer(rt, "Z")                      # I UNDERSTAND
+    through_the_notices(rt)
     answer(rt, "Z")                      # YES: send logs
     assert config(rt, "autoSendLogs") is True
     answer(rt, "DOWN", "Z")              # NO: sync
@@ -191,8 +223,7 @@ def test_yes_switches_a_setting_on_and_no_leaves_it_off():
 
 def test_no_then_yes():
     rt = runtime()
-    frame(rt)
-    answer(rt, "Z")
+    through_the_notices(rt)
     answer(rt, "DOWN", "Z")              # NO: send logs
     answer(rt, "Z")                      # YES: sync
     assert config(rt, "autoSendLogs") is False
@@ -203,8 +234,7 @@ def test_no_switches_off_what_an_earlier_build_had_on():
     """dev66 had both switches in SETTINGS already. The answer given here is the
     player's answer, whatever the switch said before."""
     rt = runtime(autoSendLogs=True, autoSyncSave=True)
-    frame(rt)
-    answer(rt, "Z")
+    through_the_notices(rt)
     answer(rt, "DOWN", "Z")
     answer(rt, "DOWN", "Z")
     assert config(rt, "autoSendLogs") is False
@@ -213,47 +243,42 @@ def test_no_switches_off_what_an_earlier_build_had_on():
 
 def test_every_answer_is_saved_as_it_is_given():
     rt = runtime()
-    frame(rt)
-    answer(rt, "Z")
+    through_the_notices(rt)
     answer(rt, "Z")
     answer(rt, "Z")
     saved = [dict(rt.eval("saved[%d]" % i)) for i in range(1, int(rt.eval("#saved")) + 1)]
     for entry in saved:
         for key in ("autoSendLogs", "autoSyncSave", "firstRunDone"):
             entry.setdefault(key, None)
-    assert [e["autoSendLogs"] for e in saved] == [False, True, True]
-    assert [e["autoSyncSave"] for e in saved] == [False, False, True]
-    assert [e["firstRunDone"] for e in saved] == [False, False, True], (
+    assert [e["autoSendLogs"] for e in saved] == [False, False, True, True]
+    assert [e["autoSyncSave"] for e in saved] == [False, False, False, True]
+    assert [e["firstRunDone"] for e in saved] == [False, False, False, True], (
         "firstRunDone was saved before the last popup was answered")
 
 
 def test_enter_answers_like_z():
     rt = runtime()
     frame(rt)
-    answer(rt, "RETURN")
-    answer(rt, "RETURN")
-    answer(rt, "RETURN")
+    for _ in range(4):
+        answer(rt, "RETURN")
     assert config(rt, "firstRunDone") is True
     assert config(rt, "autoSendLogs") is True and config(rt, "autoSyncSave") is True
 
 
 def test_a_press_the_moment_a_popup_appears_is_ignored():
-    """Mashing through the notice must not answer the next one unread."""
+    """Mashing through one notice must not answer the next one unread."""
     rt = runtime()
-    frame(rt, "Z")                       # the notice has only just appeared
-    assert popup(frame(rt), 1)["title"] == "MODDED ONLINE 2"
+    frame(rt, "Z")                       # the first notice has only just appeared
+    assert " ".join(popup(frame(rt), 1)["lines"]) == TEXT_0
     answer(rt, "Z")                      # now it counts
-    frame(rt, "Z")                       # ...and this one lands on popup 2 too soon
+    frame(rt, "Z")                       # ...and this one lands on the second too soon
     frame(rt, "Z", ms=100)
-    shown = popup(frame(rt), 2)
-    assert shown["title"] == "AUTOMATICALLY SEND DESYNC ERRORS"
-    assert config(rt, "autoSendLogs") is False
+    assert " ".join(popup(frame(rt), 1)["lines"]) == TEXT_1
 
 
 def test_up_and_down_wrap_round_like_the_menu():
     rt = runtime()
-    frame(rt)
-    answer(rt, "Z")
+    through_the_notices(rt)
     assert popup(frame(rt, "UP"), 2)["rows"] == ["YES", "> NO"]
     assert popup(frame(rt, "DOWN"), 2)["rows"] == ["> YES", "NO"]
 
@@ -263,38 +288,35 @@ def test_escape_and_the_menu_key_do_nothing_while_they_are_up():
     frame(rt)
     frame(rt, "ESCAPE", ms=PAUSE_MS)
     shown = popup(frame(rt, "O"), 1)
-    assert shown["title"] == "MODDED ONLINE 2", "the popup was skipped or the menu opened"
+    assert " ".join(shown["lines"]) == TEXT_0, "the popup was skipped or the menu opened"
     assert config(rt, "firstRunDone") is False
 
 
 def test_afterwards_the_main_menu_is_back_and_they_do_not_return():
     rt = runtime()
     frame(rt)
-    answer(rt, "Z")
-    answer(rt, "Z")
-    answer(rt, "Z")
+    for _ in range(4):
+        answer(rt, "Z")
     # the key that answered must not reach the game's menu underneath
     assert frame(rt) == [] and rt.eval("ioState.wantkeyboard") is True
-    texts = [str(d["text"]) for d in frame(rt, ms=RELEASE_MS)]
-    assert texts == ["[O]  MODDED ONLINE"]
+    assert texts(frame(rt, ms=RELEASE_MS)) == CHIP
     for _ in range(5):
-        assert [str(d["text"]) for d in frame(rt, ms=1000)] == ["[O]  MODDED ONLINE"]
+        assert texts(frame(rt, ms=1000)) == CHIP
 
 
 def test_once_answered_they_are_never_shown_again():
     rt = runtime(firstRunDone=True)
-    assert [str(d["text"]) for d in frame(rt)] == ["[O]  MODDED ONLINE"]
+    assert texts(frame(rt)) == CHIP
 
 
 def test_closing_the_game_half_way_shows_them_again():
-    """The answers given so far are kept; the popups start again from the notice."""
+    """The answers given so far are kept; the popups start again from the first."""
     rt = runtime()
-    frame(rt)
-    answer(rt, "Z")
+    through_the_notices(rt)
     answer(rt, "Z")                      # YES to logs, then the game is closed
     relaunch = runtime(autoSendLogs=bool(config(rt, "autoSendLogs")),
                        firstRunDone=bool(config(rt, "firstRunDone")))
-    assert popup(frame(relaunch), 1)["title"] == "MODDED ONLINE 2"
+    assert " ".join(popup(frame(relaunch), 1)["lines"]) == TEXT_0
     assert config(relaunch, "autoSendLogs") is True
 
 
@@ -306,7 +328,7 @@ def test_they_also_cover_the_title_screen_and_nothing_else():
     assert frame(rt, ms=1000) == []      # away for longer than the pause
     rt.execute("screenNow = SCREEN.MENU")
     frame(rt, "Z")                       # back on the menu: the pause applies again
-    assert popup(frame(rt), 1)["title"] == "MODDED ONLINE 2"
+    assert " ".join(popup(frame(rt), 1)["lines"]) == TEXT_0
 
 
 def test_a_config_without_the_flag_shows_them():
@@ -316,30 +338,51 @@ def test_a_config_without_the_flag_shows_them():
     assert popup(frame(rt), 1)["title"] == "MODDED ONLINE 2"
 
 
+def test_the_flag_starts_false():
+    net = (PACK / "src" / "netCore.lua").read_text(encoding="utf-8")
+    at = net.index("    config = {")
+    block = net[at:net.index("\n    },", at)]
+    assert "firstRunDone = false," in block
+
+
+# ------------------------------------------------------------------- layout
+
+def each_first_run_popup(rt):
+    """The drawn frame of each first-run popup in turn."""
+    drawn = frame(rt)
+    for step, buttons in enumerate(BUTTONS):
+        yield step, buttons, drawn
+        if step < len(BUTTONS) - 1:
+            drawn = answer(rt, "Z")
+
+
 def test_the_text_is_wrapped_inside_the_panel():
     rt = runtime()
-    drawn = frame(rt)
-    for step, buttons in ((1, 1), (2, 2), (3, 2)):
-        lines = [d for d in drawn[1:-1 - buttons]]
+    for step, buttons, drawn in each_first_run_popup(rt):
+        lines = drawn[1:-1 - buttons]
         assert len(lines) > 1, "the paragraph was drawn as one line"
         for d in lines:
             width = len(str(d["text"])) * float(d["size"]) * CHAR
             assert abs(float(d["x"]) - TEXT_X) < 1e-9
             assert width <= TEXT_WIDTH + 1e-9, (step, str(d["text"]))
-        drawn = answer(rt, "Z") if step < 3 else None
 
 
 def test_the_text_fills_the_panel_rather_than_a_column_of_it():
     """What the first in-game screenshot showed: every line wrapped at about a third
     of the panel, because the width it measured with was the fallback estimate."""
     rt = runtime()
-    drawn = frame(rt)
-    for step, buttons in ((1, 1), (2, 2), (3, 2)):
-        lines = [d for d in drawn[1:-1 - buttons]]
-        for d in lines[:-1]:             # the last line of a paragraph may be short
+    for step, buttons, drawn in each_first_run_popup(rt):
+        for d in drawn[1:-1 - buttons][:-1]:   # the last line of a paragraph may be short
             width = len(str(d["text"])) * float(d["size"]) * CHAR
             assert width >= 0.7 * TEXT_WIDTH, (step, round(width / TEXT_WIDTH, 2), str(d["text"]))
-        drawn = answer(rt, "Z") if step < 3 else None
+
+
+def test_the_layout_reads_top_to_bottom_and_stays_on_screen():
+    rt = runtime()
+    for _step, _buttons, drawn in each_first_run_popup(rt):
+        ys = [float(d["y"]) for d in drawn]
+        assert all(-1 <= y <= 1 for y in ys), ys
+        assert ys == sorted(ys, reverse=True), "title, text, buttons and footer out of order"
 
 
 def test_the_title_and_footer_are_centred():
@@ -353,31 +396,17 @@ def test_the_title_and_footer_are_centred():
 def test_without_draw_text_size_it_still_draws_from_the_estimate():
     rt = runtime()
     rt.execute("draw_text_size = nil")
-    drawn = frame(rt)
-    title = drawn[0]
+    title = frame(rt)[0]
     width = len(str(title["text"])) * float(title["size"]) * FALLBACK_CHAR
     assert str(title["text"]) == "MODDED ONLINE 2"
     assert abs(float(title["x"]) + width / 2) < 1e-9
-
-
-def test_the_layout_reads_top_to_bottom_and_stays_on_screen():
-    rt = runtime()
-    drawn = frame(rt)
-    for buttons in (1, 2, 2):
-        ys = [float(d["y"]) for d in drawn]
-        assert all(-1 <= y <= 1 for y in ys), ys
-        assert ys == sorted(ys, reverse=True), "title, text, buttons and footer out of order"
-        drawn = answer(rt, "Z")
-        if drawn == []:
-            break
 
 
 def test_a_long_title_is_shrunk_to_stay_inside_the_banner():
     """At 1080p it fits at full size. On a screen where text runs wider (charW
     raised), it steps down rather than running past the banner."""
     rt = runtime()
-    frame(rt)
-    assert float(answer(rt, "Z")[0]["size"]) == 40
+    assert float(through_the_notices(rt)[0]["size"]) == 40
     rt.execute("charW = 0.0009")
     title = frame(rt)[0]
     assert str(title["text"]) == "AUTOMATICALLY SEND DESYNC ERRORS"
@@ -385,8 +414,81 @@ def test_a_long_title_is_shrunk_to_stay_inside_the_banner():
     assert len(str(title["text"])) * float(title["size"]) * 0.0009 <= 0.92 - 0.12
 
 
-def test_the_flag_starts_false():
-    net = (PACK / "src" / "netCore.lua").read_text(encoding="utf-8")
-    at = net.index("    config = {")
-    block = net[at:net.index("\n    },", at)]
-    assert "firstRunDone = false," in block
+# ---------------------------------------------------------- the restart notice
+
+def ask_for_restart(rt):
+    rt.execute("NetMenuUI.showRestartNotice()")
+
+
+def test_a_change_to_the_mods_asks_for_a_restart():
+    rt = runtime(firstRunDone=True)
+    ask_for_restart(rt)
+    shown = popup(frame(rt), 1)
+    assert shown["title"] == "RESTART REQUIRED"
+    assert " ".join(shown["lines"]) == RESTART_TEXT
+    assert shown["rows"] == ["> OK"]
+    assert rt.eval("ioState.wantkeyboard") is True
+
+
+def test_ok_dismisses_it_and_nothing_is_saved():
+    rt = runtime(firstRunDone=True)
+    ask_for_restart(rt)
+    frame(rt)
+    assert answer(rt, "Z") == []
+    assert texts(frame(rt, ms=RELEASE_MS)) == CHIP
+    assert int(rt.eval("#saved")) == 0, "the notice changed a setting"
+
+
+def test_two_changes_ask_once():
+    rt = runtime(firstRunDone=True)
+    ask_for_restart(rt)
+    ask_for_restart(rt)
+    frame(rt)
+    answer(rt, "RETURN")
+    assert texts(frame(rt, ms=RELEASE_MS)) == CHIP
+
+
+def test_a_press_the_moment_it_appears_is_ignored():
+    rt = runtime(firstRunDone=True)
+    ask_for_restart(rt)
+    frame(rt, "Z")
+    assert popup(frame(rt), 1)["title"] == "RESTART REQUIRED"
+
+
+def test_it_waits_for_the_first_run_popups():
+    """At a first launch both can be due (a mod ticked before the popups were
+    answered). The first-run popups come first, then the notice."""
+    rt = runtime()
+    ask_for_restart(rt)
+    assert " ".join(popup(frame(rt), 1)["lines"]) == TEXT_0
+    for _ in range(4):
+        answer(rt, "Z")
+    frame(rt, ms=RELEASE_MS)
+    assert popup(frame(rt), 1)["title"] == "RESTART REQUIRED"
+
+
+def test_it_shows_in_the_camp_and_on_character_select():
+    for screen in ("CAMP", "CHARACTER_SELECT", "TITLE"):
+        rt = runtime(firstRunDone=True)
+        rt.execute("screenNow = SCREEN." + screen)
+        ask_for_restart(rt)
+        assert popup(frame(rt), 1)["title"] == "RESTART REQUIRED", screen
+
+
+def test_it_never_covers_a_level_and_waits_for_the_next_screen():
+    rt = runtime(firstRunDone=True)
+    ask_for_restart(rt)
+    for screen in ("LEVEL", "TRANSITION"):
+        rt.execute("screenNow = SCREEN." + screen)
+        assert frame(rt) == [] and rt.eval("ioState.wantkeyboard") is False, screen
+    rt.execute("screenNow = SCREEN.CAMP")
+    assert popup(frame(rt), 1)["title"] == "RESTART REQUIRED"
+
+
+def test_not_during_an_online_run():
+    rt = runtime(firstRunDone=True)
+    ask_for_restart(rt)
+    rt.execute("inRun = true")
+    assert frame(rt) == []
+    rt.execute("inRun = false")
+    assert popup(frame(rt), 1)["title"] == "RESTART REQUIRED"

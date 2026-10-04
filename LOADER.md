@@ -197,7 +197,8 @@ In order:
    progress writes into our pack and its existing save is orphaned. Route it back.
 4. ~~**Only then delete `shimInjector.lua`.**~~ **Done** (2.0.0-dev42), along with
    `optionSync.lua` and the world mailbox in dev44: both were halves of mechanisms
-   whose other half lived in the injected block.
+   whose other half lived in the injected block. They stopped being loaded then, but
+   the two files and their tests stayed in this repository until 2.0.0-dev67.
 5. **Packaging.** Today this needs hand-run junctions, a `load_order.txt` edit and a
    flag file. For anyone but us it has to become something the mod does from its own
    menu — and the two-states-only rule (`tools/spike2.py`) has to be enforced there

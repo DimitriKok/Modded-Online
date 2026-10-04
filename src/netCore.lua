@@ -74,6 +74,9 @@ local module = {
         autoSyncSave = false,
         -- the first-run popups (menuUI) have all been answered
         firstRunDone = false,
+        -- SETTINGS > ENABLE DEBUG MESSAGES: show the print() lines that land at the
+        -- top left of the screen (main.lua gates them). Off for players.
+        debugMessages = false,
     },
     phase = PHASE.IDLE,
     lastError = nil,     --- @type string?
@@ -280,7 +283,6 @@ end
 -- builds levels in Lua and swaps state.theme_info every level via
 -- force_custom_theme) desyncs when we hook engine internals underneath it, and
 -- ran correctly on Modded Online 0.14.5, which did none of this.
--- KEEP IN SYNC with FULL_SHIM_PATTERNS in src/shimInjector.lua.
 local FULL_TREATMENT_PATTERNS = { "spelunky%-?25", "spelunky%-?2%.5", "spelunky 2%.5" }
 local fullTreatment = nil
 

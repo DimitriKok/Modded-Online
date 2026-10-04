@@ -9,15 +9,17 @@
 ---     HOST  -> Name / Server IP / Server Port / HOST NEW GAME
 ---     JOIN  -> Server IP / Room Code / JOIN GAME
 ---     SETTINGS -> HIDE ROOM CODE / TEST PLAYERS / SYNC SAVE DATA /
----                 AUTOMATICALLY SEND LOGS / AUTOMATICALLY SYNC DATA
+---                 AUTOMATICALLY SEND LOGS / AUTOMATICALLY SYNC DATA /
+---                 ENABLE DEBUG MESSAGES
 ---
 --- Hosting/joining connects and launches the game's play flow: pick your
 --- character, land in the camp (that marks you READY), and the host starts
 --- the run by entering the camp's main door.
 ---
---- The first time Modded Online starts, three popups come first, in the same
---- style (FIRST_RUN below): a notice, then whether to switch on AUTOMATICALLY SEND
---- LOGS and AUTOMATICALLY SYNC DATA.
+--- The first time Modded Online starts, four popups come first, in the same style
+--- (FIRST_RUN below): two notices, then whether to switch on AUTOMATICALLY SEND
+--- LOGS and AUTOMATICALLY SYNC DATA. A RESTART notice follows any change to the
+--- mods played online.
 
 local module = {}
 
@@ -381,6 +383,18 @@ local function autoSyncToggle()
     }
 end
 
+--- The print() lines at the top left of the screen: ours and the hosted mods'
+--- (main.lua gates them). Off by default; on for anyone chasing a problem.
+local function debugMessagesToggle()
+    return {
+        label = "ENABLE DEBUG MESSAGES  [" .. (Network.config.debugMessages and "ON" or "OFF") .. "]",
+        action = function()
+            Network.config.debugMessages = not Network.config.debugMessages
+            Network.saveConfig()
+        end,
+    }
+end
+
 local function pageItems()
     if page == "host" then
         -- pick WHERE to host: the always-on official (public) server, or a
@@ -452,6 +466,7 @@ local function pageItems()
             syncSaveItem(),
             autoSendLogsToggle(),
             autoSyncToggle(),
+            debugMessagesToggle(),
             { label = "BACK", action = function() page = "root"; cursor = 5 end },
         }
     end
@@ -541,9 +556,13 @@ local function drawMenu(ctx)
         drawCentered(ctx, 0, stripB - 0.055, 22, subtitle, COLOR_DIM)
     end
 
-    -- menu rows
+    -- menu rows: 0.12 apart, closer on a page with too many of them to clear the
+    -- footer (SETTINGS, at seven). The last bar ends above the footer line.
     local y = stripB - (page == "root" and 0.115 or 0.15)
     local rowH = 0.12
+    if #items > 1 then
+        rowH = math.min(rowH, (y - (B + 0.20)) / (#items - 1))
+    end
     for index, item in ipairs(items) do
         local selected = index == cursor
         local text = item.label
@@ -706,16 +725,23 @@ local function drawWaitingPanel(ctx)
     ctx:draw_text(L + 0.03, T - 0.11, 17, "Syncing with the other players...", COLOR_DIM)
 end
 
--- ---------------------------------------------------------------- first run
+-- ---------------------------------------------------------------- popups
 
---- The popups shown the first time Modded Online starts, in order, over the main
---- menu and in the menu's own style. Titles and buttons are drawn in capitals like
---- every other label in it; the text is drawn as written. A popup with a `setting`
---- writes the chosen button's `value` to that config key.
+--- The popups shown the first time Modded Online starts, in order, over the title
+--- screen and main menu in the menu's own style. Titles and buttons are drawn in
+--- capitals like every other label in it; the text is drawn as written. A popup
+--- with a `setting` writes the chosen button's `value` to that config key.
 ---
 --- Each answer is saved as it is given, and `firstRunDone` only once the last one
 --- is: closing the game half way through shows them all again next time.
 local FIRST_RUN = {
+    {
+        title = "Modded Online 2",
+        text = "To use modded online, ensure all script mods (other than modded online)"
+            .. " are disabled. To play a mod, please enable it under playlunky options"
+            .. " and restart the game.",
+        buttons = { { label = "I Understand" } },
+    },
     {
         title = "Modded Online 2",
         text = "This mod has used ai heavily in the development in it; thus, it will"
@@ -746,12 +772,25 @@ local FIRST_RUN = {
     },
 }
 
+--- Shown when the mods played online change: a box ticked or unticked in
+--- Playlunky's options, or the setup undone (setupUI). None of it takes effect
+--- until the game restarts, and a player who sees nothing change concludes it is
+--- broken.
+local RESTART = {
+    {
+        title = "Restart Required",
+        text = "Restart the game for this change to take effect. Playlunky only loads"
+            .. " mods when the game starts.",
+        buttons = { { label = "OK" } },
+    },
+}
+
 --- A press is ignored for this long after a popup appears, so a key mashed
 --- through one popup cannot answer the next before it has been read.
-local FIRST_RUN_INPUT_DELAY_MS = 600
+local POPUP_INPUT_DELAY_MS = 600
 --- The keyboard stays ours this long after the last answer, so the press that
 --- gave it cannot fall through to the game's own menu underneath.
-local FIRST_RUN_RELEASE_MS = 300
+local POPUP_RELEASE_MS = 300
 
 -- The menu's own width; the text is wrapped to fit inside it.
 local POPUP_L, POPUP_R = -0.46, 0.46
@@ -759,11 +798,14 @@ local POPUP_TEXT_X = POPUP_L + 0.075
 local POPUP_TEXT_W = (POPUP_R - 0.075) - POPUP_TEXT_X
 local POPUP_ROW_H = 0.12
 
-local firstRunStep = 1        -- which popup is up
-local firstRunChoice = 1      -- which of its buttons is highlighted
-local firstRunShownMs = nil   -- when it appeared; nil until it is drawn
-local firstRunClosedMs = nil  -- when the last one was answered
-local firstRunLayout = nil    -- the measured layout, kept until the popup or screen changes
+local popupSeq = nil         -- the sequence on screen: FIRST_RUN or RESTART
+local popupStep = 1          -- which of its popups is up
+local popupChoice = 1        -- which of its buttons is highlighted
+local popupShownMs = nil     -- when it appeared; presses before the pause is over are ignored
+local popupDrawn = false     -- drawn on the last GUI frame; one that was not re-arms the pause
+local popupClosedMs = nil    -- when the last answer was given
+local popupLayout = nil      -- the measured layout, kept until the popup or screen changes
+local restartPending = false -- a RESTART notice is due
 
 --- `text` broken into lines no wider than `width` at `size`. A word longer than
 --- the whole width gets a line of its own rather than being cut.
@@ -790,7 +832,7 @@ end
 --- text steps down a size if it would not fit the screen, and a long title steps
 --- down so it stays inside the banner.
 --- @return table
-local function measureFirstRun(popup)
+local function measurePopup(popup)
     local title = popup.title:upper()
     local titleSize = 40
     while titleSize > 24 and textWidth(titleSize, title) > (POPUP_R - POPUP_L) - 0.12 do
@@ -827,7 +869,7 @@ local function measureFirstRun(popup)
 end
 
 --- @param ctx GuiDrawContext
-local function drawFirstRun(ctx, popup, layout)
+local function drawPopup(ctx, popup, layout)
     ctx:draw_rect_filled(-1, 1, 1, -1, 0, COLOR_OVERLAY)
     drawPanel(ctx, POPUP_L, layout.T, POPUP_R, layout.B)
     drawBanner(ctx, POPUP_L, layout.T, POPUP_R)
@@ -838,7 +880,7 @@ local function drawFirstRun(ctx, popup, layout)
     end
     for index, button in ipairs(popup.buttons) do
         drawRow(ctx, POPUP_L, POPUP_R, layout.rowY - (index - 1) * POPUP_ROW_H,
-            button.label:upper(), index == firstRunChoice)
+            button.label:upper(), index == popupChoice)
     end
     local footer = #popup.buttons > 1 and "ARROWS move     Z / ENTER select" or "Z / ENTER select"
     drawCentered(ctx, 0, layout.B + 0.075, 18, footer, COLOR_DIM)
@@ -850,54 +892,89 @@ local function firstRunPending()
     return Network.config.firstRunDone ~= true
 end
 
---- One frame of the first-run popups: the keys, then the drawing.
+--- Which popups are due on this screen. The first-run ones come first, on the
+--- title screen and main menu. A restart notice shows anywhere but over a level,
+--- where it would take the keyboard from the game: it waits for the camp or a menu.
+--- @return table?
+local function duePopups(screen)
+    if firstRunPending() and (screen == SCREEN.MENU or screen == SCREEN.TITLE) then
+        return FIRST_RUN
+    end
+    if restartPending and screen ~= SCREEN.LEVEL and screen ~= SCREEN.TRANSITION then
+        return RESTART
+    end
+    return nil
+end
+
+--- The mods played online changed and need a restart (setupUI).
+function module.showRestartNotice()
+    restartPending = true
+end
+
+--- One frame of a popup sequence: the keys, then the drawing.
 --- @param ctx GuiDrawContext
-local function firstRunFrame(ctx)
+--- @param seq table # FIRST_RUN or RESTART
+--- @param wasDrawn boolean # a popup was on screen last frame
+local function popupFrame(ctx, seq, wasDrawn)
     -- the game's own menu is underneath and must not see these keys
     pcall(function()
         get_io().wantkeyboard = true
     end)
     local now = get_ms()
-    if firstRunShownMs == nil then
-        firstRunShownMs = now
+    if popupSeq ~= seq then
+        popupSeq, popupStep, popupChoice, popupLayout = seq, 1, 1, nil
+        popupShownMs = now
+    elseif not wasDrawn or popupShownMs == nil then
+        popupShownMs = now -- back on screen after time away: the pause applies again
     end
-    local popup = FIRST_RUN[firstRunStep]
+    local popup = seq[popupStep]
     if pressed(KEYS.up) then
-        firstRunChoice = firstRunChoice > 1 and firstRunChoice - 1 or #popup.buttons
+        popupChoice = popupChoice > 1 and popupChoice - 1 or #popup.buttons
     end
     if pressed(KEYS.down) then
-        firstRunChoice = firstRunChoice < #popup.buttons and firstRunChoice + 1 or 1
+        popupChoice = popupChoice < #popup.buttons and popupChoice + 1 or 1
     end
-    if now - firstRunShownMs >= FIRST_RUN_INPUT_DELAY_MS
+    if now - popupShownMs >= POPUP_INPUT_DELAY_MS
         and (pressed(KEYS.select) or pressed(KEYS.commit))
     then
         if popup.setting ~= nil then
-            Network.config[popup.setting] = popup.buttons[firstRunChoice].value == true
+            Network.config[popup.setting] = popup.buttons[popupChoice].value == true
         end
-        if firstRunStep < #FIRST_RUN then
-            firstRunStep = firstRunStep + 1
-            firstRunChoice = 1
-            firstRunShownMs = now
-            firstRunLayout = nil
+        local last = popupStep >= #seq
+        if not last then
+            popupStep = popupStep + 1
+            popupChoice = 1
+            popupShownMs = now
+            popupLayout = nil
         else
-            Network.config.firstRunDone = true
-            firstRunClosedMs = now
+            popupSeq = nil
+            popupClosedMs = now
+            if seq == FIRST_RUN then
+                Network.config.firstRunDone = true
+            else
+                restartPending = false
+            end
         end
-        Network.saveConfig()
-        if not firstRunPending() then
+        if seq == FIRST_RUN then
+            Network.saveConfig()
+        end
+        if last then
             return
         end
-        popup = FIRST_RUN[firstRunStep]
+        popup = seq[popupStep]
     end
     -- Measuring wraps the whole paragraph, so it is kept; this one width changes
     -- with the window size, which is the only other thing the layout depends on.
     local metric = textWidth(22, "MODDED ONLINE")
-    if firstRunLayout == nil or firstRunLayout.step ~= firstRunStep or firstRunLayout.metric ~= metric then
-        firstRunLayout = measureFirstRun(popup)
-        firstRunLayout.step = firstRunStep
-        firstRunLayout.metric = metric
+    if popupLayout == nil or popupLayout.seq ~= seq or popupLayout.step ~= popupStep
+        or popupLayout.metric ~= metric
+    then
+        popupLayout = measurePopup(popup)
+        popupLayout.seq = seq
+        popupLayout.step = popupStep
+        popupLayout.metric = metric
     end
-    drawFirstRun(ctx, popup, firstRunLayout)
+    drawPopup(ctx, popup, popupLayout)
 end
 
 -- ---------------------------------------------------------------- frame
@@ -905,10 +982,8 @@ end
 --- @param ctx GuiDrawContext
 local function guiFrame(ctx)
     local screen = get_local_state().screen
-    if screen ~= SCREEN.MENU and screen ~= SCREEN.TITLE then
-        -- left with a popup unanswered: its pause before input applies again on return
-        firstRunShownMs = nil
-    end
+    local wasDrawn = popupDrawn
+    popupDrawn = false
     if Network.isInRun() then
         if screen == SCREEN.LEVEL or screen == SCREEN.TRANSITION then
             -- Held on a transition waiting for the other players to finish with
@@ -931,6 +1006,23 @@ local function guiFrame(ctx)
         end
         return
     end
+    -- Popups come before anything else outside a run, the MODDED ONLINE menu
+    -- included.
+    local seq = duePopups(screen)
+    if seq ~= nil then
+        if page ~= nil then
+            closeMenu()
+        end
+        popupDrawn = true
+        popupFrame(ctx, seq, wasDrawn)
+        return
+    end
+    if popupClosedMs ~= nil and get_ms() - popupClosedMs < POPUP_RELEASE_MS then
+        pcall(function()
+            get_io().wantkeyboard = true
+        end)
+        return
+    end
     if screen == SCREEN.CAMP and Network.isActive() then
         drawCampStatus(ctx)
         return
@@ -950,21 +1042,6 @@ local function guiFrame(ctx)
         if page ~= nil then
             closeMenu()
         end
-        return
-    end
-    -- The first-run popups come before anything else here, the MODDED ONLINE menu
-    -- included.
-    if firstRunPending() then
-        if page ~= nil then
-            closeMenu()
-        end
-        firstRunFrame(ctx)
-        return
-    end
-    if firstRunClosedMs ~= nil and get_ms() - firstRunClosedMs < FIRST_RUN_RELEASE_MS then
-        pcall(function()
-            get_io().wantkeyboard = true
-        end)
         return
     end
     if page == nil then

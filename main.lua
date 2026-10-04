@@ -13,12 +13,91 @@
 
 meta = {
     name = "Modded Online (loader build)",
-    version = "2.0.0-dev66",
+    version = "2.0.0-dev67",
     description = "Play scriptable mods together via a self-hosted server",
     author = "EatYoCake + DoctorPuppy",
     online_safe = false, -- not for the *official* online — that's the point
     unsafe = true,       -- udp_listen/udp_send and settings persistence need unsafe mode
 }
+
+-- ------------------------------------------------------------- screen messages
+--
+-- Every print() lands at the top left of the screen. Ours are diagnostics (setup
+-- reports, hosting summaries, error traces), and a hosted mod's own debug prints
+-- arrive the same way: it runs in this Lua state, so its `print` is ours. They show
+-- only with SETTINGS > ENABLE DEBUG MESSAGES on (`Network.config.debugMessages`),
+-- or with MO_DEBUG set from the console. The diagnostics still reach the desync log
+-- and the boot log either way.
+--
+-- Installed FIRST, before anything can print. The setting is not known until
+-- netCore has loaded config.json, so lines printed before then are held, and
+-- FlushHeldMessages (end of this file) shows or drops them.
+--
+-- `alwaysPrint` is the engine's own print, for the one message that must show
+-- regardless: a second copy of Modded Online enabled, which nothing else survives.
+local alwaysPrint = print
+do
+    local held = {}
+    local HELD_MAX = 64
+
+    --- true: show, false: hide, nil: not known yet
+    local function shown()
+        if rawget(_G, "MO_DEBUG") == true then
+            return true
+        end
+        local net = rawget(_G, "Network")
+        if type(net) ~= "table" or type(net.config) ~= "table" then
+            return nil
+        end
+        return net.config.debugMessages == true
+    end
+
+    local function release(show)
+        local early = held
+        held = {}
+        if show then
+            for _, entry in ipairs(early) do
+                pcall(entry.fn, table.unpack(entry.args, 1, entry.args.n))
+            end
+        end
+    end
+
+    local function gate(real)
+        return function(...)
+            local show = shown()
+            if show == nil then
+                if #held < HELD_MAX then
+                    held[#held + 1] = { fn = real, args = table.pack(...) }
+                end
+                return
+            end
+            if #held > 0 then
+                release(show)
+            end
+            if show then
+                return real(...)
+            end
+        end
+    end
+
+    -- message is "the same as print"; printf, prinspect and messpect print too
+    for _, name in ipairs({ "print", "message", "printf", "prinspect", "messpect" }) do
+        local real = rawget(_G, name)
+        if type(real) == "function" then
+            _G[name] = gate(real)
+        end
+    end
+
+    --- Show or drop what was printed before the setting was known. If netCore never
+    --- loaded, something is badly broken and the lines are shown.
+    function FlushHeldMessages()
+        local show = shown()
+        if show == nil then
+            show = true
+        end
+        release(show)
+    end
+end
 
 -- ------------------------------------------------------------------ boot trace
 --
@@ -123,6 +202,8 @@ for _, path in ipairs(MODULES) do
     SafeCall("main/require " .. path, require, path)
 end
 bootStep("all modules loaded")
+-- netCore has read config.json by now: show or drop what was printed before it
+FlushHeldMessages()
 
 -- Two enabled copies of Modded Online is a configuration nothing downstream can
 -- survive: both bind the UDP port, both register every callback, and PackDir()
@@ -134,7 +215,7 @@ if Network ~= nil and Network.enabledScriptPacks ~= nil then
     for _, name in ipairs(Network.enabledScriptPacks()) do
         if name:lower():find("modded", 1, true) ~= nil
             and name:lower():find("online", 1, true) ~= nil then
-            pcall(print, "[ModdedOnline] '" .. name .. "' is ALSO enabled. Two copies"
+            pcall(alwaysPrint, "[ModdedOnline] '" .. name .. "' is ALSO enabled. Two copies"
                 .. " of Modded Online cannot run together -- both bind the same UDP"
                 .. " port and register every callback twice. Disable one in Modlunky.")
             bootStep("WARNING: a second Modded Online is enabled: " .. name)

@@ -120,7 +120,7 @@ def test_the_root_page_is_the_actions_settings_and_close():
     assert rows(frame(rt)) == ["> HOST", "JOIN", "MATCHMAKING", "DISCORD", "SETTINGS", "CLOSE"]
 
 
-def test_settings_holds_the_three_moved_settings_and_the_two_new_ones():
+def test_settings_holds_the_three_moved_settings_and_the_three_new_ones():
     rt = runtime()
     drawn = open_settings(rt)
     assert "- SETTINGS -" in texts(drawn)
@@ -130,6 +130,7 @@ def test_settings_holds_the_three_moved_settings_and_the_two_new_ones():
         "SYNC SAVE DATA",
         "AUTOMATICALLY SEND LOGS  [OFF]",
         "AUTOMATICALLY SYNC DATA  [OFF]",
+        "ENABLE DEBUG MESSAGES  [OFF]",
         "BACK",
     ]
 
@@ -156,6 +157,26 @@ def test_automatically_sync_data_flips_and_is_saved():
     assert config(rt, "autoSyncSave") is True and int(rt.eval("saves")) == 1
     assert "> AUTOMATICALLY SYNC DATA  [ON]" in rows(drawn)
     assert config(rt, "autoSendLogs") is False, "flipped the other switch too"
+
+
+def test_enable_debug_messages_flips_and_is_saved():
+    rt = runtime()
+    open_settings(rt)
+    for _ in range(5):
+        frame(rt, "DOWN")
+    drawn = frame(rt, "Z")
+    assert config(rt, "debugMessages") is True and int(rt.eval("saves")) == 1
+    assert "> ENABLE DEBUG MESSAGES  [ON]" in rows(drawn)
+    drawn = frame(rt, "Z")
+    assert config(rt, "debugMessages") is False and int(rt.eval("saves")) == 2
+    assert "> ENABLE DEBUG MESSAGES  [OFF]" in rows(drawn)
+    assert config(rt, "autoSyncSave") is False, "flipped the other switch too"
+
+
+def test_debug_messages_start_off():
+    net = (PACK / "src" / "netCore.lua").read_text(encoding="utf-8")
+    at = net.index("    config = {")
+    assert "debugMessages = false," in net[at:net.index(chr(10) + "    },", at)]
 
 
 def test_the_moved_settings_still_do_what_they_did():
@@ -190,14 +211,21 @@ def test_escape_from_settings_goes_back_to_the_root_page():
 
 
 def test_every_row_clears_the_footer():
-    """Six rows on a page with a subtitle: the last one's highlight bar must end
-    above the footer line."""
+    """SETTINGS has seven rows under a subtitle, so they sit a little closer: the
+    last one's highlight bar must still end above the footer line. The root page
+    keeps the full spacing."""
     rt = runtime()
-    for drawn in (open_settings(rt), frame(rt, "ESCAPE")):
+    for drawn, count in ((open_settings(rt), 7), (frame(rt, "ESCAPE"), 6)):
         row_ys = [float(d["y"]) for d in drawn if d["size"] in ROW_SIZES]
         footer_y = [float(d["y"]) for d in drawn if d["size"] == FOOTER_SIZE][0]
-        assert len(row_ys) == 6
+        assert len(row_ys) == count
         assert min(row_ys) - 0.06 > footer_y, (min(row_ys), footer_y)
+        gaps = [round(a - b, 9) for a, b in zip(row_ys, row_ys[1:])]
+        assert len(set(gaps)) == 1, "uneven spacing"
+        # a highlight bar (0.05 above a row, 0.06 below) never reaches the next row
+        assert gaps[0] >= 0.11 - 1e-9, gaps[0]
+        if count == 6:
+            assert abs(gaps[0] - 0.12) < 1e-9, "the root page was squeezed for no reason"
 
 
 def test_the_title_and_subtitle_are_centred():

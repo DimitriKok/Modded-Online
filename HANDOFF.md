@@ -6,7 +6,7 @@ them.
 
 ## Start here
 
-**Build: `2.0.0-dev55` → `dev66`. The server must be redeployed at `1.0.13`.**
+**Build: `2.0.0-dev55` → `dev67`. The server must be redeployed at `1.0.13`.**
 Section 3's fix is half a server fix and does nothing without it (1.0.11 or later).
 Section 6 has a server half too, but its client half works on its own. A client on a
 server other than the one it expects says so in a toast and in the log. Check with
@@ -26,7 +26,8 @@ server other than the one it expects says so in a toast and in the log. Check wi
 | 10 | Jungle floors desynced (2-4: one extra frog on a lily pad) | **FIXED** in dev65, not yet confirmed in game — section 10 |
 | 11 | Desync logs sent to a Discord channel automatically (opt-in) | **NEW** in dev65 / server 1.0.13. The server side starts configured; no log posted yet — section 11 |
 | 12 | A SETTINGS page, with AUTOMATICALLY SEND LOGS and AUTOMATICALLY SYNC DATA | **NEW** in dev66, reported working in game — section 12 |
-| 13 | Popups the first time Modded Online starts | **NEW** in dev66, not yet tried in game — section 13 |
+| 13 | Popups the first time Modded Online starts | **NEW** in dev66, reported working in game; a fourth added in dev67 — section 13 |
+| 14 | ENABLE DEBUG MESSAGES, and a RESTART REQUIRED popup | **NEW** in dev67, not yet tried in game — section 14 |
 
 **Git state:** everything is on `origin/fix/peer-save-restore`; the patch-delivered
 commits from the no-push-access session have landed. `git log --oneline
@@ -542,16 +543,17 @@ have copied it into the player's mod.
 3. After a moment, SETTINGS should show `SYNC SAVE DATA  [2 file(s) synced]`.
 4. The mod's own `save.dat` and `savegame.sav` should match Modded Online's.
 
-## 13. The first-run popups — NEW in dev66, NOT YET TRIED IN GAME
+## 13. The first-run popups — NEW in dev66, REPORTED WORKING IN GAME
 
-The first time Modded Online starts, three popups come up over the main menu (and
+The first time Modded Online starts, four popups come up over the main menu (and
 the title screen). They're drawn with the menu's own panel, banner and rows:
 
-1. A notice, answered with I UNDERSTAND.
-2. AUTOMATICALLY SEND LOGS: YES or NO.
-3. AUTOMATICALLY SYNC DATA: YES or NO.
+1. How to set mods up (added in dev67), answered with I UNDERSTAND.
+2. A notice about the mod itself, answered with I UNDERSTAND.
+3. AUTOMATICALLY SEND LOGS: YES or NO.
+4. AUTOMATICALLY SYNC DATA: YES or NO.
 
-The code is `FIRST_RUN` and `firstRunFrame` in `src/menuUI.lua`. The flag is
+The code is `FIRST_RUN` and `popupFrame` in `src/menuUI.lua`. The flag is
 `firstRunDone` in `config.json`, saved only after the last answer; each answer is
 saved as it's given.
 
@@ -566,10 +568,39 @@ key.
 **To confirm in game:**
 
 1. Delete `firstRunDone` from `config.json`, or set it to `false`.
-2. Launch. The three popups should show in order.
+2. Launch. The four popups should show in order.
 3. Answer them.
 4. SETTINGS should show the two switches as answered.
 5. Relaunch. The popups shouldn't come back.
+
+## 14. ENABLE DEBUG MESSAGES and RESTART REQUIRED — NEW in dev67, NOT YET TRIED IN GAME
+
+**ENABLE DEBUG MESSAGES** is a SETTINGS switch (`debugMessages` in `config.json`),
+off by default.
+
+- **What it does:** `main.lua` gates the five on-screen printers (`print`,
+  `message`, `printf`, `prinspect`, `messpect`) for us and for every hosted mod,
+  because they share our Lua state. `MO_DEBUG` overrides it.
+- **Early lines:** lines printed before netCore has read `config.json` are held,
+  and `FlushHeldMessages()` shows or drops them after the modules load.
+- **The exception:** the second-copy warning uses `alwaysPrint` and always shows.
+- **When you're debugging:** turn it on. Without it, a player sees no error trace on
+  screen, though the desync log still gets them.
+
+**RESTART REQUIRED** is a popup, the `RESTART` sequence in `src/menuUI.lua`.
+
+- **What asks for it:** `setupUI` calls `NetMenuUI.showRestartNotice()` whenever a
+  selection is applied (a tick, an untick, or a change found at boot) and on the
+  undo button.
+- **Where it shows:** anywhere except a level or a transition, and never during an
+  online run. The first-run popups go first.
+
+**To confirm in game:**
+
+1. With the switch off, the top left of the screen stays clear at boot and during a
+   run, including hdmod's own messages.
+2. Turn it on. The `[ModdedOnline]` lines come back.
+3. Tick a mod in Playlunky's options. RESTART REQUIRED shows, and OK dismisses it.
 
 ## Diagnostic tooling (flags and the files they write)
 
@@ -639,9 +670,10 @@ quit** — that runs packSetup's teardown and unlinks the assets, which must hap
 py -m pytest tests/ -q
 ```
 
-562 passing. **16 pre-existing failures** in `tests/test_seeded_run.py` and
-`tests/test_world_mailbox.py` — they cover the world mailbox deleted in dev44 and are
-unrelated to anything here.
+662 passing, none failing. The 16 long-standing failures went in dev67, with the two
+stale test files they came from: `tests/test_world_mailbox.py` (the world mailbox
+deleted in dev44) and `tests/test_seeded_run.py` (the seeded-run flag removed in
+dev46). A failure here now means something broke.
 
 The server has its own end-to-end suite, and `py -m pytest tests/` DOES NOT RUN IT:
 

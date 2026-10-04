@@ -142,8 +142,9 @@ end
 --- load_order.txt comments it out.
 --- @return string # pack folder name, e.g. "fyi.modded-online"
 local PACK_FINGERPRINT = "/src/modHost.lua" -- a file no other pack has
--- NOT shimInjector.lua: the parent pack ships that too, so it would match either
--- folder and this build could end up writing into the shipping mod's directory.
+-- Never a file the original Modded Online pack (fyi.modded-online) ships as well,
+-- such as shimInjector.lua: it would match either folder, and this build could end
+-- up writing into that mod's directory.
 local FALLBACK_PACK_DIR = "fyi.modded-online-loader"
 local packDir = nil
 function PackDir()

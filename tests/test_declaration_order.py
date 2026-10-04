@@ -83,18 +83,13 @@ def offenders(source: str) -> list[tuple[str, int, int]]:
 
 
 def code_of(path: pathlib.Path) -> str:
-    """The file's own code, plus the LIVE shim payload but not the archived ones.
+    """The file's own code.
 
-    `shimInjector.lua` keeps every previous payload verbatim so an old block can be
-    stripped from an installed pack by exact text. Two of those archives contain the
-    v25 bug this checker exists to find, and they must keep containing it — editing
-    one would leave the broken copy in a player's mod folder forever. The live
-    payload is checked, and it is exactly where the bug would matter next.
+    This used to strip the archived payloads `src/shimInjector.lua` kept verbatim,
+    two of which still carried the v25 bug on purpose. That file was removed in
+    2.0.0-dev67, so every file is checked whole.
     """
-    source = path.read_text(encoding="utf-8")
-    archive = (r'local SHIM_V\d+ = "-- " \.\. MARKER_V\d+ \.\. \[\[.*?'
-               + chr(10) + r'\]\]' + chr(10))
-    return re.sub(archive, "", source, flags=re.S)
+    return path.read_text(encoding="utf-8")
 
 
 @pytest.mark.parametrize("path", LUA_FILES, ids=[p.name for p in LUA_FILES])

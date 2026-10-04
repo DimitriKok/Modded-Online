@@ -15,9 +15,15 @@ mod — just enable it alongside your content mods.
   `python3` are all accepted; Windows' Microsoft-Store placeholders for
   `python.exe` are correctly *not* treated as an install.
 - Usage: main menu → **MODDED ONLINE** window → **HOST** or **JOIN**. The first
-  time it starts, three popups come first: a notice, then whether to switch on
-  **AUTOMATICALLY SEND LOGS** and **AUTOMATICALLY SYNC DATA** (both can be changed
-  later under **SETTINGS**).
+  time it starts, four popups come first:
+  - how to set mods up;
+  - a notice about the mod;
+  - whether to switch on **AUTOMATICALLY SEND LOGS**;
+  - whether to switch on **AUTOMATICALLY SYNC DATA**.
+
+  Both switches can be changed later under **SETTINGS**.
+- To play a mod online, tick it in Playlunky's options for Modded Online, then
+  restart the game. A popup says so.
 - **HOST** always opens a *private* (code-only) room — matchmaking never joins
   it; you share the room code with friends. Choose where it lives:
   - **Official server**: on the default server (`129.213.14.228`) — no need to
@@ -59,6 +65,8 @@ mod — just enable it alongside your content mods.
     mod itself.
   - **AUTOMATICALLY SEND LOGS** and **AUTOMATICALLY SYNC DATA** are below. Both
     are off by default.
+  - **ENABLE DEBUG MESSAGES** shows the diagnostic lines at the top left of the
+    screen, from Modded Online and from the mods it hosts. It's off by default.
 - **Desync logs to Discord** (opt-in): switch on **AUTOMATICALLY SEND LOGS** and a
   run that desyncs sends its log to the server, which posts it to the Discord
   channel its operator set up. Server owners: see `server/DISCORD.md`.

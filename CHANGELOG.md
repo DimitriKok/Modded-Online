@@ -1,5 +1,100 @@
 # Changelog
 
+## 2.0.0-dev67
+
+Three things for the public test. No server change: the server stays at **1.0.13**.
+
+### ENABLE DEBUG MESSAGES (new setting, off by default)
+
+Every `print()` lands at the top left of the screen. Ours are diagnostics: setup
+reports, hosting summaries and error traces. A hosted mod's own debug prints arrive
+the same way, because it runs in our Lua state; hdmod's
+`message("APPLIED IDOL OWNER ...")` is one. With the new SETTINGS switch off, none
+of them show.
+
+- **What it covers:** `main.lua` gates all five functions that print on screen:
+  `print`, `message`, `printf`, `prinspect` and `messpect`. `MO_DEBUG` from the
+  console still shows everything.
+- **Nothing is lost:** the diagnostics still go to the desync log and the boot log.
+- **Before the setting is known:** netCore reads `config.json` only after the first
+  lines may have printed. Those are held, then shown or dropped once the setting is
+  read. If netCore never loaded, they're shown.
+- **The one exception:** the warning that a second copy of Modded Online is enabled
+  always shows, because nothing else works in that state.
+- The SETTINGS page has seven rows now, so they sit slightly closer together. Every
+  other page keeps the full spacing.
+
+### Restart Required
+
+Ticking or unticking a mod in Playlunky's options, or pressing "Undo Modded Online's
+setup", now brings up a RESTART REQUIRED popup in the menu's style. Before, the only
+notice was a printed line, which the new setting now hides by default.
+
+- It shows straight away on any screen except a level or a transition, where it
+  would take the keyboard from the game. A change made mid-level waits for the camp
+  or a menu.
+- It never shows during an online run, because the change itself waits for the run
+  to end.
+- At a first launch it waits for the first-run popups.
+- A change applied at boot (a tick from a session that was closed in the options
+  panel) asks too.
+
+### A new first popup
+
+There are four first-run popups now. The new first one says how to set mods up:
+
+> To use modded online, ensure all script mods (other than modded online) are
+> disabled. To play a mod, please enable it under playlunky options and restart the
+> game.
+
+Players who already answered the popups won't see it. `"firstRunDone":false` in
+`config.json` shows them all again.
+
+The first-run popups and the restart notice now share one piece of code
+(`popupFrame` in `src/menuUI.lua`). The pause before a press counts re-arms
+whenever a popup comes back on screen.
+
+### Removed: the old shim, and the stale tests
+
+Two modules the game hadn't loaded since dev42 and dev44 are deleted:
+`src/shimInjector.lua` (the old injected determinism shim, 527 KB) and
+`src/optionSync.lua`. The six test files that tested only them went too:
+`test_option_sync`, `test_determinism_shim`, `test_shim_boot`, `test_shim_clock`,
+`test_world_mailbox` and `test_content_world_state`.
+
+The world mailbox's tests were 8 of the 16 long-standing failures; the other half of
+that mechanism left `eventSync` long ago. The other 8 were `tests/test_seeded_run.py`.
+It tested the seeded-run flag removed in dev46, whose entry already listed the file
+as gone, and it's deleted now too. The suite runs with no failures.
+
+None of this changes anything that runs, because neither module was loaded.
+`netCore`'s check for old injected blocks in other mods' `main.lua` stays, because
+it matches the markers itself.
+
+### Tests
+
+- `tests/test_debug_messages.py` (new) runs the gate from `main.lua`. It checks
+  that:
+  - off hides everything, on shows all five printers, and the switch is read live;
+  - MO_DEBUG shows everything;
+  - early lines are held, then shown or dropped, in order and up to a limit;
+  - a hosted mod's prints are gated too;
+  - the second-copy warning always shows;
+  - the gate is installed before anything can print.
+- `tests/test_first_run.py` covers the four popups and the restart notice. For the
+  notice it checks:
+  - its text and button;
+  - that it waits for the first-run popups;
+  - where it shows and where it waits;
+  - that it never shows during an online run;
+  - one notice for two changes, and nothing saved.
+- `tests/test_setup_options.py`: ticking, unticking, a change found at boot and the
+  undo button all ask for a restart; nothing changing asks for nothing.
+- `tests/test_settings_menu.py`: the new switch, its default, and the spacing of
+  the seven rows.
+
+Fourteen deliberate breaks of the new code are each caught by at least one test.
+
 ## 2.0.0-dev66
 
 A SETTINGS page in the Modded Online menu with two new switches, and three popups

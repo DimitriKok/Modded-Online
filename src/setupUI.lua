@@ -59,10 +59,20 @@ function module.wanted()
     return chosen
 end
 
+--- None of it takes effect until Playlunky restarts, and the report below is a
+--- debug message most players never see (main.lua gates prints), so say it in a
+--- popup: menuUI's RESTART notice.
+local function askForRestart()
+    if NetMenuUI ~= nil and NetMenuUI.showRestartNotice ~= nil then
+        pcall(NetMenuUI.showRestartNotice)
+    end
+end
+
 --- Put a selection into effect and report what happened.
 --- @param wanted string[]
 --- @return nil
 local function applyNow(wanted)
+    askForRestart()
     local report = PackSetup.apply(wanted)
     -- The REQUEST, not what was accepted. A selection containing a second
     -- asset-bearing mod comes back one short, and remembering the short version
@@ -183,6 +193,7 @@ function module.install()
                     options[key] = false
                 end
             end
+            askForRestart()
             local report = PackSetup.clear()
             for _, change in ipairs(report.changed) do
                 say("load_order.txt: %s", change)
