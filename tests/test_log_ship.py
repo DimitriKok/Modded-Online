@@ -1,7 +1,8 @@
 """The client half of sending desync logs to the server's Discord (src/logShip.lua).
 
-A run that desynced is uploaded when it ends -- only for a player who ticked the
-option, and only to a server that says it forwards logs. The game has no HTTP, so
+A run that desynced is uploaded when it ends -- only for a player who switched on
+AUTOMATICALLY SEND LOGS (Modded Online's SETTINGS page), and only to a server that
+says it forwards logs. The game has no HTTP, so
 the log goes to the Modded Online server in base64 parts over UDP, acknowledged
 cumulatively and resent when lost; the server posts it (see tests/test_discord_logs.py
 and server/test_server.py for that half).
@@ -28,7 +29,6 @@ DESYNC_LOG = (PACK / "src" / "desyncLog.lua").read_text(encoding="utf-8").replac
 ENV = """
 now = 100000
 function get_ms() return now end
-options = { mo_send_desync_logs = true }
 registeredOptions = {}
 function register_option_bool(name, desc, long, default)
     registeredOptions[name] = { desc = desc, long = long, default = default }
@@ -46,6 +46,7 @@ sent, events = {}, {}
 eventHandlers, serverHandlers = {}, {}
 Network = {
     slot = 2, active = true, inRun = true, serverForwardsLogs = true,
+    config = { autoSendLogs = true },
     isActive = function() return Network.active end,
     isInRun = function() return Network.inRun end,
     sendServer = function(msg) sent[#sent + 1] = msg end,
@@ -134,19 +135,38 @@ def test_a_clean_run_sends_nothing():
     assert sent(rt) == []
 
 
-def test_nothing_is_sent_without_the_option():
+def test_nothing_is_sent_without_the_setting():
     rt = runtime()
-    rt.execute("options.mo_send_desync_logs = false")
+    rt.execute("Network.config.autoSendLogs = false")
     end_run_with(rt, "log text")
     frame(rt)
     assert sent(rt) == [] and status(rt)["pending"] == 0
 
 
-def test_the_option_is_registered_off_by_default():
+def test_the_setting_is_off_by_default():
+    """The log names the players in the room and the mods everyone runs, so it only
+    goes for a player who switched it on."""
+    net = (PACK / "src" / "netCore.lua").read_text(encoding="utf-8")
+    at = net.index("    config = {")
+    block = net[at:net.index("\n    },", at)]
+    assert "autoSendLogs = false," in block
+
+
+def test_a_missing_setting_counts_as_off():
+    """A config.json from before the setting existed has no such key."""
     rt = runtime()
-    opt = rt.eval("registeredOptions.mo_send_desync_logs")
-    assert opt is not None and opt["default"] is False
-    assert "Discord" in str(opt["desc"])
+    rt.execute("Network.config = {}")
+    end_run_with(rt, "log text")
+    frame(rt)
+    assert sent(rt) == [] and status(rt)["pending"] == 0
+
+
+def test_the_old_playlunky_option_is_gone():
+    """dev65 put the switch in Playlunky's options. It is on the SETTINGS page now,
+    and a second switch in a second place would only ever disagree with it."""
+    rt = runtime()
+    assert len(list(rt.eval("registeredOptions").keys())) == 0
+    assert "register_option_bool" not in LOG_SHIP
 
 
 def test_a_desync_is_announced_to_the_room_once_per_run():
@@ -297,11 +317,11 @@ def test_leaving_the_room_mid_upload_keeps_the_log_to_send_again():
     assert status(rt)["uploading"] is None and status(rt)["pending"] == 1
 
 
-def test_unticking_the_option_stops_an_upload():
+def test_switching_the_setting_off_stops_an_upload():
     rt = runtime()
     end_run_with(rt, "z" * 5000)
     frame(rt)
-    rt.execute("options.mo_send_desync_logs = false")
+    rt.execute("Network.config.autoSendLogs = false")
     clear_sent(rt)
     frame(rt)
     frame(rt)

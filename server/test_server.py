@@ -1077,7 +1077,7 @@ async def run_tests():
     recorder = RecordingForwarder()
     saved_discord = protocol.discord
     protocol.discord = recorder
-    log_text = ("[20:25:58 15:0] server=26.186.94.66:26000 a line of the run\n" * 300).encode()
+    log_text = ("[20:25:58 15:0] server=203.0.113.7:26000 a line of the run\n" * 300).encode()
     encoded = base64.b64encode(log_text).decode()
     pieces = [encoded[i:i + 900] for i in range(0, len(encoded), 900)]
     meta = {"reason": "FLOOR DESYNC seq 15", "version": "2.0.0-test", "seed": "036AEAA9-D53A4E4B"}
@@ -1097,7 +1097,7 @@ async def run_tests():
               and "036AEAA9-D53A4E4B" in content, "the message says what desynced and whose log it is")
         check(filename.startswith(f"desync_{lg1.room}_s2_LOGPEER_") and filename.endswith(".txt"),
               "the file is named after the room, slot and player")
-        check(b"26.186.94.66" not in data and data == srv.redact_log(log_text),
+        check(b"203.0.113.7" not in data and data == srv.redact_log(log_text),
               "the server's address is taken out before posting")
     # a client whose done was lost asks again with a part: it gets the answer back
     lg2.send({"t": "logup", "op": "part", "u": "u1", "i": 1, "d": pieces[0]})

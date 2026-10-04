@@ -18,9 +18,9 @@ datagram. Clients therefore declare the port their own udp_listen runs on
 in their `hello` message; the server pushes datagrams to
 (observed source IP, declared listen port).
 
-Desync logs: a player who opts in (the game's "Send desync logs" option) uploads
-the log of a run that desynced, and this server posts it to the Discord channel
-its operator configured -- see DISCORD.md. The game itself only has UDP.
+Desync logs: a player who opts in (the game's AUTOMATICALLY SEND LOGS setting)
+uploads the log of a run that desynced, and this server posts it to the Discord
+channel its operator configured -- see DISCORD.md. The game itself only has UDP.
 
 Run:  py server.py [--port 26000] [--verbose]
 """

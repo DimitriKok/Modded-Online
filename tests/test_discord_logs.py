@@ -66,14 +66,14 @@ def bot(opener=None, sleeps=None):
 # ------------------------------------------------------------------ redaction
 
 def test_addresses_and_the_windows_account_are_taken_out():
-    data = (b"server=26.186.94.66:26000 (v1.0.12)\n"
+    data = (b"server=203.0.113.7:26000 (v1.0.12)\n"
             b"peer 192.168.1.20 sent\n"
-            b"C:\\Users\\mimik\\AppData\\Local\\x\n"
+            b"C:\\Users\\jdoe\\AppData\\Local\\x\n"
             b"c:/users/Someone Else/Desktop\n")
     out = srv.redact_log(data)
-    assert b"26.186.94.66" not in out and b"192.168.1.20" not in out
+    assert b"203.0.113.7" not in out and b"192.168.1.20" not in out
     assert out.count(b"x.x.x.x") == 2
-    assert b"mimik" not in out and b"Someone Else" not in out
+    assert b"jdoe" not in out and b"Someone Else" not in out
     assert b"C:\\Users\\<user>\\AppData" in out
 
 

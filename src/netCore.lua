@@ -64,6 +64,16 @@ local module = {
         -- TESTING ONLY: how many stand-in players to put in our room (0 = off).
         -- Each is a real client on the real server — see launchTestPlayer.
         testPlayer = 0,
+        -- SETTINGS > AUTOMATICALLY SEND LOGS: a run that desynced sends its log to
+        -- the Discord channel the room's server posts to (see LogShip). Opt-in:
+        -- the log names the players in the room and the mods everyone runs.
+        autoSendLogs = false,
+        -- SETTINGS > AUTOMATICALLY SYNC DATA: SYNC SAVE DATA, done every time the
+        -- game's main menu comes up (see SaveShare.pollAutoSync). Opt-in: it
+        -- writes into the hosted mod's own folder.
+        autoSyncSave = false,
+        -- the first-run popups (menuUI) have all been answered
+        firstRunDone = false,
     },
     phase = PHASE.IDLE,
     lastError = nil,     --- @type string?
@@ -799,8 +809,8 @@ function module.packOptionsHash(packName)
         -- hash the option KEYS AND VALUES in sorted order, so the digest is stable
         -- regardless of the order the mod happened to serialise them in.
         -- Modded Online's OWN options (`mo_`: the mod picker, the texture escape
-        -- hatch, sending desync logs) are this player's choices and feed nothing a
-        -- world is built from. A hosted mod's options live in our pack next to
+        -- hatch, and dev65's desync-log option, which a save.dat can still carry)
+        -- are this player's choices and feed nothing a world is built from. A hosted mod's options live in our pack next to
         -- them, so hashing them too made two machines' digests differ whenever two
         -- players simply chose differently -- a false lead in every comparison.
         local keys = {}

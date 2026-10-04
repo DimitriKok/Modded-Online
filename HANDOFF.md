@@ -6,7 +6,7 @@ them.
 
 ## Start here
 
-**Build: `2.0.0-dev55` → `dev65`. The server must be redeployed at `1.0.13`.**
+**Build: `2.0.0-dev55` → `dev66`. The server must be redeployed at `1.0.13`.**
 Section 3's fix is half a server fix and does nothing without it (1.0.11 or later).
 Section 6 has a server half too, but its client half works on its own. A client on a
 server other than the one it expects says so in a toast and in the log. Check with
@@ -24,7 +24,9 @@ server other than the one it expects says so in a toast and in the log. Check wi
 | 8 | The tutorial came back after the first real run | **FIXED** in dev64; the dev64 session "seemed to work" — section 8 |
 | 9 | Udjat key and chest on two floors, sometimes two keys | **FIXED** in dev64; the dev64 session "seemed to work" — section 9 |
 | 10 | Jungle floors desynced (2-4: one extra frog on a lily pad) | **FIXED** in dev65, not yet confirmed in game — section 10 |
-| 11 | Desync logs sent to a Discord channel automatically (opt-in) | **NEW** in dev65 / server 1.0.13, first version, not yet tried against a real Discord — section 11 |
+| 11 | Desync logs sent to a Discord channel automatically (opt-in) | **NEW** in dev65 / server 1.0.13. The server side starts configured; no log posted yet — section 11 |
+| 12 | A SETTINGS page, with AUTOMATICALLY SEND LOGS and AUTOMATICALLY SYNC DATA | **NEW** in dev66, reported working in game — section 12 |
+| 13 | Popups the first time Modded Online starts | **NEW** in dev66, not yet tried in game — section 13 |
 
 **Git state:** everything is on `origin/fix/peer-save-restore`; the patch-delivered
 commits from the no-push-access session have landed. `git log --oneline
@@ -475,11 +477,12 @@ shim never needed it, so it isn't done here.
 
 ## 11. Desync logs to Discord — NEW in dev65 / server 1.0.13
 
-There's an opt-in option, **Send desync logs to the server's Discord**, in
-Playlunky's options for Modded Online. When it's on, a run that desynced sends its
-log to the server at run end, and the server posts it to a Discord channel. It
-counts as desynced when there was a `FLOOR DESYNC`, a `POSITION DESYNC` or a resync
-warp here, or another player reported one.
+There's an opt-in switch, **AUTOMATICALLY SEND LOGS**, on the SETTINGS page of the
+Modded Online menu (`Network.config.autoSendLogs`; dev65 had it in Playlunky's
+options instead). When it's on, a run that desynced sends its log to the server at
+run end, and the server posts it to a Discord channel. It counts as desynced when
+there was a `FLOOR DESYNC`, a `POSITION DESYNC` or a resync warp here, or another
+player reported one.
 
 The parts:
 
@@ -490,13 +493,15 @@ The parts:
 The bot token goes in `server/discord_config.json` or `MO_DISCORD_BOT_TOKEN`, and
 that file is git-ignored.
 
-**Not tried against a real Discord yet.** Every test uses a fake HTTP opener. The
-first real try:
+**No log has been posted to a real Discord yet.** Every test uses a fake HTTP
+opener. The operator's server does start configured: on 2026-10-03 it printed the
+line in step 2. The bot shows offline in Discord, which is expected, because posting
+over REST needs no gateway connection. The first real try:
 
 1. Set up a bot as in `server/DISCORD.md`.
 2. Start the server and check that it prints `desync logs from players who opted in:
    posted to Discord by the bot, in channel ...`.
-3. Tick the option in both games.
+3. Switch on SETTINGS > AUTOMATICALLY SEND LOGS in both games.
 4. Force a desync: for example, run with `mo_nodeterminism.on` on one machine only,
    then delete the file afterwards.
 
@@ -505,6 +510,66 @@ first real try:
 - A "send my last log now" button, for a run that crashed (the log is on disk as
   `desync_log.prev.txt` after the relaunch).
 - Sending logs for runs that didn't desync but felt wrong.
+
+## 12. The SETTINGS page and AUTOMATICALLY SYNC DATA — NEW in dev66, REPORTED WORKING IN GAME
+
+The Modded Online menu's root page is now HOST, JOIN, MATCHMAKING, DISCORD,
+SETTINGS and CLOSE. SETTINGS holds:
+
+- HIDE ROOM CODE, TEST PLAYERS and SYNC SAVE DATA, moved there unchanged;
+- **AUTOMATICALLY SEND LOGS** (section 11);
+- **AUTOMATICALLY SYNC DATA**.
+
+Both new switches are in `config.json` (`autoSendLogs`, `autoSyncSave`), and both
+are off by default. The page is in `src/menuUI.lua`.
+
+**AUTOMATICALLY SYNC DATA** is `SaveShare.pollAutoSync`, run every GUI frame after
+`SaveShare.poll`. It runs SYNC SAVE DATA once per visit to the main menu
+(`SCREEN.MENU`), once the menu has been up for 1.5 s and `loading` is back to
+`FADE.NONE`. The wait is there because the game may still be writing its save just
+after a run, and the copy reads whole files. Because `poll` runs first, a peer
+leaving a room has its own save back before the copy.
+
+`syncToMod` now also refuses while a parked copy (`.mo_mine` or `.mo_absent`) is on
+disk, not only while `borrowed` is set. A restore that failed at launch used to
+leave the host's file in the pack with `borrowed` unset, and SYNC SAVE DATA would
+have copied it into the player's mod.
+
+**To confirm in game:**
+
+1. Switch on AUTOMATICALLY SYNC DATA.
+2. Play a run, then quit to the main menu.
+3. After a moment, SETTINGS should show `SYNC SAVE DATA  [2 file(s) synced]`.
+4. The mod's own `save.dat` and `savegame.sav` should match Modded Online's.
+
+## 13. The first-run popups — NEW in dev66, NOT YET TRIED IN GAME
+
+The first time Modded Online starts, three popups come up over the main menu (and
+the title screen). They're drawn with the menu's own panel, banner and rows:
+
+1. A notice, answered with I UNDERSTAND.
+2. AUTOMATICALLY SEND LOGS: YES or NO.
+3. AUTOMATICALLY SYNC DATA: YES or NO.
+
+The code is `FIRST_RUN` and `firstRunFrame` in `src/menuUI.lua`. The flag is
+`firstRunDone` in `config.json`, saved only after the last answer; each answer is
+saved as it's given.
+
+The input follows the menu's: ARROWS move, and Z or ENTER selects. It's keyboard
+only, like the rest of that menu. A controller still drives the game's menu
+underneath, and the popups come back on the next visit to the main menu until
+they're answered.
+
+**To see them again:** set `"firstRunDone":false` in `config.json`, or delete the
+key.
+
+**To confirm in game:**
+
+1. Delete `firstRunDone` from `config.json`, or set it to `false`.
+2. Launch. The three popups should show in order.
+3. Answer them.
+4. SETTINGS should show the two switches as answered.
+5. Relaunch. The popups shouldn't come back.
 
 ## Diagnostic tooling (flags and the files they write)
 
@@ -613,8 +678,11 @@ belong in git; see `.gitignore`.
 
 `.gitignore` listing a file is **not** the same as the file being untracked —
 `desync_log.txt` and `desync_log.prev.txt` were in it and committed anyway for the
-life of the repo, and shipped a misleading stale capture to every clone. If you add
-an artifact to `.gitignore`, check `git ls-files` as well.
+life of the repo, and shipped a misleading stale capture to every clone. `config.json`
+was the second case: ignored but tracked, so every clone got one player's name and
+join address. It was untracked in dev66, together with `tools/load_order.backup.txt`
+and `save.dat.parked_for_journal_test`. If you add an artifact to `.gitignore`, check
+`git ls-files` as well.
 
 ## If you are a new session picking this up
 
