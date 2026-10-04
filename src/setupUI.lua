@@ -153,12 +153,12 @@ function module.install()
     for _, name in ipairs(order) do
         local key = PackSetup.optionKey(name)
         packs[key] = name
-        register_option_bool(key, "Play " .. name .. " online",
-            "Host this mod inside Modded Online so everyone in the room runs the same"
-            .. " code from the same seed. Ticking it disables the mod in load_order.txt"
-            .. " (Modded Online runs it instead) and links its assets in."
-            .. " Takes effect when you restart Playlunky.",
-            armed[name] == true)
+        -- No long description. The same paragraph under every installed mod filled
+        -- the panel, and the label already says what the box does; the restart it
+        -- needs is printed when it is ticked (applyNow). An empty string rather than
+        -- nil or a shorter call: a nil where the binding wants a string is a native
+        -- crash on some builds (see withOptionStrings in modHost.lua).
+        register_option_bool(key, "Play " .. name .. " online", "", armed[name] == true)
     end
     -- The escape hatch. A hosted mod defines its textures at load, and on at least
     -- one machine that call kills the process outright -- no Lua error, nothing in

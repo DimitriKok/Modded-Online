@@ -1,14 +1,14 @@
 # Desync logs to Discord
 
-When an online run desyncs, players who switched **Send desync logs to the server's
-Discord** on in the game send that run's desync log to the Modded Online server. The
-server then posts it, as a `.txt` file, to a Discord channel you choose. The game
-itself can only talk UDP to the server, so the server is the courier.
+When an online run desyncs, players who switched on **AUTOMATICALLY SEND LOGS** in
+the game send that run's desync log to the Modded Online server. The server then
+posts it, as a `.txt` file, to a Discord channel you choose. The game itself can
+only talk UDP to the server, so the server is the courier.
 
 Nothing is posted unless **both** of these are true:
 
-* The player ticked the option in the game. It's in Playlunky's options for Modded
-  Online, and it's off by default.
+* The player switched on **AUTOMATICALLY SEND LOGS** in the game. It's under
+  main menu → MODDED ONLINE → SETTINGS, and it's off by default.
 * The server's operator configured Discord as described below. A server without it
   tells every client on join that it doesn't forward logs, and refuses any log it's
   sent.

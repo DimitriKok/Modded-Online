@@ -32,9 +32,14 @@
 /crash_notes.txt
 /mo_journal.txt
 /modded_online_boot.log
+# ...and every other log, e.g. the test players' (server/fake_player.py writes
+# test_player_<name>.log here).
+*.log
 
 # Local settings.
 /config.json
+# tools/spike2.py's copy of that machine's load_order.txt.
+/tools/load_order.backup.txt
 # The server's Discord bot token / webhook (see server/DISCORD.md). A secret.
 /server/discord_config.json
 

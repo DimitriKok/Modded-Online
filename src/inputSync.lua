@@ -1972,18 +1972,27 @@ end
 --- measures once more.
 local nameWidth = {}
 
---- @param ctx GuiDrawContext
+--- The name tags' text size: the API's documented default (what size 0 drew),
+--- stated outright and used for both the measuring and the drawing, so the width
+--- measured is the width drawn.
+local NAME_SIZE = 18
+
+--- `draw_text_size` is a GLOBAL in the script API (width, then height). This used
+--- to call it as a method of the draw context, which has no such method: every call
+--- failed, and every tag was drawn starting at the player instead of centred over
+--- them. menuUI's measureText had the same bug.
 --- @param name string
 --- @return number
-local function measureName(ctx, name)
+local function measureName(name)
     local cached = nameWidth[name]
     if cached ~= nil then
         return cached
     end
-    local ok, w = pcall(ctx.draw_text_size, ctx, 0, name)
+    local ok, w = pcall(draw_text_size, NAME_SIZE, name)
     if not ok or type(w) ~= "number" then
-        return 0 -- unchanged fallback: draw from the raw position
+        return 0 -- no measurement: draw from the raw position
     end
+    w = math.abs(w)
     nameWidth[name] = w
     return w
 end
@@ -2048,8 +2057,8 @@ local function guiTick(ctx)
                 local name = names[tostring(netSlot)] or ("Player " .. netSlot)
                 -- centered over the spelunker's head, hugging it closely
                 local sx, sy = screen_position(player.x, player.y + 0.85)
-                local width = measureName(ctx, name)
-                ctx:draw_text(sx - width / 2, sy, 0, name, rgba(255, 255, 255, 200))
+                local width = measureName(name)
+                ctx:draw_text(sx - width / 2, sy, NAME_SIZE, name, rgba(255, 255, 255, 200))
             end
         end
     end

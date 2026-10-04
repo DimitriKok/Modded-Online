@@ -15,9 +15,10 @@
 ---
 --- Only files inside MODDED ONLINE's own pack are written by the sync. The mod's own
 --- folder is never written except by `module.syncToMod`, which is the SYNC SAVE DATA
---- button and only runs when a player presses it. That boundary is deliberate: a
---- loader that quietly edits other packs is exactly the bug that stopped those packs
---- booting on their own.
+--- button, and only runs when a player presses it or has switched on AUTOMATICALLY
+--- SYNC DATA (both on the SETTINGS page; the second is off until they do). That
+--- boundary is deliberate: a loader that quietly edits other packs is exactly the
+--- bug that stopped those packs booting on their own.
 ---
 --- Before a peer's files are replaced they are copied aside, and the replacement is
 --- ABANDONED if that copy cannot be written -- it fails closed, because the failure
@@ -683,12 +684,31 @@ end
 
 -- ----------------------------------------------------------------- the button
 
+--- Is a borrow still parked on disk?
+---
+--- `borrowed` only knows about THIS session. A restore that failed at load -- the
+--- last session ended while borrowing and a file could not be put back -- leaves
+--- the host's file in the pack with `borrowed` never set, because nothing was
+--- borrowed since launch. The parked copies are what says so: they are cleared only
+--- once the player's own files are verifiably back.
+--- @return boolean
+local function parkedOnDisk()
+    for _, name in ipairs(FILES) do
+        if fileExists(backupPath(name)) or fileExists(absentPath(name)) then
+            return true
+        end
+    end
+    return false
+end
+
 --- Copy Modded Online's save data into the mod it belongs to. This is the ONE place
 --- that writes another pack's folder, and it only runs when a player presses the
---- button -- see the note at the top of this file.
+--- button or has switched on AUTOMATICALLY SYNC DATA -- see the note at the top of
+--- this file.
+--- @param trigger string? # what ran it, for the log: the button unless told otherwise
 --- @return string # what happened, for the menu label and the log
-function module.syncToMod()
-    if borrowed then
+function module.syncToMod(trigger)
+    if borrowed or parkedOnDisk() then
         -- what is on disk right now is the ROOM HOST's progression, not this
         -- player's; writing it into their mod is the one thing this must never do
         lastResult = "not while borrowing the host's save"
@@ -722,8 +742,45 @@ function module.syncToMod()
         end
     end
     lastResult = copied > 0 and (copied .. " file(s) synced") or "nothing to sync"
-    logEvent("save share: SYNC SAVE DATA -> %s", lastResult)
+    logEvent("save share: %s -> %s", trigger or "SYNC SAVE DATA", lastResult)
     return lastResult
+end
+
+-- ----------------------------------------------------- AUTOMATICALLY SYNC DATA
+
+--- How long the main menu has to have been up before the automatic sync runs.
+---
+--- Arriving there often means a run just ended, and the game may still be writing
+--- its save. The copy reads whole files, so it lets that save land first rather
+--- than risk putting half a savegame.sav into the mod.
+local AUTO_SYNC_SETTLE_MS = 1500
+
+local menuSinceMs = nil   -- when this visit to the main menu began; nil elsewhere
+local autoSynced = false  -- this visit's automatic sync has run
+
+--- AUTOMATICALLY SYNC DATA: the SYNC SAVE DATA button, pressed for the player each
+--- time the game's main menu comes up. Once per visit, so sitting on the menu does
+--- not rewrite the mod's files every frame. It is the same call as the button, so
+--- every refusal the button has (borrowing, no mod enabled) holds here too.
+function module.pollAutoSync()
+    local localState = get_local_state()
+    if localState == nil or localState.screen ~= SCREEN.MENU then
+        menuSinceMs = nil
+        autoSynced = false
+        return
+    end
+    local now = get_ms()
+    if menuSinceMs == nil then
+        menuSinceMs = now
+    end
+    if autoSynced or Network.config == nil or Network.config.autoSyncSave ~= true then
+        return
+    end
+    if localState.loading ~= FADE.NONE or now - menuSinceMs < AUTO_SYNC_SETTLE_MS then
+        return
+    end
+    autoSynced = true
+    module.syncToMod("AUTOMATICALLY SYNC DATA")
 end
 
 --- Seed our copy from the mod's, for a mod being armed. Never overwrites: once
@@ -824,6 +881,7 @@ Network.onEvent("saveask", module.onSaveAsk)
 
 set_callback(function()
     SafeCall("saveShare:poll", module.poll)
+    SafeCall("saveShare:autoSync", module.pollAutoSync)
 end, ON.GUIFRAME)
 
 SaveShare = module

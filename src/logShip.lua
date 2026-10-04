@@ -9,13 +9,12 @@
 --- the reason a pair of logs is worth anything is that it is a PAIR. The log is
 --- sent once the run ends, from this run's own section of desync_log.txt.
 ---
---- Nothing is sent unless the player ticked the option, and nothing is sent to a
+--- Nothing is sent unless the player switched on AUTOMATICALLY SEND LOGS (Modded
+--- Online's SETTINGS page, `Network.config.autoSendLogs`), and nothing is sent to a
 --- server that does not say it forwards logs. The server takes IP addresses and the
 --- Windows account name out before it posts.
 
 local module = {}
-
-local OPTION = "mo_send_desync_logs"
 
 -- 675 raw bytes is exactly 900 base64 characters with no padding, so every part
 -- but the last encodes on its own and the server can simply join them.
@@ -73,12 +72,11 @@ function module.base64(data)
     return table.concat(out)
 end
 
---- Did the player tick "Send desync logs"? Read live: unticking it mid-upload
---- stops the upload.
+--- Is AUTOMATICALLY SEND LOGS on? Read live: switching it off mid-upload stops
+--- the upload.
 --- @return boolean
 function module.enabled()
-    local opts = rawget(_G, "options")
-    return opts ~= nil and opts[OPTION] == true
+    return Network ~= nil and Network.config ~= nil and Network.config.autoSendLogs == true
 end
 
 local function say(fmt, ...)
@@ -355,16 +353,6 @@ function module.status()
 end
 
 -- -------------------------------------------------------------- wiring
-
-if type(rawget(_G, "register_option_bool")) == "function" then
-    pcall(register_option_bool, OPTION, "Send desync logs to the server's Discord",
-        "When an online run desyncs, send that run's desync log to the Discord channel"
-        .. " the room's server is set up to post to, so the problem can be looked at."
-        .. " The log names the players in the room and the mods everyone runs; the"
-        .. " server removes IP addresses and your Windows user name before posting."
-        .. " Only servers whose owner set this up accept logs.",
-        false)
-end
 
 if Network ~= nil then
     if Network.onEvent ~= nil then

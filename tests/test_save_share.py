@@ -53,8 +53,17 @@ io = {
 os = { remove = function(p) FS[p] = nil end }
 
 ON = { GUIFRAME = 4 }
-function set_callback(_fn, _kind) end
+callbacks = {}
+function set_callback(fn, kind) callbacks[#callbacks + 1] = { fn = fn, kind = kind } end
 function SafeCall(_name, fn, ...) return fn(...) end
+-- the clock and screen the automatic sync reads (SCREEN and FADE as Overlunky numbers them)
+SCREEN = { TITLE = 3, MENU = 4, CHARACTER_SELECT = 9, CAMP = 11, LEVEL = 12 }
+FADE = { NONE = 0, OUT = 1, LOAD = 2, IN = 3 }
+nowMs = 0
+screenNow = SCREEN.CAMP
+loadingNow = FADE.NONE
+function get_ms() return nowMs end
+function get_local_state() return { screen = screenNow, loading = loadingNow } end
 function PackPath(rest) return "PACK/" .. rest end
 -- Chunks are built in a second runtime (the host's) and fed into this one.
 -- They travel as plain values: lupa refuses to mix tables across runtimes.
@@ -72,6 +81,7 @@ ModHost = {
     reloadSaveData = function(text) reloaded[#reloaded + 1] = text return 1 end,
 }
 Network = {
+    config = { autoSyncSave = false },
     isActive = function() return activeValue end,
     isHost = function() return isHostValue end,
     hostSlot = function() return 1 end,
@@ -947,3 +957,214 @@ def test_a_build_without_event_sync_still_captures():
     send_fields(rt)
     rt.eval("SaveShare.restoreOwn")()
     assert int(field(rt, "shortcuts")) == 1
+
+
+# ------------------------------------------------------- AUTOMATICALLY SYNC DATA
+
+
+MENU, CAMP, FADE_IN = 4, 11, 3
+MOD_DAT = "Mods/Packs/fyi.hdmod/save.dat"
+
+
+def auto_frame(rt, screen=MENU, ms=100, loading=0):
+    """One GUI frame of the automatic sync alone, `ms` after the last one."""
+    g = rt.globals()
+    g["nowMs"] = g["nowMs"] + ms
+    g["screenNow"] = screen
+    g["loadingNow"] = loading
+    rt.eval("SaveShare.pollAutoSync")()
+
+
+def gui_frame(rt, screen=MENU, ms=100):
+    """One whole GUI frame: every GUIFRAME callback the module registered."""
+    g = rt.globals()
+    g["nowMs"] = g["nowMs"] + ms
+    g["screenNow"] = screen
+    g["loadingNow"] = 0
+    rt.execute("for _, c in ipairs(callbacks) do if c.kind == ON.GUIFRAME then c.fn() end end")
+
+
+def switched_on_with_progress(rt):
+    rt.execute("Network.config.autoSyncSave = true")
+    rt.globals()["activeValue"] = False      # on the main menu, not in a room
+    fs_put(rt, "PACK/save.dat", "MO-PROGRESS")
+    fs_put(rt, MOD_DAT, "MOD-OLD")
+
+
+def test_auto_sync_copies_once_the_main_menu_has_settled():
+    """The same copy as SYNC SAVE DATA, but not on the very first frame: arriving on
+    the main menu usually means a run just ended, and the game saves on the way out."""
+    rt = runtime()
+    switched_on_with_progress(rt)
+    auto_frame(rt, CAMP)
+    auto_frame(rt, MENU, ms=16)
+    assert fs_get(rt, MOD_DAT) == "MOD-OLD", (
+        "copied the moment the menu appeared, before the game's own save had landed")
+    for _ in range(20):
+        auto_frame(rt, MENU)
+    assert fs_get(rt, MOD_DAT) == "MO-PROGRESS"
+    assert fs_get(rt, MOD_DAT + ".before_mo") == "MOD-OLD", "the mod's own copy was not kept"
+    assert "synced" in str(rt.eval("SaveShare.lastResult()"))
+
+
+def test_auto_sync_does_nothing_unless_switched_on():
+    rt = runtime()
+    switched_on_with_progress(rt)
+    rt.execute("Network.config.autoSyncSave = false")
+    for _ in range(50):
+        auto_frame(rt, MENU)
+    assert fs_get(rt, MOD_DAT) == "MOD-OLD"
+    assert rt.eval("SaveShare.lastResult()") is None
+
+
+def test_a_config_without_the_setting_counts_as_off():
+    """A config.json from before the setting existed has no such key."""
+    rt = runtime()
+    switched_on_with_progress(rt)
+    rt.execute("Network.config = {}")
+    for _ in range(50):
+        auto_frame(rt, MENU)
+    assert fs_get(rt, MOD_DAT) == "MOD-OLD"
+
+
+def test_auto_sync_only_runs_on_the_main_menu():
+    rt = runtime()
+    switched_on_with_progress(rt)
+    for screen in (CAMP, 12, 9, 3):          # camp, a level, character select, title
+        for _ in range(50):
+            auto_frame(rt, screen)
+    assert fs_get(rt, MOD_DAT) == "MOD-OLD"
+
+
+def test_auto_sync_runs_once_per_visit_to_the_main_menu():
+    """Sitting on the menu must not rewrite the mod's files every frame; coming back
+    to it after playing is what syncs again."""
+    rt = runtime()
+    switched_on_with_progress(rt)
+    for _ in range(20):
+        auto_frame(rt, MENU)
+    assert fs_get(rt, MOD_DAT) == "MO-PROGRESS"
+    fs_put(rt, "PACK/save.dat", "MO-LATER")
+    for _ in range(100):
+        auto_frame(rt, MENU)
+    assert fs_get(rt, MOD_DAT) == "MO-PROGRESS", "synced again without leaving the menu"
+    auto_frame(rt, CAMP)
+    for _ in range(20):
+        auto_frame(rt, MENU)
+    assert fs_get(rt, MOD_DAT) == "MO-LATER", "coming back to the main menu did not sync"
+
+
+def test_auto_sync_waits_for_the_menu_to_finish_fading_in():
+    rt = runtime()
+    switched_on_with_progress(rt)
+    for _ in range(30):
+        auto_frame(rt, MENU, loading=FADE_IN)
+    assert fs_get(rt, MOD_DAT) == "MOD-OLD"
+    auto_frame(rt, MENU)
+    assert fs_get(rt, MOD_DAT) == "MO-PROGRESS"
+
+
+def test_switching_it_on_while_on_the_menu_syncs_straight_away():
+    rt = runtime()
+    switched_on_with_progress(rt)
+    rt.execute("Network.config.autoSyncSave = false")
+    for _ in range(30):
+        auto_frame(rt, MENU)
+    rt.execute("Network.config.autoSyncSave = true")
+    auto_frame(rt, MENU)
+    assert fs_get(rt, MOD_DAT) == "MO-PROGRESS"
+
+
+def test_auto_sync_never_writes_a_borrowed_save_into_the_mod():
+    """While a peer borrows, the pack holds the ROOM HOST's progression."""
+    rt = runtime()
+    peer_with_own_save(rt)
+    deliver(rt)
+    rt.execute("Network.config.autoSyncSave = true")
+    fs_put(rt, MOD_DAT, "MOD-OLD")
+    for _ in range(30):
+        auto_frame(rt, MENU)
+    assert fs_get(rt, MOD_DAT) == "MOD-OLD"
+    assert "borrow" in str(rt.eval("SaveShare.lastResult()"))
+
+
+def test_leaving_the_room_then_syncs_the_players_own_save():
+    """The whole GUI frame, in order: leaving puts the player's own save back (poll),
+    and the automatic sync then copies THAT, never the host's."""
+    rt = runtime()
+    peer_with_own_save(rt)
+    deliver(rt)
+    rt.execute("Network.config.autoSyncSave = true")
+    fs_put(rt, MOD_DAT, "MOD-OLD")
+    rt.globals()["activeValue"] = False
+    for _ in range(30):
+        gui_frame(rt)
+    assert fs_get(rt, MOD_DAT) == "MINE-dat"
+    assert fs_get(rt, "Mods/Packs/fyi.hdmod/savegame.sav") == "MINE-sav"
+
+
+def test_a_restore_that_failed_at_load_never_reaches_the_mod():
+    """The last session ended while borrowing and a file could not be put back at
+    launch. Nothing has been borrowed SINCE launch, so `borrowed` alone never knew --
+    and the host's file still in the pack went into the player's mod, by the button
+    or, now, by itself every time the main menu came up. The parked copy is the
+    record that it is not theirs."""
+    rt = lupa.LuaRuntime(unpack_returned_tuples=True)
+    rt.execute(ENV)
+    rt.globals()["FS"]["PACK/save.dat"] = "HOST-dat"
+    rt.globals()["FS"]["PACK/save.dat.mo_mine"] = "MINE-dat"
+    rt.globals()["BLOCKED"]["PACK/save.dat"] = True
+    rt.execute(SAVE_SHARE)
+    assert fs_get(rt, "PACK/save.dat") == "HOST-dat"      # the restore did fail
+    fs_put(rt, MOD_DAT, "MOD-OLD")
+    assert "borrow" in str(rt.eval("SaveShare.syncToMod")())
+    rt.execute("Network.config.autoSyncSave = true")
+    rt.globals()["activeValue"] = False
+    for _ in range(30):
+        gui_frame(rt)
+    assert fs_get(rt, MOD_DAT) == "MOD-OLD", (
+        "the host's progression was written into this player's own mod")
+
+
+def test_a_completed_restore_lets_the_sync_through_again():
+    """...and the guard ends with the parked copies, once the player's own files are
+    verifiably back -- it does not refuse forever."""
+    rt = lupa.LuaRuntime(unpack_returned_tuples=True)
+    rt.execute(ENV)
+    rt.globals()["FS"]["PACK/save.dat"] = "HOST-dat"
+    rt.globals()["FS"]["PACK/save.dat.mo_mine"] = "MINE-dat"
+    rt.execute(SAVE_SHARE)                   # restored at load; ModHost exists here
+    assert fs_get(rt, "PACK/save.dat.mo_mine") is None
+    fs_put(rt, MOD_DAT, "MOD-OLD")
+    assert "synced" in str(rt.eval("SaveShare.syncToMod")())
+    assert fs_get(rt, MOD_DAT) == "MINE-dat"
+
+
+def test_the_log_says_which_one_synced():
+    rt = runtime()
+    logged = []
+
+    def event(fmt, *args):
+        try:
+            logged.append(str(fmt) % args)
+        except (TypeError, ValueError):
+            logged.append(str(fmt))
+
+    rt.globals()["DesyncLog"] = rt.table_from({"event": event})
+    switched_on_with_progress(rt)
+    for _ in range(20):
+        auto_frame(rt, MENU)
+    rt.eval("SaveShare.syncToMod")()
+    assert any("AUTOMATICALLY SYNC DATA ->" in line for line in logged), logged
+    assert any("SYNC SAVE DATA ->" in line and "AUTOMATICALLY" not in line
+               for line in logged), logged
+
+
+def test_both_settings_default_to_off():
+    """AUTOMATICALLY SYNC DATA writes into another pack's folder, and AUTOMATICALLY
+    SEND LOGS sends a log naming the players: neither happens unless asked for."""
+    net = (PACK / "src" / "netCore.lua").read_text(encoding="utf-8")
+    at = net.index("    config = {")
+    block = net[at:net.index("\n    },", at)]
+    assert "autoSyncSave = false," in block
+    assert "autoSendLogs = false," in block

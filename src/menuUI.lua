@@ -8,10 +8,16 @@
 ---   ONLINE MODDED
 ---     HOST  -> Name / Server IP / Server Port / HOST NEW GAME
 ---     JOIN  -> Server IP / Room Code / JOIN GAME
+---     SETTINGS -> HIDE ROOM CODE / TEST PLAYERS / SYNC SAVE DATA /
+---                 AUTOMATICALLY SEND LOGS / AUTOMATICALLY SYNC DATA
 ---
 --- Hosting/joining connects and launches the game's play flow: pick your
 --- character, land in the camp (that marks you READY), and the host starts
 --- the run by entering the camp's main door.
+---
+--- The first time Modded Online starts, three popups come first, in the same
+--- style (FIRST_RUN below): a notice, then whether to switch on AUTOMATICALLY SEND
+--- LOGS and AUTOMATICALLY SYNC DATA.
 
 local module = {}
 
@@ -28,30 +34,40 @@ local COLOR_BORDER = rgba(150, 96, 40, 255)    -- bronze frame
 local COLOR_BORDER_HI = rgba(206, 154, 74, 235) -- lit bronze inner frame
 local COLOR_HILITE = rgba(150, 96, 40, 150)    -- selection torch-glow bar
 
---- Width of a text run in draw-space, for centering. Falls back to a rough
---- estimate if the size query is unavailable on this build.
---- @param ctx GuiDrawContext
---- @return number
-local function textWidth(ctx, size, text)
-    -- draw_text_size returns two dimensions and, on some builds, not width-first
-    -- (which shifted every centered label). Menu strings are multi-character, so
-    -- width is the LARGER dimension — taking the max centers correctly whatever
-    -- the pair's order. Falls back to a rough estimate if the query is missing.
-    local ok, a, b = pcall(function() return ctx:draw_text_size(size, text) end)
-    if ok and type(a) == "number" then
-        local w = math.abs(a)
-        if type(b) == "number" then
-            w = math.max(w, math.abs(b))
-        end
-        return w
+--- Width and height of a run of text in draw space.
+---
+--- `draw_text_size(size, text)` is a GLOBAL in the script API: width, then height,
+--- in screen distance, the height negative because draw-space y points up. This
+--- used to call it as a method of the draw context, which has no such method, so
+--- every call failed into the estimate below. That estimate is two to three times
+--- too wide at 1440p: centred labels sat left of centre and the first-run text
+--- wrapped at a third of its panel. The estimate is now only for a build without
+--- the function.
+--- @return number, number
+local function measureText(size, text)
+    local ok, w, h = pcall(draw_text_size, size, text)
+    if ok and type(w) == "number" and type(h) == "number" then
+        return math.abs(w), math.abs(h)
     end
-    return #text * size * 0.0009
+    return #text * size * 0.0009, size * 0.0019
+end
+
+--- @return number
+local function textWidth(size, text)
+    return (measureText(size, text))
+end
+
+--- Height of one line of text at `size`.
+--- @return number
+local function textHeight(size)
+    local _, h = measureText(size, "Modded Online")
+    return h
 end
 
 --- Draw text horizontally centered on `cx`.
 --- @param ctx GuiDrawContext
 local function drawCentered(ctx, cx, y, size, text, color)
-    ctx:draw_text(cx - textWidth(ctx, size, text) / 2, y, size, text, color)
+    ctx:draw_text(cx - textWidth(size, text) / 2, y, size, text, color)
 end
 
 --- Room code for display: masked to same-length asterisks when the streamer
@@ -75,8 +91,29 @@ local function drawPanel(ctx, left, top, right, bottom)
     ctx:draw_rect(left + 0.014, top - 0.018, right - 0.014, bottom + 0.018, 0.02, 1.5, COLOR_BORDER_HI)
 end
 
+--- The title banner across the top of a panel. Returns where it ends.
+--- @param ctx GuiDrawContext
+--- @return number
+local function drawBanner(ctx, left, top, right)
+    local stripB = top - 0.17
+    ctx:draw_rect_filled(left + 0.014, top - 0.018, right - 0.014, stripB, 0.02, COLOR_STRIP)
+    ctx:draw_line(left + 0.03, stripB, right - 0.03, stripB, 2.0, COLOR_BORDER)
+    return stripB
+end
+
+--- One menu row: the torch-glow bar and a "> " when it is the selected one.
+--- @param ctx GuiDrawContext
+local function drawRow(ctx, left, right, y, text, selected)
+    if selected then
+        ctx:draw_rect_filled(left + 0.03, y + 0.05, right - 0.03, y - 0.06, 0.015, COLOR_HILITE)
+        ctx:draw_text(left + 0.055, y, 30, "> " .. text, COLOR_SELECTED)
+    else
+        ctx:draw_text(left + 0.075, y, 28, text, COLOR_ITEM)
+    end
+end
+
 -- nil=closed. Pages: root | host | hostdedi | matchtype | matchsearch |
--- matchnone | friendtype | joinofficial | joindedi
+-- matchnone | friendtype | joinofficial | joindedi | settings
 local page = nil        --- @type string?
 local cursor = 1
 local editing = nil     --- @type string? # label of the field being typed into
@@ -254,6 +291,7 @@ local PARENT = {
     friendtype = "root",
     joinofficial = "friendtype", joindedi = "friendtype",
     matchtype = "root", matchsearch = "matchtype", matchnone = "matchtype",
+    settings = "root",
 }
 
 --- Streamer toggle: mask the room code everywhere it's shown. A Z-select action
@@ -313,6 +351,32 @@ local function syncSaveItem()
             if SaveShare ~= nil and SaveShare.syncToMod ~= nil then
                 SafeCall("menuUI:syncSaveData", SaveShare.syncToMod)
             end
+        end,
+    }
+end
+
+--- A run that desynced sends its log to the Discord channel the room's server
+--- posts to (LogShip). Off by default; switching it off stops an upload already
+--- under way.
+local function autoSendLogsToggle()
+    return {
+        label = "AUTOMATICALLY SEND LOGS  [" .. (Network.config.autoSendLogs and "ON" or "OFF") .. "]",
+        action = function()
+            Network.config.autoSendLogs = not Network.config.autoSendLogs
+            Network.saveConfig()
+        end,
+    }
+end
+
+--- SYNC SAVE DATA, done for the player every time the game's main menu comes up
+--- (SaveShare.pollAutoSync). Off by default. Its result shows on the SYNC SAVE DATA
+--- row, since both are the same copy.
+local function autoSyncToggle()
+    return {
+        label = "AUTOMATICALLY SYNC DATA  [" .. (Network.config.autoSyncSave and "ON" or "OFF") .. "]",
+        action = function()
+            Network.config.autoSyncSave = not Network.config.autoSyncSave
+            Network.saveConfig()
         end,
     }
 end
@@ -381,15 +445,22 @@ local function pageItems()
             { label = "JOIN GAME", action = doJoin },
             { label = "BACK", action = function() page = "friendtype"; cursor = 2 end },
         }
+    elseif page == "settings" then
+        return {
+            hideCodeToggle(),
+            testPlayerToggle(),
+            syncSaveItem(),
+            autoSendLogsToggle(),
+            autoSyncToggle(),
+            { label = "BACK", action = function() page = "root"; cursor = 5 end },
+        }
     end
     return {
         { label = "HOST", action = function() page = "host"; cursor = 1 end },
         { label = "JOIN", action = function() page = "friendtype"; cursor = 1 end },
         { label = "MATCHMAKING", action = function() page = "matchtype"; cursor = 1 end },
         { label = "DISCORD", action = doDiscord },
-        hideCodeToggle(),
-        testPlayerToggle(),
-        syncSaveItem(),
+        { label = "SETTINGS", action = function() page = "settings"; cursor = 1 end },
         { label = "CLOSE", action = closeMenu },
     }
 end
@@ -453,9 +524,7 @@ local function drawMenu(ctx)
     drawPanel(ctx, L, T, R, B)
 
     -- title banner
-    local stripB = T - 0.17
-    ctx:draw_rect_filled(L + 0.014, T - 0.018, R - 0.014, stripB, 0.02, COLOR_STRIP)
-    ctx:draw_line(L + 0.03, stripB, R - 0.03, stripB, 2.0, COLOR_BORDER)
+    local stripB = drawBanner(ctx, L, T, R)
     drawCentered(ctx, 0, T - 0.075, 40, "MODDED  ONLINE", COLOR_TITLE)
     local subtitle = ({
         host = "- HOST GAME -",
@@ -466,6 +535,7 @@ local function drawMenu(ctx)
         friendtype = "- JOIN A FRIEND -",
         joinofficial = "- OFFICIAL SERVER -",
         joindedi = "- DEDICATED SERVER -",
+        settings = "- SETTINGS -",
     })[page]
     if subtitle ~= nil then
         drawCentered(ctx, 0, stripB - 0.055, 22, subtitle, COLOR_DIM)
@@ -489,12 +559,7 @@ local function drawMenu(ctx)
             end
             text = string.format("%-13s %s", item.label, shown)
         end
-        if selected then
-            ctx:draw_rect_filled(L + 0.03, y + 0.05, R - 0.03, y - 0.06, 0.015, COLOR_HILITE)
-            ctx:draw_text(L + 0.055, y, 30, "> " .. text, COLOR_SELECTED)
-        else
-            ctx:draw_text(L + 0.075, y, 28, text, COLOR_ITEM)
-        end
+        drawRow(ctx, L, R, y, text, selected)
         y = y - rowH
     end
 
@@ -641,11 +706,209 @@ local function drawWaitingPanel(ctx)
     ctx:draw_text(L + 0.03, T - 0.11, 17, "Syncing with the other players...", COLOR_DIM)
 end
 
+-- ---------------------------------------------------------------- first run
+
+--- The popups shown the first time Modded Online starts, in order, over the main
+--- menu and in the menu's own style. Titles and buttons are drawn in capitals like
+--- every other label in it; the text is drawn as written. A popup with a `setting`
+--- writes the chosen button's `value` to that config key.
+---
+--- Each answer is saved as it is given, and `firstRunDone` only once the last one
+--- is: closing the game half way through shows them all again next time.
+local FIRST_RUN = {
+    {
+        title = "Modded Online 2",
+        text = "This mod has used ai heavily in the development in it; thus, it will"
+            .. " contain bugs and issues. The old version of the mod would corrupt any"
+            .. " mods you used it with. Please reinstall any mods you used the original"
+            .. " modded online with. If you face any bugs or errors, please join the"
+            .. " modded online discord server and send them there. Do not report any"
+            .. " bugs to other mod creators if you have modded online enabled.",
+        buttons = { { label = "I Understand" } },
+    },
+    {
+        title = "Automatically Send Desync Errors",
+        text = "Desyncs and Crashes are prone to happen. Do we have permission to"
+            .. " automatically send any errors into the community discord server. No"
+            .. " personal information is shared.",
+        setting = "autoSendLogs",
+        buttons = { { label = "Yes", value = true }, { label = "No", value = false } },
+    },
+    {
+        title = "Automatically Sync Data",
+        text = "Some mods use custom save data. Right now, we do not interfere with any"
+            .. " mods files; thus, any progress you make in modded online does not"
+            .. " transfer to the mod. There is a sync data button in modded online"
+            .. " setting or you can opt to enable automatic save syncing. Do you want"
+            .. " to enable Automatic Syncing?",
+        setting = "autoSyncSave",
+        buttons = { { label = "Yes", value = true }, { label = "No", value = false } },
+    },
+}
+
+--- A press is ignored for this long after a popup appears, so a key mashed
+--- through one popup cannot answer the next before it has been read.
+local FIRST_RUN_INPUT_DELAY_MS = 600
+--- The keyboard stays ours this long after the last answer, so the press that
+--- gave it cannot fall through to the game's own menu underneath.
+local FIRST_RUN_RELEASE_MS = 300
+
+-- The menu's own width; the text is wrapped to fit inside it.
+local POPUP_L, POPUP_R = -0.46, 0.46
+local POPUP_TEXT_X = POPUP_L + 0.075
+local POPUP_TEXT_W = (POPUP_R - 0.075) - POPUP_TEXT_X
+local POPUP_ROW_H = 0.12
+
+local firstRunStep = 1        -- which popup is up
+local firstRunChoice = 1      -- which of its buttons is highlighted
+local firstRunShownMs = nil   -- when it appeared; nil until it is drawn
+local firstRunClosedMs = nil  -- when the last one was answered
+local firstRunLayout = nil    -- the measured layout, kept until the popup or screen changes
+
+--- `text` broken into lines no wider than `width` at `size`. A word longer than
+--- the whole width gets a line of its own rather than being cut.
+--- @return string[]
+local function wrapText(size, text, width)
+    local lines, line = {}, ""
+    for word in text:gmatch("%S+") do
+        local candidate = line == "" and word or (line .. " " .. word)
+        if line ~= "" and textWidth(size, candidate) > width then
+            lines[#lines + 1] = line
+            line = word
+        else
+            line = candidate
+        end
+    end
+    if line ~= "" then
+        lines[#lines + 1] = line
+    end
+    return lines
+end
+
+--- Where everything in a popup goes, measured rather than assumed: the text is
+--- wrapped to the panel, and the panel is as tall as its content and centred. The
+--- text steps down a size if it would not fit the screen, and a long title steps
+--- down so it stays inside the banner.
+--- @return table
+local function measureFirstRun(popup)
+    local title = popup.title:upper()
+    local titleSize = 40
+    while titleSize > 24 and textWidth(titleSize, title) > (POPUP_R - POPUP_L) - 0.12 do
+        titleSize = titleSize - 2
+    end
+    local textSize, lines, lineH, height
+    for _, size in ipairs({ 24, 22, 20, 18 }) do
+        textSize = size
+        lines = wrapText(size, popup.text, POPUP_TEXT_W)
+        lineH = textHeight(size) * 1.25
+        -- From the top edge down: the banner and a gap, the text, a gap to the first
+        -- button, the rest of the buttons, then the last one's bar and the footer.
+        height = (0.17 + 0.07) + #lines * lineH + 0.12 + (#popup.buttons - 1) * POPUP_ROW_H + 0.18
+        if height <= 1.9 then
+            break
+        end
+    end
+    local T = math.min(0.95, height / 2)
+    local textY = T - (0.17 + 0.07)
+    local rowY = textY - #lines * lineH - 0.12
+    return {
+        title = title,
+        titleSize = titleSize,
+        -- where the menu draws its 40-point title, lowered by half of any shrink
+        titleY = T - 0.075 - (textHeight(40) - textHeight(titleSize)) / 2,
+        lines = lines,
+        textSize = textSize,
+        lineH = lineH,
+        textY = textY,
+        rowY = rowY,
+        T = T,
+        B = T - height,
+    }
+end
+
+--- @param ctx GuiDrawContext
+local function drawFirstRun(ctx, popup, layout)
+    ctx:draw_rect_filled(-1, 1, 1, -1, 0, COLOR_OVERLAY)
+    drawPanel(ctx, POPUP_L, layout.T, POPUP_R, layout.B)
+    drawBanner(ctx, POPUP_L, layout.T, POPUP_R)
+    drawCentered(ctx, 0, layout.titleY, layout.titleSize, layout.title, COLOR_TITLE)
+    for index, line in ipairs(layout.lines) do
+        ctx:draw_text(POPUP_TEXT_X, layout.textY - (index - 1) * layout.lineH,
+            layout.textSize, line, COLOR_ITEM)
+    end
+    for index, button in ipairs(popup.buttons) do
+        drawRow(ctx, POPUP_L, POPUP_R, layout.rowY - (index - 1) * POPUP_ROW_H,
+            button.label:upper(), index == firstRunChoice)
+    end
+    local footer = #popup.buttons > 1 and "ARROWS move     Z / ENTER select" or "Z / ENTER select"
+    drawCentered(ctx, 0, layout.B + 0.075, 18, footer, COLOR_DIM)
+end
+
+--- Are the first-run popups still to be answered?
+--- @return boolean
+local function firstRunPending()
+    return Network.config.firstRunDone ~= true
+end
+
+--- One frame of the first-run popups: the keys, then the drawing.
+--- @param ctx GuiDrawContext
+local function firstRunFrame(ctx)
+    -- the game's own menu is underneath and must not see these keys
+    pcall(function()
+        get_io().wantkeyboard = true
+    end)
+    local now = get_ms()
+    if firstRunShownMs == nil then
+        firstRunShownMs = now
+    end
+    local popup = FIRST_RUN[firstRunStep]
+    if pressed(KEYS.up) then
+        firstRunChoice = firstRunChoice > 1 and firstRunChoice - 1 or #popup.buttons
+    end
+    if pressed(KEYS.down) then
+        firstRunChoice = firstRunChoice < #popup.buttons and firstRunChoice + 1 or 1
+    end
+    if now - firstRunShownMs >= FIRST_RUN_INPUT_DELAY_MS
+        and (pressed(KEYS.select) or pressed(KEYS.commit))
+    then
+        if popup.setting ~= nil then
+            Network.config[popup.setting] = popup.buttons[firstRunChoice].value == true
+        end
+        if firstRunStep < #FIRST_RUN then
+            firstRunStep = firstRunStep + 1
+            firstRunChoice = 1
+            firstRunShownMs = now
+            firstRunLayout = nil
+        else
+            Network.config.firstRunDone = true
+            firstRunClosedMs = now
+        end
+        Network.saveConfig()
+        if not firstRunPending() then
+            return
+        end
+        popup = FIRST_RUN[firstRunStep]
+    end
+    -- Measuring wraps the whole paragraph, so it is kept; this one width changes
+    -- with the window size, which is the only other thing the layout depends on.
+    local metric = textWidth(22, "MODDED ONLINE")
+    if firstRunLayout == nil or firstRunLayout.step ~= firstRunStep or firstRunLayout.metric ~= metric then
+        firstRunLayout = measureFirstRun(popup)
+        firstRunLayout.step = firstRunStep
+        firstRunLayout.metric = metric
+    end
+    drawFirstRun(ctx, popup, firstRunLayout)
+end
+
 -- ---------------------------------------------------------------- frame
 
 --- @param ctx GuiDrawContext
 local function guiFrame(ctx)
     local screen = get_local_state().screen
+    if screen ~= SCREEN.MENU and screen ~= SCREEN.TITLE then
+        -- left with a popup unanswered: its pause before input applies again on return
+        firstRunShownMs = nil
+    end
     if Network.isInRun() then
         if screen == SCREEN.LEVEL or screen == SCREEN.TRANSITION then
             -- Held on a transition waiting for the other players to finish with
@@ -687,6 +950,21 @@ local function guiFrame(ctx)
         if page ~= nil then
             closeMenu()
         end
+        return
+    end
+    -- The first-run popups come before anything else here, the MODDED ONLINE menu
+    -- included.
+    if firstRunPending() then
+        if page ~= nil then
+            closeMenu()
+        end
+        firstRunFrame(ctx)
+        return
+    end
+    if firstRunClosedMs ~= nil and get_ms() - firstRunClosedMs < FIRST_RUN_RELEASE_MS then
+        pcall(function()
+            get_io().wantkeyboard = true
+        end)
         return
     end
     if page == nil then

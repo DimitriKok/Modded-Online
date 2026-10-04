@@ -14,7 +14,10 @@ mod — just enable it alongside your content mods.
   to PATH** in the installer, then restart Spelunky 2. `py`, `python` and
   `python3` are all accepted; Windows' Microsoft-Store placeholders for
   `python.exe` are correctly *not* treated as an install.
-- Usage: main menu → **MODDED ONLINE** window → **HOST** or **JOIN**.
+- Usage: main menu → **MODDED ONLINE** window → **HOST** or **JOIN**. The first
+  time it starts, three popups come first: a notice, then whether to switch on
+  **AUTOMATICALLY SEND LOGS** and **AUTOMATICALLY SYNC DATA** (both can be changed
+  later under **SETTINGS**).
 - **HOST** always opens a *private* (code-only) room — matchmaking never joins
   it; you share the room code with friends. Choose where it lives:
   - **Official server**: on the default server (`129.213.14.228`) — no need to
@@ -49,16 +52,25 @@ mod — just enable it alongside your content mods.
   session used (`server=`). To be sure you are on the fixed server, host with
   **Dedicated server** and Server IP `127.0.0.1` — that one is auto-launched from
   this pack, and any older instance still running is replaced first.
-- **Desync logs to Discord** (opt-in): tick **Send desync logs to the server's
-  Discord** in Playlunky's options for Modded Online and a run that desyncs sends
-  its log to the server, which posts it to the Discord channel its operator set
-  up. Server owners: see `server/DISCORD.md`.
+- **SETTINGS** (in the Modded Online menu) holds the rest:
+  - **HIDE ROOM CODE** masks the room code for streaming.
+  - **TEST PLAYERS** is described below.
+  - **SYNC SAVE DATA** copies the progress you made under Modded Online into the
+    mod itself.
+  - **AUTOMATICALLY SEND LOGS** and **AUTOMATICALLY SYNC DATA** are below. Both
+    are off by default.
+- **Desync logs to Discord** (opt-in): switch on **AUTOMATICALLY SEND LOGS** and a
+  run that desyncs sends its log to the server, which posts it to the Discord
+  channel its operator set up. Server owners: see `server/DISCORD.md`.
+- **AUTOMATICALLY SYNC DATA** does **SYNC SAVE DATA** for you every time the game's
+  main menu comes up. If you also play the mod on its own, outside Modded Online,
+  leave it off: it copies Modded Online's progress over the mod's every time.
 - Settings persist in `config.json` next to this file.
 - Console: set `MO_DEBUG = true` in the in-game console for verbose logs.
 
 ## Testing on your own (TEST PLAYERS)
 
-Set **TEST PLAYERS** in the Modded Online menu to 1, 2 or 3 and every room you
+Set **TEST PLAYERS** (Modded Online menu → SETTINGS) to 1, 2 or 3 and every room you
 open gets that many stand-in players (three is a full room, since you are the
 fourth). Each is a real client (`server/fake_player.py`): its own process, its
 own socket, a real slot on the real server. Your game sees normal extra players —

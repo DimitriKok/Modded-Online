@@ -1,5 +1,173 @@
 # Changelog
 
+## 2.0.0-dev66
+
+A SETTINGS page in the Modded Online menu with two new switches, and three popups
+the first time Modded Online starts. No server change: the server stays at
+**1.0.13**.
+
+### The first-run popups
+
+The first time Modded Online starts, three popups come up over the main menu, one
+after another. They're drawn like the Modded Online menu: the same panel, banner,
+rows and footer.
+
+1. **Modded Online 2**: the notice about AI-assisted development, the old version
+   corrupting mods, reinstalling them, and reporting bugs to the Modded Online
+   Discord. It has one button, I UNDERSTAND.
+2. **Automatically Send Desync Errors**: YES switches on AUTOMATICALLY SEND LOGS,
+   and NO leaves it off.
+3. **Automatically Sync Data**: YES switches on AUTOMATICALLY SYNC DATA, and NO
+   leaves it off.
+
+The text is as written. Titles and buttons are in capitals, like every other label
+in the menu.
+
+- **Once:** `firstRunDone` in `config.json` is saved after the last answer, and
+  they never come back. Each answer is saved as it's given, so closing the game
+  half way keeps those answers and shows the popups again from the start next time.
+- **The answer is the setting:** NO switches a setting off even if an earlier build
+  had it on.
+- **Input:** ARROWS move, and Z or ENTER selects. The game's own menu underneath
+  doesn't see these keys, and the MODDED ONLINE menu can't be opened until they're
+  answered. A press in the first 0.6 s after a popup appears is ignored, so mashing
+  through the notice can't answer the next one unread. The keyboard stays blocked
+  for 0.3 s after the last answer, so that key press doesn't reach the game's menu.
+- **Layout:** the panel is the menu's own width, as tall as its content, and
+  centred. The text is 24 point, wrapped to the panel by measuring it, and steps
+  down a size if it wouldn't fit the screen. A title too long for the banner steps
+  down too.
+
+### Fixed: centred text was never measured
+
+Every centred label in the menu was placed by a rough estimate, never by
+measurement. The code asked the draw context for `draw_text_size`, but the
+context has no such method; in the script API it's a global (width, then height).
+Every call failed, so the code fell back to an estimate that is two to three times
+too wide at 1440p.
+
+That put the MODDED ONLINE title, the page subtitles, the footer and the room-code
+plaque left of centre. The first test of the popups showed it plainly: the title
+and footer were off centre, and the text wrapped at a third of the panel. The
+global is used now, and the estimate is kept only for a build without it.
+
+The name tags over the other players during a run (`inputSync.lua`) had the same
+bug. Every tag was drawn starting at its player instead of centred over them. They
+use the global now, and they're drawn and measured at the same explicit size: 18,
+the API's documented default, which their old size 0 stood for. The width measured
+is therefore the width drawn. They're display only and don't touch the simulation.
+`tests/test_name_tags.py` runs the shipped `guiTick` and `measureName`.
+- Release zips leave out `config.json` (`tools/spike2.py`), so a fresh install
+  always sees them.
+
+### The menu
+
+- **The root page** is now HOST, JOIN, MATCHMAKING, DISCORD, SETTINGS and CLOSE.
+- **SETTINGS** holds HIDE ROOM CODE, TEST PLAYERS and SYNC SAVE DATA, moved there
+  unchanged, plus the two new switches below. BACK (or ESC) returns to the root
+  page.
+- Both new switches are saved in `config.json` with the other settings, and both
+  are off by default.
+
+### AUTOMATICALLY SEND LOGS
+
+This switches on the desync-log upload from dev65, which used to be an option in
+Playlunky's options panel. That option is gone, since two switches in two places
+could only disagree. Anyone who ticked it in dev65 needs to switch this on instead.
+
+### AUTOMATICALLY SYNC DATA
+
+This does SYNC SAVE DATA for you every time the game's main menu comes up.
+
+- **When:** once per visit to the main menu. It waits until the menu has been up
+  for 1.5 seconds and has finished fading in. Arriving there often means a run just
+  ended, and the game may still be writing its save. The copy reads whole files, so
+  it lets that save land first.
+- **What:** the same copy as the button. The result shows on the SYNC SAVE DATA row,
+  and the mod's own original is still kept once as `.before_mo`. The desync log
+  says which of the two ran (`save share: AUTOMATICALLY SYNC DATA -> ...`).
+- **When not:** never while this machine holds a room host's save, the same as the
+  button.
+- **Worth knowing:** it copies Modded Online's progress over the mod's own every
+  time. Someone who also plays the mod on its own, outside Modded Online, should
+  leave it off, or that progress is overwritten at the next main menu.
+
+### Playlunky's options panel
+
+The "Play <mod> online" checkboxes no longer carry a description each. It was the
+same paragraph under every installed mod. The label says what the box does, and
+ticking one still prints that Playlunky needs a restart. "Skip hosted mods' custom
+textures" and "Undo Modded Online's setup" keep their descriptions, since those say
+when to use them.
+
+### The repository
+
+Per-machine files that had been committed are now out of git and in `.gitignore`:
+
+- `config.json`: it was already listed in `.gitignore`, but it had been committed
+  before the rule, so every clone got one player's name and join address. The game
+  writes its own on first use.
+- `tools/load_order.backup.txt`: one machine's load order.
+- `save.dat.parked_for_journal_test`: a save parked during a test.
+
+`.gitignore` also covers every `*.log` now, such as the test players'
+`test_player_<name>.log`. Test data that came from real logs now uses an address
+reserved for documentation (`203.0.113.7`) and a made-up account name.
+
+### Fixed: SYNC SAVE DATA after a restore that failed at launch
+
+Suppose the last session ended while a peer was on the room host's save. At launch,
+the player's own files are put back. If one of them can't be written back, the
+host's file stays in the pack. Nothing had been borrowed since launch, so SYNC SAVE
+DATA didn't know, and it would copy the host's progress into the player's own mod.
+
+It now refuses while any parked copy is still on disk. Those are cleared only once
+the player's own files are verifiably back. Without this, the automatic sync would
+have made the same copy by itself.
+
+### Tests
+
+- `tests/test_settings_menu.py` (new) runs the real menu. It covers:
+  - the root and SETTINGS pages;
+  - both switches flipping and being saved;
+  - the moved settings still working;
+  - BACK and ESC;
+  - every row clearing the footer.
+- `tests/test_save_share.py` covers the automatic sync:
+  - it waits for the menu to settle and fade in;
+  - it runs once per visit, and again on the next visit;
+  - it does nothing when off, or with a config from before the setting;
+  - it runs only on the main menu;
+  - it never copies a borrowed save;
+  - after leaving a room, it copies the player's own save;
+  - the failed-restore case above.
+- `tests/test_log_ship.py`: the upload follows the new setting, which is off by
+  default, and the Playlunky option is gone.
+- `tests/test_first_run.py` (new) runs the real menu through the popups:
+  - each one's title, exact text and buttons;
+  - YES and NO in every combination, including NO over a setting that was on;
+  - each answer saved as it's given, and `firstRunDone` only at the end;
+  - ENTER, the pause before a press counts, and the keyboard kept from the game;
+  - ESC and O doing nothing while the popups are up;
+  - the main menu coming back afterwards, and the popups never returning;
+  - closing half way, the title screen, and a config without the flag;
+  - the wrapping, the layout order and the long title;
+  - the text filling the panel, and the title and footer centred.
+
+  The stubs give `draw_text_size` as a global, as the game does, with a width per
+  character that differs from the fallback estimate. A test can therefore tell a
+  measurement from a guess, which the old stubs (a method on the draw context)
+  never could. Fourteen deliberate breaks of the code are each caught by at least
+  one test, including the old method call and a swapped width and height.
+- `tests/test_settings_menu.py` also checks that the menu's title and subtitle are
+  centred.
+- `tests/test_setup_options.py` (new) runs the real `SetupUI.install()`. It checks
+  that:
+  - the per-mod checkboxes have no description, passed as an empty string and
+    not nil;
+  - they still start ticked for what is armed;
+  - the other two entries keep their descriptions.
+
 ## 2.0.0-dev65
 
 A Jungle desync fix and the first version of sending desync logs to Discord.
