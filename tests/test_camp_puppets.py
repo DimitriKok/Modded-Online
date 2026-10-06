@@ -45,7 +45,9 @@ function makeEntity(uid, typeId, x, y, layer)
         set_draw_depth = function(self, d) self.draw_depth = d end,
         set_pre_update_state_machine = function(self, fn) self.stateMachineHook = fn end,
         destroy = function(self) self.destroyed = true; entities[self.uid] = nil end,
-        get_absolute_position = function(self) return self.x, self.y end,
+        -- a Vec2, as the real one returns (spel2.lua: `fun(self): Vec2`); dev73's stub
+        -- returned two numbers, and so did dev73
+        get_absolute_position = function(self) return { x = self.x, y = self.y } end,
     }
 end
 function spawn_entity_nonreplaceable(typeId, x, y, layer, _vx, _vy)
@@ -130,6 +132,50 @@ def test_facing_left_is_sent(engine):
     engine.lua("me.flags = set_flag(me.flags, 17)")
     engine.gui()
     assert sent(engine)[0]["f"] == 1
+
+
+def test_our_position_is_where_we_really_are(engine):
+    """Attached to something (a mount, the rope's top), x/y are relative to it: the
+    absolute position is what is sent."""
+    engine.lua("me.get_absolute_position = function(self) return { x = 40.5, y = 61.25 } end")
+    engine.gui()
+    assert (sent(engine)[0]["x"], sent(engine)[0]["y"]) == (40.5, 61.25)
+
+
+def test_a_failed_read_is_said_once_and_not_kept_quiet(engine):
+    engine.lua("me.get_absolute_position = nil; me.animation_frame = nil")
+    engine.lua("notes = {}; DesyncLog = { earlyEvent = function(fmt, ...) notes[#notes + 1] = string.format(fmt, ...) end, frameMark = function() end, frameDone = function() end }")
+    for _ in range(5):
+        engine.gui(ms=60)
+    assert sent(engine) == []
+    notes = [str(engine.eval("notes[%d]" % i)) for i in range(1, int(engine.eval("#notes")) + 1)]
+    assert len([n for n in notes if "reading our spelunker failed" in n]) == 1, notes
+
+
+def test_the_firsts_are_logged(engine):
+    engine.lua("notes = {}; DesyncLog = { earlyEvent = function(fmt, ...) notes[#notes + 1] = string.format(fmt, ...) end, frameMark = function() end, frameDone = function() end }")
+    engine.gui()
+    sample(engine)
+    engine.update()
+    notes = " | ".join(str(engine.eval("notes[%d]" % i)) for i in range(1, int(engine.eval("#notes")) + 1))
+    assert "first packet sent" in notes and "first packet from slot 2" in notes
+    assert "puppet up for slot 2" in notes
+
+
+def test_a_puppet_is_never_respawned_in_a_flood(engine):
+    """Whatever made the puppet unrecognisable every update, at most one spawn a second."""
+    engine.lua("get_type = function(id) return { texture = 1000 + id } end")
+    sample(engine)
+    engine.update()
+    engine.lua("entities[spawned[1]].type.id = 555")      # no longer ours, every update
+    for _ in range(30):
+        sample(engine)
+        engine.update()
+    assert int(engine.eval("#spawned")) == 1
+    engine.lua("now = now + 1100")
+    sample(engine)
+    engine.update()
+    assert int(engine.eval("#spawned")) == 2
 
 
 @pytest.mark.parametrize("setup", [
@@ -287,6 +333,10 @@ def test_a_recycled_uid_is_never_mistaken_for_a_puppet(engine):
     sample(engine, x=15.0)
     engine.update()
     recycled = engine.eval("entities[%d]" % uid)
+    assert (recycled.x, recycled.y) == (1.0, 1.0), "wrote into somebody else's entity"
+    engine.lua("now = now + 1100")       # past the respawn limit
+    sample(engine, x=15.0)
+    engine.update()
     assert (recycled.x, recycled.y) == (1.0, 1.0), "wrote into somebody else's entity"
     assert int(engine.eval("#spawned")) == 2, "the puppet was not put back"
 

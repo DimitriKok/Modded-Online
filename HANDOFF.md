@@ -6,7 +6,7 @@ them.
 
 ## Start here
 
-**Build: `2.0.0-dev55` → `dev73`. The server must be redeployed at `1.0.13`.**
+**Build: `2.0.0-dev55` → `dev74`. The server must be redeployed at `1.0.13`.**
 Section 3's fix is half a server fix and does nothing without it (1.0.11 or later).
 Section 6 has a server half too, but its client half works on its own. A client on a
 server other than the one it expects says so in a toast and in the log. Check with
@@ -29,7 +29,7 @@ server other than the one it expects says so in a toast and in the log. Check wi
 | 13 | Popups the first time Modded Online starts | **NEW** in dev66, reported working in game; a fourth added in dev67 — section 13 |
 | 14 | ENABLE DEBUG MESSAGES, and a RESTART REQUIRED popup | **NEW** in dev67, not yet tried in game — section 14 |
 | 15 | MODDED ONLINE as the main menu's ONLINE row, controller input, and the menu probe | **NEW** in dev68. In dev68's game test the takeover switched itself off on the first press; **FIXED** in dev69 and **confirmed in game** (the row opens our menu and stays put). The game-styled look is **NEW** in dev70 and drew correctly in game, with every line of text 1.7 times too big; **sized** in dev71; dev72 puts the menu in the main menu's own font (italic, Title Case); not yet tried in game — section 15 |
-| 16 | The other players shown in the camp lobby (climbing down the rope, walking about) | **NEW** in dev73, not yet tried in game — section 16 |
+| 16 | The other players shown in the camp lobby (climbing down the rope, walking about) | **NEW** in dev73. In its first two-player test nobody saw anybody: not one packet was sent. **FIXED** in dev74, not yet tried in game — section 16 |
 
 **Git state:** everything is on `origin/fix/peer-save-restore`; the patch-delivered
 commits from the no-push-access session have landed. `git log --oneline
@@ -766,7 +766,7 @@ menu screens, `ON.RENDER_POST_HUD` in the camp and levels) instead of ImGui.
 If a layer failed, the desync log has `vanilla look: layer NAME failed, back to the
 GUI look for it: ...`, and that part is drawn the old way.
 
-## 16. The other players in the camp lobby (puppets) — NEW in dev73, NOT YET TRIED IN GAME
+## 16. The other players in the camp lobby (puppets) — NEW in dev73, FIXED in dev74, NOT YET TRIED IN GAME
 
 The camp isn't in lockstep, so until dev73 each player saw only their own spelunker
 until the run started. `src/campPuppets.lua` puts the others in it as puppets. A
@@ -774,6 +774,14 @@ puppet is an `ITEM_ROCK` wearing that player's character sheet, posed from the
 packets they send: position, animation frame, facing, layer and character, up to 20 a
 second on the world channel (kind `pp`). Its physics are paused and every interaction
 is off. The full description is in CHANGELOG `2.0.0-dev73`.
+
+**dev73's test (2026-10-05):** neither player saw the other. The sender read the
+spelunker's position as two numbers from `get_absolute_position`, which returns one
+Vec2. Every read failed inside its pcall, so nothing was ever sent, and nothing said
+so. dev74 reads the Vec2, and logs each first: packet sent, packet from slot N,
+puppet up for slot N. A failed read is logged with its error. The lines go to the
+desync log (under the next run's header) and to `mo_menuprobe.txt` while the probe is
+armed. If puppets still don't show, those lines say how far it got on each machine.
 
 **To confirm in game (two machines):**
 
@@ -878,7 +886,7 @@ On a machine whose Python has no pytest or lupa, uv supplies both for the run:
 uv run --no-project --with pytest --with lupa python -m pytest tests/ -q
 ```
 
-869 passing, none failing (dev73). The 16 long-standing failures went in dev67, with the two
+873 passing, none failing (dev74). The 16 long-standing failures went in dev67, with the two
 stale test files they came from: `tests/test_world_mailbox.py` (the world mailbox
 deleted in dev44) and `tests/test_seeded_run.py` (the seeded-run flag removed in
 dev46). A failure here now means something broke.

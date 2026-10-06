@@ -1,5 +1,52 @@
 # Changelog
 
+## 2.0.0-dev74
+
+The camp lobby's puppets, working. In dev73's first test with two players, neither
+player saw the other at all. No server change: the server stays at **1.0.13**.
+
+### Fixed: no puppet packet was ever sent
+
+The sender read our spelunker's position with `local x, y = p:get_absolute_position()`.
+That call returns one Vec2, not two numbers, as eventSync's `playerWorldPos` already
+reads it (`abs.x, abs.y`). So rounding the "x" was arithmetic on a Vec2, which failed
+inside the `pcall` around the read on every frame.
+
+- **Nothing was ever sent,** so nobody received anything and no puppet was ever
+  spawned.
+- **Nothing said so:** the failure was swallowed, and the camp comes before any run's
+  log exists.
+- **Why the tests passed:** the test stub's `get_absolute_position` made the same
+  mistake. It now returns a Vec2, as `spel2.lua` declares (`fun(self): Vec2`). The
+  real position is read from it, falling back to `x`/`y`.
+
+### Never quiet again
+
+- **What is said once a session,** to the desync log (held until the next run's
+  header) and the menu probe's log:
+  - `camp puppets: first packet sent`;
+  - `first packet from slot N`;
+  - `puppet up for slot N at (x, y)`;
+  - a failed read or spawn, with the error.
+- **Never a flood:** a puppet is spawned for the same player at most once a second,
+  whatever goes wrong, so the camp can't fill up with rocks.
+- **Recognising our puppets:** the marker in a puppet's `user_data` is checked only
+  where it reads back at all, so a build where it doesn't can't make every puppet look
+  like a stranger.
+
+### Tests
+
+`tests/test_camp_puppets.py`:
+
+- the stub's position is a Vec2;
+- the absolute position is what gets sent;
+- a failed read is logged once;
+- the firsts are logged;
+- no respawn flood.
+
+Four more deliberate breaks are each caught: dev73's own read, sending the relative
+x/y, no respawn limit, and a failed read kept quiet.
+
 ## 2.0.0-dev73
 
 The other players in the camp lobby. No server change: the server stays at

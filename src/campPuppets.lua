@@ -76,6 +76,35 @@ local lastSentMs = -1000000
 local lastSent = { x = nil, y = nil, a = nil, f = nil, l = nil, c = nil }
 local inCampLastFrame = false
 local broken = nil    --- @type string? # why puppets stood down for the session
+local lastSpawnMs = {} -- network slot -> when its puppet was last spawned
+--- A puppet is never spawned for the same player more often than this: whatever goes
+--- wrong, the camp must not fill up with rocks.
+local RESPAWN_MS = 1000
+
+--- One line, to the desync log (it holds lines from before a run and writes them
+--- under the next run's header) and to the menu probe's log.
+--- @param fmt string
+local function note(fmt, ...)
+    if DesyncLog ~= nil and DesyncLog.earlyEvent ~= nil then
+        DesyncLog.earlyEvent("camp puppets: " .. fmt, ...)
+    end
+    if MenuProbe ~= nil and MenuProbe.note ~= nil then
+        MenuProbe.note("campPuppets: " .. fmt, ...)
+    end
+end
+
+-- What has happened yet this session, so each first is said once and only once.
+local said = {}
+
+--- @param key string
+--- @param fmt string
+local function sayOnce(key, fmt, ...)
+    if said[key] then
+        return
+    end
+    said[key] = true
+    note(fmt, ...)
+end
 
 --- @param reason string
 local function standDown(reason)
@@ -83,9 +112,7 @@ local function standDown(reason)
         return
     end
     broken = reason
-    if DesyncLog ~= nil and DesyncLog.earlyEvent ~= nil then
-        DesyncLog.earlyEvent("camp puppets OFF: %s", reason)
-    end
+    note("OFF -- %s", reason)
     errorf("camp puppets switched off (%s)", reason)
 end
 
@@ -134,10 +161,26 @@ local function r2(v)
     return math.floor(v * 100 + 0.5) / 100
 end
 
+--- Where our spelunker really is: `get_absolute_position` returns a Vec2 (the same
+--- read as eventSync's playerWorldPos), and x/y are only relative to whatever it is
+--- attached to. dev73 took the Vec2 for two numbers, the read failed inside its pcall
+--- on every frame, and not one packet was ever sent: in its first test nobody saw
+--- anybody.
+--- @param p userdata
+--- @return number, number
+local function absolutePosition(p)
+    local x, y = p.x, p.y
+    local ok, abs = pcall(function() return p:get_absolute_position() end)
+    if ok and abs ~= nil and type(abs.x) == "number" and type(abs.y) == "number" then
+        x, y = abs.x, abs.y
+    end
+    return x, y
+end
+
 --- @param p userdata
 --- @return number, number, integer, integer, integer, integer
 local function readLocal(p)
-    local x, y = p:get_absolute_position()
+    local x, y = absolutePosition(p)
     return r2(x), r2(y), math.floor(p.animation_frame), test_flag(p.flags, FLAG.FACING_LEFT) and 1 or 0,
         math.floor(p.layer), math.floor(p.type.id)
 end
@@ -167,6 +210,8 @@ local function sendTick()
     end
     local ok, x, y, a, f, l, c = pcall(readLocal, p)
     if not ok then
+        -- say why, once: a read that fails silently is how dev73 sent nothing at all
+        sayOnce("readfail", "reading our spelunker failed, nothing sent: %s", tostring(x))
         return
     end
     local changed = x ~= lastSent.x or y ~= lastSent.y or a ~= lastSent.a or f ~= lastSent.f
@@ -177,6 +222,7 @@ local function sendTick()
     lastSentMs = now
     lastSent.x, lastSent.y, lastSent.a, lastSent.f, lastSent.l, lastSent.c = x, y, a, f, l, c
     Network.sendWorld({ k = "pp", x = x, y = y, a = a, f = f, l = l, c = c })
+    sayOnce("sent", "first packet sent (%.2f, %.2f, frame %d, character %d)", x, y, a, c)
 end
 
 -- ---------------------------------------------------------------- receiving
@@ -197,6 +243,7 @@ function module.onSample(slot, d)
     if x == nil or y == nil then
         return
     end
+    sayOnce("from" .. slot, "first packet from slot %d", slot)
     local s = samples[slot] or {}
     s.x, s.y = x, y
     s.a = math.floor(tonumber(d.a) or 0)
@@ -217,8 +264,14 @@ local function puppetEntity(slot)
         return nil
     end
     local ent = get_entity(pup.uid)
-    if ent == nil or ent.type == nil or ent.type.id ~= PUPPET_TYPE
-        or type(ent.user_data) ~= "table" or ent.user_data.mo_puppet ~= slot then
+    if ent == nil or ent.type == nil or ent.type.id ~= PUPPET_TYPE then
+        puppets[slot] = nil
+        return nil
+    end
+    -- the marker is checked where it reads back; a build where user_data does not keep
+    -- it must not take every puppet for a stranger and spawn a new one each update
+    local ok, ud = pcall(function() return ent.user_data end)
+    if ok and type(ud) == "table" and ud.mo_puppet ~= nil and ud.mo_puppet ~= slot then
         puppets[slot] = nil
         return nil
     end
@@ -261,14 +314,22 @@ end
 --- @param s table
 --- @return userdata?
 local function spawnPuppet(slot, s)
+    local now = get_ms()
+    if lastSpawnMs[slot] ~= nil and now - lastSpawnMs[slot] < RESPAWN_MS then
+        return nil
+    end
+    lastSpawnMs[slot] = now
     local uid = spawn_entity_nonreplaceable(PUPPET_TYPE, s.x, s.y, s.l, 0, 0)
     local ent = uid ~= nil and uid >= 0 and get_entity(uid) or nil
     if ent == nil then
+        sayOnce("spawnfail" .. slot, "could not spawn a puppet for slot %d (uid %s)", slot,
+            tostring(uid))
         return nil
     end
-    ent.user_data = { mo_puppet = slot }
+    pcall(function() ent.user_data = { mo_puppet = slot } end)
     dress(ent, s)
     puppets[slot] = { uid = uid, x = s.x, y = s.y, c = s.c }
+    sayOnce("up" .. slot, "puppet up for slot %d at (%.2f, %.2f), character %d", slot, s.x, s.y, s.c)
     return ent
 end
 
