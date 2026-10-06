@@ -854,6 +854,23 @@ function module.currentRunText()
     return text
 end
 
+--- Every engine PRNG stream (PRNG_CLASS 0..9), as `c0=AAAAAAAA:BBBBBBBB c1=...`.
+--- Shared by the gen[...] lines and the floor block, so the two read alike.
+--- @return string
+local function prngStreams()
+    local parts = {}
+    for class = 0, 9 do
+        local ok, p1, p2 = pcall(function()
+            return prng:get_pair(class)
+        end)
+        if ok and p1 ~= nil then
+            parts[#parts + 1] = string.format("c%d=%08X:%08X", class,
+                math.floor(p1) & 0xFFFFFFFF, math.floor(p2 or 0) & 0xFFFFFFFF)
+        end
+    end
+    return table.concat(parts, " ")
+end
+
 --- Dump the freshly generated floor on EVERY machine: the run-state that gates
 --- generation, each player's money/hp/position, a per-type histogram, and -- when
 --- `mo_dump.on` exists -- the full sorted entity list (type + rounded position +
@@ -896,6 +913,14 @@ function module.floorSnapshot(s, seedHash, entHash, counts)
             st.shoppie_aggro or -1, st.shoppie_aggro_next or -1, st.merchant_aggro or -1,
             st.kali_favor or -1, st.kali_status or -1, st.kali_altars_destroyed or -1,
             st.quest_flags or 0, st.presence_flags or 0))
+        -- The engine's streams as the gate engages, in the gen[...] lines' form.
+        -- gen[post] shows generation drew the same on both machines; this shows
+        -- whether everything AFTER it did too -- the mods' ON.LEVEL pass and the
+        -- fade-in -- before a single gated frame. On the BGNY capture's 2-1 these
+        -- would have differed while gen[post] matched, pointing straight past the
+        -- level generator. Compare stream by stream: one that differs while the
+        -- entities still match is a lead, not yet a desync.
+        add("  prng: " .. prngStreams())
 
         for coopIndex = 1, 4 do
             local inv = st.items and st.items.player_inventory
@@ -1016,7 +1041,6 @@ function module.genPhase(label)
         -- room host during a run, logged so a mismatch is provable at a glance.
         local pet = "?"
         pcall(function() pet = tostring(get_setting(GAME_SETTING.PET_STYLE)) end)
-        local parts = {}
         -- EVERY stream (PRNG_CLASS 0..9), not a sample of three. This used to log
         -- 0, 3 and 8 on the assumption that 0 was the level-generation stream, and
         -- a real capture then showed all three MATCHING at "pre" on the floor that
@@ -1025,15 +1049,7 @@ function module.genPhase(label)
         -- one of the three). Ten pairs is one longer line per floor, and it is the
         -- difference between "the inputs matched" and "the inputs we happened to
         -- look at matched".
-        for class = 0, 9 do
-            local ok, p1, p2 = pcall(function()
-                return prng:get_pair(class)
-            end)
-            if ok and p1 ~= nil then
-                parts[#parts + 1] = string.format("c%d=%08X:%08X", class,
-                    math.floor(p1) & 0xFFFFFFFF, math.floor(p2 or 0) & 0xFFFFFFFF)
-            end
-        end
+        local streams = prngStreams()
         local st = get_local_state()
         -- Is the engine being told this is a SEEDED run? Modded Online no longer
         -- sets the flag (removed in 2.0.0-dev46 by request), so this now reports
@@ -1059,7 +1075,7 @@ function module.genPhase(label)
             label, st.world or -1, st.level or -1, st.theme or -1,
             st.level_count or -1, pet, seeded,
             math.floor(a) & 0xFFFFFFFF, math.floor(b) & 0xFFFFFFFF,
-            table.concat(parts, " "))
+            streams)
     end)
 end
 

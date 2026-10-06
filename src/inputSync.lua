@@ -204,6 +204,10 @@ local HELD_GRACE_MS = 3000
 -- This machine's sim is held by the engine or a mod, not by the lockstep gate.
 -- Set every PRE_UPDATE by the gate and put on the wire with our inputs.
 local localHeld = false
+-- The opposite case: THIS frame is one the gate itself held (it returned true from
+-- PRE_UPDATE, so the engine does not tick). Set on every PRE_UPDATE, held or not;
+-- read by module.heldFrame.
+local heldNow = false
 local myRecorded = -1      -- highest offset recorded locally in current seq
 local playersSpawned = false
 local stallStartMs = nil
@@ -468,6 +472,16 @@ end
 --- @return string
 function module.simClock()
     return string.format("%d:%d", seq, offset)
+end
+
+--- Is this frame one the lockstep gate HELD? It returned true from PRE_UPDATE, so
+--- the engine does not tick -- but ON.POST_UPDATE still fires, once per rendered
+--- frame, and so would a hosted mod's update callbacks. Determinism skips those on
+--- such a frame (see simulatedOnly in determinism.lua): for the mod's logic it does
+--- not exist, and how many of them a machine sees depends on its network.
+--- @return boolean
+function module.heldFrame()
+    return heldNow
 end
 
 --- The immutable recorded local input for a frame offset (diagnostics/tests).
@@ -1372,6 +1386,16 @@ local function preUpdate()
                 fadeSlots[coopIndex].buttons = 0
                 fadeSlots[coopIndex].buttons_gameplay = 0
             end
+            -- ...and the menu pause does not stand here either (see the clear
+            -- below, which only the gate's own frames reached). A player who is
+            -- tabbed out while a level fades in still has flag 1 up on the frame
+            -- the fade finishes, and that frame's POST_UPDATE is where a hosted mod
+            -- first sees the level as playable: 2.5's Wheel of Fortune decides its
+            -- shop there, gated on `pause == 0`, so a tabbed-out machine would
+            -- decide it a frame later than everyone else, from a different PRNG state.
+            if (levelState.pause & 1) ~= 0 then
+                pcall(function() levelState.pause = levelState.pause & ~1 end)
+            end
         end
         awaitLoadBoundary = false -- the awaited boundary is here
         engaged = false -- re-engage with a fresh sequence on the next screen
@@ -2253,6 +2277,8 @@ set_callback(function()
     -- a value we RETURNED rather than anything that threw. This is the only
     -- callback we forward a return through, so it is the only candidate.
     local hold = SafeCall("inputSync:preUpdate", preUpdate)
+    -- every frame, held or not, before anything else can ask (see heldFrame)
+    heldNow = hold == true
     if DesyncLog ~= nil then
         DesyncLog.frameDone("preUpdate")
     end

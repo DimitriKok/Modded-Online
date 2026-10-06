@@ -6,7 +6,7 @@ them.
 
 ## Start here
 
-**Build: `2.0.0-dev55` → `dev74`. The server must be redeployed at `1.0.13`.**
+**Build: `2.0.0-dev55` → `dev75`. The server must be redeployed at `1.0.13`.**
 Section 3's fix is half a server fix and does nothing without it (1.0.11 or later).
 Section 6 has a server half too, but its client half works on its own. A client on a
 server other than the one it expects says so in a toast and in the log. Check with
@@ -30,6 +30,7 @@ server other than the one it expects says so in a toast and in the log. Check wi
 | 14 | ENABLE DEBUG MESSAGES, and a RESTART REQUIRED popup | **NEW** in dev67, not yet tried in game — section 14 |
 | 15 | MODDED ONLINE as the main menu's ONLINE row, controller input, and the menu probe | **NEW** in dev68. In dev68's game test the takeover switched itself off on the first press; **FIXED** in dev69 and **confirmed in game** (the row opens our menu and stays put). The game-styled look is **NEW** in dev70 and drew correctly in game, with every line of text 1.7 times too big; **sized** in dev71; dev72 puts the menu in the main menu's own font (italic, Title Case); not yet tried in game — section 15 |
 | 16 | The other players shown in the camp lobby (climbing down the rope, walking about) | **NEW** in dev73. In its first two-player test nobody saw anybody: not one packet was sent. **FIXED** in dev74, not yet tried in game — section 16 |
+| 17 | 2.5's swamp desynced on 2-1: one machine built 2.5's new Wheel of Fortune, the other kept the dice shop | **FIXED** in dev75, not yet confirmed in game — section 17 |
 
 **Git state:** everything is on `origin/fix/peer-save-restore`; the patch-delivered
 commits from the no-push-access session have landed. `git log --oneline
@@ -478,6 +479,10 @@ appear on 2-x, and the per-floor `entities:` lines should match between the two 
 those turn out to differ between machines too, they need the same treatment. The old
 shim never needed it, so it isn't done here.
 
+**dev75:** they do differ. 2.5's swamp showed it on 2-1 (section 17), and in a room a
+hosted mod's ON.LEVEL no longer sees them. The HD mod's procedural lily pads, and
+the frogs on them, are gone online as a result.
+
 ## 11. Desync logs to Discord — NEW in dev65 / server 1.0.13
 
 There's an opt-in switch, **AUTOMATICALLY SEND LOGS**, on the SETTINGS page of the
@@ -807,6 +812,81 @@ armed. If puppets still don't show, those lines say how far it got on each machi
 - The body only: no held item, whip or back item.
 - Test players (`fake_player.py`) send no puppet packets, so they don't show.
 
+## 17. 2.5's swamp desynced on 2-1 (the Wheel of Fortune) — FIXED in dev75, NOT YET CONFIRMED IN GAME
+
+**The capture (room BGNY, dev73, 2026-10-05):** 1-1 to 1-4 matched. 2-1 generated
+identically, with all ten streams equal at `gen[pre]` and `gen[post]`. At the first
+frame the floors differed in four types:
+
+| | `ITEM_DICE_BET` | `ITEM_DIE` | `ITEM_CONSTRUCTION_SIGN` | `ITEM_LEAF` |
+|---|---|---|---|---|
+| host (slot 1) | 1 | 2 | 1 | 7 |
+| peer (slot 2) | 0 | 0 | 2 | 8 |
+
+The peer had turned the dice shop into 2.5's Wheel of Fortune and the host had not.
+A `POSITION DESYNC` at `9:2760`, a `FLOOR DESYNC` on 2-2 and a resync warp to 2-3
+followed.
+
+**The chain:**
+
+1. 2.5's swamp lily pads (`hooks/swamp/water.lua`, at ON.LEVEL) stand on the engine's
+   `FX_WATER_SURFACE` effects. The liquid system makes those after generation, from
+   water the worker threads are already moving, so the two machines hold different
+   sets of them.
+2. The pads shuffle every surface effect (one `PROCEDURAL_SPAWNS` draw each), and roll
+   a one-in-five chance on each well-spaced one. One more effect on the peer gave one
+   more pad (the extra `ITEM_LEAF`), and moved the stream.
+3. The Wheel of Fortune (`hooks/wheelOfFortune.lua`, `convertShop`) flips its 50/50
+   coin on the first playable POST_UPDATE, from that same stream.
+
+**What dev75 changes (`src/determinism.lua`, `src/inputSync.lua`, `src/desyncLog.lua`):**
+
+- **In a room, a hosted mod's ON.LEVEL callbacks see no `FX_WATER_SURFACE` effects,**
+  and each one is anchored to the floor base, with the streams restored afterwards.
+- **A hosted mod's PRE_UPDATE and POST_UPDATE callbacks are skipped on frames the
+  lockstep gate held** (`InputSync.heldFrame()`). They fire once per rendered frame,
+  stalls included, so 2.5's wheel would turn further on the machine that stalled
+  more. Found reading the code; the capture does not show anyone using the wheel.
+- **The local menu pause is cleared during a run's fades too,** not only on gated
+  frames. Also found reading the code.
+- **Each floor's block in the desync log has a `prng:` line:** the ten streams at
+  engage.
+
+**The cost:** no 2.5 swamp lily pads online, and no HD-mod procedural lily pads or the
+frogs on them. Both are decoration.
+
+**To confirm in game (two machines, 2.5):**
+
+1. Play into the swamp, over several floors with a dice shop or a Wheel House. No
+   `FLOOR DESYNC` on 2-x, and each floor's `entities:` line matches between the two
+   logs.
+2. The `prng:` lines match between the two logs on every floor.
+3. On a floor with water, each log has `hid N water-surface effect(s) from the hosted
+   mod's ON.LEVEL`. The two counts may differ; that difference is the reason for it.
+4. Spin the wheel while the other player's connection is stalling (`STALL` lines):
+   both screens show the same result, and both players have the same money after.
+
+**If 2-x still differs:**
+
+- **`prng:` differs but `gen[post]` matches:** something between generation and the
+  first gated frame drew differently. Compare stream by stream. A hosted POST_UPDATE
+  during the fade-in is the next suspect.
+- **Entities differ but `prng:` matches:** a spawn decision read something
+  machine-dependent without drawing from the streams.
+
+**Known, not fixed:**
+
+- **2.5's worm tongue on black-market swamp levels** (`hooks/swamp/udjatworm.lua`)
+  chooses its spot from candidates with no liquid entities near them, at ON.LEVEL and
+  again during play. The anchor contains the draw, but the spot can still differ if
+  the water does.
+- **The swamp's water poison** counts frames a player spends in water as the engine's
+  live water sees it. It now counts only simulated frames, but the waterline itself is
+  the engine's.
+- **A hosted PRE_UPDATE that runs before the gate's** reads the previous frame's
+  answer. That only happens after the gate's callback has been revived and
+  re-registered behind the mod's.
+
 ## Diagnostic tooling (flags and the files they write)
 
 All flag files live in the pack folder. They are files, not settings, for the reason
@@ -886,7 +966,7 @@ On a machine whose Python has no pytest or lupa, uv supplies both for the run:
 uv run --no-project --with pytest --with lupa python -m pytest tests/ -q
 ```
 
-873 passing, none failing (dev74). The 16 long-standing failures went in dev67, with the two
+914 passing, none failing (dev75). The 16 long-standing failures went in dev67, with the two
 stale test files they came from: `tests/test_world_mailbox.py` (the world mailbox
 deleted in dev44) and `tests/test_seeded_run.py` (the seeded-run flag removed in
 dev46). A failure here now means something broke.

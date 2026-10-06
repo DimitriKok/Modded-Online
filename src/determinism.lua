@@ -246,6 +246,10 @@ end
 --- different set. Restoring keeps the anchor invisible outside the body: leaving the
 --- streams reseeded leaked our value into everything the mod did for the rest of the
 --- floor, and a mod that owns its own generation draws from those same streams.
+---
+--- The streams go back even when the body throws. A throwing callback used to skip
+--- the restore and leave our seed in force for the rest of the floor, which is the
+--- exact leak the restore exists to prevent. The error is raised again unchanged.
 --- @param cb function
 --- @param base fun(): integer
 --- @return function
@@ -253,8 +257,11 @@ function module.anchor(cb, base)
     return function(...)
         local saved = module.savePrng()
         pcall(seedFromBase, base)
-        local ret = cb(...)
+        local ok, ret = pcall(cb, ...)
         module.restorePrng(saved)
+        if not ok then
+            error(ret, 0)
+        end
         return ret
     end
 end
@@ -330,7 +337,8 @@ end
 --- mod's file to achieve that, and got it wrong once.
 ---
 --- @param env table            # the sandbox the mod will run in
---- @param opts table?          # { orderedPairs = boolean }
+--- @param opts table?          # { orderedPairs = boolean, active = fun(): boolean,
+---                               #   heldFrame = fun(): boolean }
 --- @return DeterminismControl
 function module.install(env, opts)
     opts = opts or {}
@@ -339,8 +347,28 @@ function module.install(env, opts)
     local matched = {}
     local runPlan = false
     local lastRunSeed = nil
-    local stats = { reseeds = 0, newRuns = 0, anchored = 0, liquidTiles = 0 }
+    local stats = {
+        reseeds = 0, newRuns = 0, anchored = 0, liquidTiles = 0,
+        levelAnchored = 0, waterFxHidden = 0, heldSkips = 0,
+    }
     local control -- forward: checkNewRun hands it to adapters
+
+    -- Determinism is for AGREEING WITH ANOTHER MACHINE. Outside a room there is no
+    -- other machine, and forcing it there is not neutral -- it is a bug the player
+    -- sees: seeding the mod's `math.random` from the floor base every floor made
+    -- every single 1-1 come out with the same level feeling, run after run, in
+    -- ordinary single-player. Hosting a mod must not change how it plays alone.
+    --
+    -- Defaults to always-on so the tests, which have no network, keep exercising it.
+    local isActive = opts.active or function() return true end
+
+    -- True on a frame the lockstep gate held the simulation still (see
+    -- simulatedOnly). Looked up per call rather than captured: InputSync is a
+    -- global of its own module, and the tests install without it.
+    local heldFrame = opts.heldFrame or function()
+        local sync = rawget(_G, "InputSync")
+        return sync ~= nil and sync.heldFrame ~= nil and sync.heldFrame() == true
+    end
 
     -- ---------------------------------------------------------------- primitives
 
@@ -447,6 +475,250 @@ function module.install(env, opts)
         end
     end
 
+    -- ---------------------------------- the water's surface effects at ON.LEVEL
+    --
+    -- FX_WATER_SURFACE is the engine's drawn waterline, and it is not part of the
+    -- generated world. The liquid system creates it after generation -- "somewhere
+    -- between ON.POST_LEVEL_GENERATION and ON.LEVEL", as the HD mod's own author
+    -- narrowed it down (lib/entities/jungle_deco.lua) -- out of water the worker
+    -- threads are already moving. So at ON.LEVEL two machines do not hold the same
+    -- set of them, and the snapshot above cannot help: it answers is_liquid_at, and
+    -- these are entities.
+    --
+    -- 2.5's swamp stands its lily pads on exactly these (hooks/swamp/water.lua). It
+    -- shuffles every surface effect with the shared PRNG, one draw each, and rolls
+    -- again for each well-spaced one. The BGNY capture was that: 2-1 generated
+    -- identically, every stream equal at gen[post], and at the first frame the peer
+    -- had one more lily pad (ITEM_LEAF 8 against 7). The PROCEDURAL_SPAWNS stream had
+    -- moved with it, and that is the stream the Wheel of Fortune then flipped its
+    -- coin on: one machine kept the dice house and the other built a Wheel House.
+    -- The HD mod's procedural lily pads, and the frogs on them, read the same effects.
+    --
+    -- So inside a hosted mod's ON.LEVEL callbacks, in a room, there are none. Every
+    -- query leaves them out and every machine builds the same floor, without the
+    -- decorative pads that would have stood on them. Outside ON.LEVEL, and alone,
+    -- the mod sees the engine's own answer.
+    local waterFx = nil
+    pcall(function() waterFx = ENT_TYPE.FX_WATER_SURFACE end)
+    local fxMask = 64 -- MASK.FX
+    pcall(function() fxMask = math.floor(MASK.FX) end)
+    local waterFxLogged = false -- this floor's first hide has been logged
+
+    --- Could a query for these types return a water surface effect? 0, nothing, and
+    --- an empty list all mean every type.
+    --- @param types any
+    --- @return boolean
+    local function typesMayHoldWaterFx(types)
+        if type(types) == "table" then
+            local n = 0
+            for _, t in ipairs(types) do
+                n = n + 1
+                if t == waterFx or t == 0 then
+                    return true
+                end
+            end
+            return n == 0
+        end
+        return types == nil or types == 0 or types == waterFx
+    end
+
+    --- ...and could this mask? 0 is MASK.ANY.
+    --- @param mask any
+    --- @return boolean
+    local function maskMayHoldFx(mask)
+        local m = tonumber(mask)
+        if m == nil or m == 0 then
+            return true
+        end
+        return (math.floor(m) & fxMask) ~= 0
+    end
+
+    --- @param uid integer
+    --- @return integer?
+    local function entityTypeOf(uid)
+        local ok, t = pcall(get_entity_type, uid)
+        if ok and type(t) == "number" then
+            return t
+        end
+        local ok2, t2 = pcall(function() return get_entity(uid).type.id end)
+        if ok2 then
+            return t2
+        end
+        return nil
+    end
+
+    --- @param list any
+    --- @return table kept
+    --- @return integer hidden
+    local function splitWaterFx(list)
+        local kept, hidden = {}, 0
+        for i = 1, #list do
+            local uid = list[i]
+            if entityTypeOf(uid) == waterFx then
+                hidden = hidden + 1
+            else
+                kept[#kept + 1] = uid
+            end
+        end
+        return kept, hidden
+    end
+
+    --- The query's own answer, without the water surface effects.
+    ---
+    --- Read by length and index rather than tested for `type(list) == "table"`:
+    --- these come back as plain tables (2.5 table.sort()s one), but a build whose
+    --- binding handed back an indexable container instead must still be filtered,
+    --- not waved through. Anything that cannot be read that way is returned as the
+    --- engine gave it.
+    --- @param list any
+    --- @return any
+    local function withoutWaterFx(list)
+        if list == nil then
+            return list
+        end
+        local ok, kept, hidden = pcall(splitWaterFx, list)
+        if not ok or hidden == 0 then
+            return list
+        end
+        stats.waterFxHidden = stats.waterFxHidden + hidden
+        if not waterFxLogged then
+            -- Once a floor, so a capture shows it was in force. The two machines may
+            -- well print DIFFERENT counts here, and that difference is the reason.
+            waterFxLogged = true
+            local desyncLog = rawget(_G, "DesyncLog")
+            if desyncLog ~= nil and desyncLog.event ~= nil then
+                pcall(desyncLog.event, "hid %d water-surface effect(s) from the hosted"
+                    .. " mod's ON.LEVEL: the liquid makes them after generation, and not"
+                    .. " the same on every machine", hidden)
+            end
+        end
+        return kept
+    end
+
+    --- Is a query made right now one whose answer must leave them out? The callers
+    --- test `liquidWindow` first: these wrap queries 2.5 makes many times a frame,
+    --- and outside ON.LEVEL that one upvalue is all they should cost.
+    --- @return boolean
+    local function hidingWaterFx()
+        return liquidWindow and waterFx ~= nil and isActive()
+    end
+
+    --- The engine's function the mod would otherwise get. rawget, both times: the
+    --- sandbox's read-through counts every name it cannot find as an unknown global
+    --- the mod asked for, and a build without one of these is ours to probe for,
+    --- not the mod's.
+    --- @param name string
+    --- @return function?
+    local function engineQuery(name)
+        local f = rawget(env, name)
+        if f == nil then
+            f = rawget(_G, name)
+        end
+        if type(f) == "function" then
+            return f
+        end
+        return nil
+    end
+
+    --- Wrap one of the engine's entity queries. `typeAt` and `maskAt` are the
+    --- positions of its type and mask arguments. Feature-detected: a build without
+    --- the function simply has nothing to wrap.
+    --- @param name string
+    --- @param typeAt integer
+    --- @param maskAt integer
+    local function hideWaterFxFrom(name, typeAt, maskAt)
+        local real = engineQuery(name)
+        if real == nil then
+            return
+        end
+        env[name] = function(...)
+            if liquidWindow and hidingWaterFx() then
+                local types = (select(typeAt, ...))
+                local mask = (select(maskAt, ...))
+                if typesMayHoldWaterFx(types) and maskMayHoldFx(mask) then
+                    return withoutWaterFx(real(...))
+                end
+            end
+            return real(...)
+        end
+    end
+    hideWaterFxFrom("get_entities_by", 1, 2)
+    hideWaterFxFrom("get_entities_at", 1, 2)
+    hideWaterFxFrom("get_entities_overlapping_hitbox", 1, 2)
+    hideWaterFxFrom("get_entities_overlapping", 1, 2)
+
+    -- get_entities_by_type takes its types as the arguments themselves, or as one
+    -- table of them, and has no mask
+    local realByType = engineQuery("get_entities_by_type")
+    if realByType ~= nil then
+        env.get_entities_by_type = function(...)
+            if liquidWindow and hidingWaterFx() then
+                local first = ...
+                local types = type(first) == "table" and first or { ... }
+                if typesMayHoldWaterFx(types) then
+                    return withoutWaterFx(realByType(...))
+                end
+            end
+            return realByType(...)
+        end
+    end
+
+    --- ...and whatever a hosted mod DRAWS at ON.LEVEL stays there.
+    ---
+    --- POST_LEVEL_GENERATION is anchored (below) and ON.LEVEL was not, though it too
+    --- fires once per floor at the same state on every machine, and it is where mods
+    --- decorate the level they were given. One callback there that reads anything
+    --- machine-dependent and rolls on it -- the swamp's lily pads, above -- drew the
+    --- shared streams a different number of times on each machine, and every roll
+    --- after it, the engine's own included, landed somewhere else. The Wheel of
+    --- Fortune's coin was one of them, and it was flipped frames later, in
+    --- POST_UPDATE, by a hook that had read nothing machine-dependent at all.
+    ---
+    --- Anchored, each callback starts from the floor's lockstep-identical base and
+    --- the engine's streams are put back afterwards, so whatever one callback draws,
+    --- nothing after it can tell. In a room only: alone, the mod's rolls carry on
+    --- from the engine's streams exactly as they always did.
+    --- @param cb function
+    --- @return function
+    local function levelAnchored(cb)
+        local anchored = module.anchor(cb, floorBase)
+        return function(...)
+            if not isActive() then
+                return cb(...)
+            end
+            stats.levelAnchored = stats.levelAnchored + 1
+            return anchored(...)
+        end
+    end
+
+    --- A hosted mod's update callbacks run once per SIMULATED frame.
+    ---
+    --- ON.PRE_UPDATE and ON.POST_UPDATE fire once per rendered frame, and that
+    --- includes every frame the lockstep gate holds the world still while it waits
+    --- for another machine's inputs: dev44's leak sweep was seen re-running on every
+    --- frame of a stall. The engine does not tick on those frames, so for the mod's
+    --- own logic they do not exist -- yet its callbacks ran on them, and how many
+    --- there are is a property of the network, different on every machine. 2.5's
+    --- Wheel of Fortune turns one step per POST_UPDATE, so on the machine that
+    --- stalled more the wheel would stop, and pay out, on an earlier frame. The same
+    --- shape is in its swamp water-poison count, in the push its monkey propeller
+    --- adds before physics, and in every everyNthFrame wrapper it has.
+    ---
+    --- So on a held frame the mod's update callbacks are not called at all, for the
+    --- reason ON.FRAME is moved to ON.GAMEFRAME. Every other frame is untouched,
+    --- including the engine's own pauses, which the mod sees and handles itself.
+    --- @param cb function
+    --- @return function
+    local function simulatedOnly(cb)
+        return function(...)
+            if heldFrame() then
+                stats.heldSkips = stats.heldSkips + 1
+                return
+            end
+            return cb(...)
+        end
+    end
+
     local hostSetCallback = rawget(env, "set_callback") or set_callback
 
     env.set_callback = function(cb, id)
@@ -485,8 +757,13 @@ function module.install(env, opts)
             cb = module.anchor(cb, loadBase)
         elseif id == ON.LEVEL then
             -- whatever the mod decides at ON.LEVEL from the water, it decides from
-            -- the same water on every machine (see liquidSnap)
-            cb = liquidWindowed(cb)
+            -- the same water on every machine (see liquidSnap and waterFx), and
+            -- whatever it draws there stays there (see levelAnchored)
+            cb = levelAnchored(liquidWindowed(cb))
+        elseif (ON.PRE_UPDATE ~= nil and id == ON.PRE_UPDATE)
+            or (ON.POST_UPDATE ~= nil and id == ON.POST_UPDATE) then
+            -- once per SIMULATED frame, like ON.FRAME above (see simulatedOnly)
+            cb = simulatedOnly(cb)
         end
         return hostSetCallback(cb, id)
     end
@@ -507,15 +784,6 @@ function module.install(env, opts)
         end
         lastRunSeed = first
     end
-
-    -- Determinism is for AGREEING WITH ANOTHER MACHINE. Outside a room there is no
-    -- other machine, and forcing it there is not neutral -- it is a bug the player
-    -- sees: seeding the mod's `math.random` from the floor base every floor made
-    -- every single 1-1 come out with the same level feeling, run after run, in
-    -- ordinary single-player. Hosting a mod must not change how it plays alone.
-    --
-    -- Defaults to always-on so the tests, which have no network, keep exercising it.
-    local isActive = opts.active or function() return true end
 
     local function onLoading()
         clock.invalidate()
@@ -554,6 +822,7 @@ function module.install(env, opts)
     local function snapshotLiquid()
         liquidSnap = nil
         stats.liquidTiles = 0
+        waterFxLogged = false -- a new floor: say it again the first time it happens
         if not ownLevels or not isActive() or type(realIsLiquidAt) ~= "function" then
             return
         end

@@ -1,5 +1,130 @@
 # Changelog
 
+## 2.0.0-dev75
+
+The 2.5 swamp desync. In room BGNY (on dev73), the two machines built different shops
+on 2-1: one kept the dice house, the other turned it into 2.5's new Wheel of Fortune.
+No server change: the server stays at **1.0.13**. Both players must be on dev75,
+because what a hosted mod sees at ON.LEVEL and on a stalled frame changes, and the
+two machines have to agree on it.
+
+### What the capture showed
+
+- **1-1 to 1-4 matched,** and 2-1 generated identically: the seed and all ten PRNG
+  streams were equal at `gen[pre]` and `gen[post]`.
+- **At the first frame of 2-1, the floors differed in four entity types:**
+  - the host: `ITEM_DICE_BET`=1, `ITEM_DIE`=2, `ITEM_CONSTRUCTION_SIGN`=1, `ITEM_LEAF`=7;
+  - the peer: `ITEM_DICE_BET`=0, `ITEM_DIE`=0, `ITEM_CONSTRUCTION_SIGN`=2, `ITEM_LEAF`=8.
+- **That is the Wheel of Fortune.** Converting a dice shop removes the bet machine and
+  both dice, and adds an invisible construction sign (`hooks/wheelOfFortune.lua`). The
+  peer had a Wheel House; the host still had the dice game.
+- **Then:** a `POSITION DESYNC` at `9:2760`, a `FLOOR DESYNC` on 2-2, and a resync warp
+  to 2-3.
+
+### Why the shop differed
+
+Whether a dice shop becomes a wheel is a coin, `prng:random_int(0, 1,
+PROCEDURAL_SPAWNS)`, flipped on the first playable POST_UPDATE. The hook reads
+nothing machine-dependent. The stream it draws from had already moved, and the extra
+`ITEM_LEAF` says where.
+
+- **2.5's swamp lily pads are `ITEM_LEAF`** (`hooks/swamp/water.lua`), placed at
+  ON.LEVEL on the engine's `FX_WATER_SURFACE` effects.
+- **Those effects are not part of the generated world.** The liquid system makes them
+  after generation, out of water its worker threads are already moving; the HD mod's
+  author pinned them to between POST_LEVEL_GENERATION and ON.LEVEL. So at ON.LEVEL
+  the two machines hold different sets of them.
+- **Each one costs draws on `PROCEDURAL_SPAWNS`.** The pads shuffle every surface
+  effect (one draw each) and roll a one-in-five chance on each well-spaced one. One
+  more surface effect on the peer meant one more pad, and a moved stream for
+  everything drawn after it.
+- **The coin is drawn from that same stream.** `PROCEDURAL_SPAWNS` is class 0, the
+  level-generation stream, so the coin landed the other way.
+
+This is the gap HANDOFF section 10 left open: dev65's snapshot answers `is_liquid_at`,
+and these are entities. The HD mod's procedural lily pads, and the frogs it puts on
+them, read the same effects.
+
+### Fixed: what a hosted mod sees at ON.LEVEL
+
+Both changes apply in a room only; playing alone is unchanged.
+
+- **No water-surface effects during ON.LEVEL.** Inside a hosted mod's ON.LEVEL
+  callbacks, `get_entities_by`, `get_entities_by_type`, `get_entities_at` and
+  `get_entities_overlapping_hitbox` leave `FX_WATER_SURFACE` out. Every machine sees
+  none, and builds the same floor. Gameplay, and every other callback, still gets the
+  engine's own answer.
+  - The cost: no swamp lily pads in 2.5 online, and in the HD mod's jungle no
+    procedural lily pads or frogs on them. Both are decoration.
+  - A query that cannot return them (another type, or a mask without `MASK.FX`) is
+    passed straight through.
+- **ON.LEVEL is anchored,** as POST_LEVEL_GENERATION already was. Each hosted ON.LEVEL
+  callback starts from the floor's lockstep-identical base, and the engine's streams
+  are put back afterwards, so nothing after it can tell what it drew. On this capture
+  that alone would have kept the coin the same.
+- **An anchor restores the streams even when its callback throws.** It used to skip
+  the restore and leave our seed in force for the rest of the floor.
+
+### Fixed: the wheel would turn on frames that did not happen
+
+Found reading the wheel's code, not in the capture: nothing in it shows anyone using
+the wheel.
+
+ON.PRE_UPDATE and ON.POST_UPDATE fire once per rendered frame. That includes every
+frame the lockstep gate holds the world still while it waits for the other machine.
+The engine does not tick on those frames, but a hosted mod's callbacks still ran on
+them, and how many there are depends on each machine's network.
+
+- **2.5's wheel turns one step per POST_UPDATE,** so on the machine that stalled more
+  it would stop, and pay out or open the prize cubby, on an earlier frame.
+- **The same shape is elsewhere in 2.5:** the swamp's three-second water-poison count,
+  the push the monkey propeller adds before physics, and every `everyNthFrame`
+  wrapper.
+- **Now** a hosted mod's PRE_UPDATE and POST_UPDATE callbacks are not called on a frame
+  the gate held (`InputSync.heldFrame()`), for the same reason ON.FRAME has long been
+  moved to ON.GAMEFRAME. Every other frame is untouched, including the engine's own
+  pauses, which the mod sees and handles itself.
+
+### Fixed: the menu pause through a fade
+
+Also found reading the code. The gate clears the local menu pause (a player in their
+pause menu, or tabbed out) on its own frames, so the shared world keeps running. It
+never did during a fade. A tabbed-out player would still have the flag up on the frame
+a level finishes fading in, and that frame's POST_UPDATE is where the wheel decides,
+gated on `pause == 0`: that machine would decide a frame later, from a different
+stream. The flag is now cleared during a run's fades too. Only that flag: the engine's
+own fade pause stands.
+
+### The floor block shows the streams at engage
+
+Each floor's block in the desync log now has a `prng:` line, with all ten streams as
+the gate engaged, in the `gen[...]` lines' form. `gen[post]` shows generation drew the
+same on both machines; this shows whether everything after it did too. On this
+capture the two would have disagreed while `gen[post]` matched, pointing straight past
+the level generator.
+
+### Tests
+
+- **`tests/test_swamp_wheel_desync.py`:** the 2-1 capture, on two machines that differ
+  only in their waterline, with a PRNG that keeps real state. Over 120 seeds they build
+  the same shop every time; without the fix the coin lands differently on more than a
+  sixth of them. Also covered:
+  - every way of asking for the effects;
+  - a query that cannot hold them is not touched;
+  - solo play is unchanged;
+  - the once-a-floor log line;
+  - an answer that comes back as a container rather than a table, and one that
+    cannot be read at all;
+  - a throwing callback;
+  - the anchor's base does not depend on callback order.
+- **`tests/test_held_frames.py`:** a machine that stalled turns the wheel no further
+  than one that did not; PRE_UPDATE is shielded too and keeps its return value; the
+  gate's `heldFrame()`; the menu pause through a fade, run against the shipped
+  `preUpdate`.
+- **`tests/test_floor_block.py`:** the `prng:` line.
+
+29 deliberate breaks of the above are each caught.
+
 ## 2.0.0-dev74
 
 The camp lobby's puppets, working. In dev73's first test with two players, neither

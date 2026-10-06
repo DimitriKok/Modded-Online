@@ -217,7 +217,14 @@ in the logs behind it. Carry these into the sandbox, do not reinvent them:
 - `get_frame` / `get_ms` derived from `state.time_total`, carrying elapsed time forward
   across a restart rather than jumping. Both failure directions have been seen: the HD
   mod's music faded for minutes one way and overlapped the other.
-- The per-hook PRNG save / anchor / restore around generation callbacks.
+- The per-hook PRNG save / anchor / restore around generation callbacks, and since
+  dev75 around ON.LEVEL too.
+- In a room, a hosted mod's ON.LEVEL sees no `FX_WATER_SURFACE` effects. The liquid
+  makes them after generation, differently on each machine, and 2.5's swamp lily pads
+  drew the shared stream once per effect (HANDOFF section 17).
+- A hosted mod's PRE_UPDATE and POST_UPDATE are skipped on frames the lockstep gate
+  held. They fire per rendered frame, so anything a mod counts in them counts the
+  network.
 - Callback ordering. In the shim this was fragile because the payload was a guest.
   Inside our own state we own registration order outright — that whole hazard class
   goes away, and it should not be recreated.
