@@ -403,6 +403,14 @@ def package() -> int:
         "mo_fatal_calls.txt",    # engine calls that crash THAT machine, per machine
         "mo_notextures.on",      # that machine's escape hatch, per machine
         "mo_profile.off",        # a diagnostic someone switched OFF, per machine
+        "mo_menuprobe.on",       # the menu probe, armed for one machine's capture
+        "mo_menuprobe.on.txt",   # ...as Windows Explorer names it
+        "mo_menuprobe.txt",      # ...and what it wrote there
+        "mo_nomenuhook.on",      # that machine's main menu escape hatch
+        "mo_nomenuhook.on.txt",
+        "mo_novanillaui.on",     # that machine's switch back to the GUI look
+        "mo_novanillaui.on.txt",
+        "mo_vanillaui.txt",      # its first-draw breadcrumb
         "mo_patched_textures.txt",  # vanilla atlases WE made Playlunky rewrite
         ".mo_source",            # which mod a mirrored folder was built from
         "mo_assets_from.txt",    # which mod the copied files came from

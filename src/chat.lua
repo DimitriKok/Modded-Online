@@ -250,8 +250,27 @@ local function currentTypers()
     return out
 end
 
+--- What the chat shows, as of the last GUI frame, for the game's look to draw
+--- (vanillaChat). `active` is false whenever the chat is not on screen at all.
+local view = { active = false, shown = {}, now = 0, typing = false, typingText = nil }
+
+--- A message's opacity, 0..255: fully there while typing, fading out at the end of
+--- its time otherwise.
+--- @return integer
+local function messageAlpha(m, now)
+    if typing then
+        return 255
+    end
+    local remaining = MESSAGE_TTL_MS - (now - m.at)
+    if remaining < FADE_MS then
+        return math.max(0, math.floor(255 * remaining / FADE_MS))
+    end
+    return 255
+end
+
 --- @param ctx GuiDrawContext
 local function guiFrame(ctx)
+    view.active = false
     if Network == nil or not Network.isActive() then
         if typing then
             typing = false
@@ -268,8 +287,14 @@ local function guiFrame(ctx)
         return
     end
 
-    -- input
-    if typing then
+    -- input. Not while one of the menu's popups is up (RESTART REQUIRED can show in
+    -- the camp): ENTER would answer it and send the line at the same time, and T
+    -- would open the box behind it.
+    local popupUp = NetMenuUI ~= nil and NetMenuUI.popupVisible ~= nil
+        and NetMenuUI.popupVisible()
+    if popupUp then
+        -- the box stays as it was; the popup has the keys
+    elseif typing then
         pcall(function() get_io().wantkeyboard = true end) -- keep the game off our keys
         pollTyping()
         if pressed(KEY.RETURN) then
@@ -303,15 +328,32 @@ local function guiFrame(ctx)
             if #shown >= MAX_VISIBLE then break end
         end
     end
+    -- "someone is typing" notice. currentTypers allocates a table and sorts it;
+    -- with nothing to prune and nobody typing there is nothing for it to do.
+    local typers = NO_TYPERS
+    if next(remoteTyping) ~= nil then
+        typers = currentTypers()
+    end
+    local typingText = nil
+    if #typers == 1 then
+        typingText = typers[1] .. " is typing..."
+    elseif #typers == 2 then
+        typingText = typers[1] .. " and " .. typers[2] .. " are typing..."
+    elseif #typers > 2 then
+        typingText = "Several players are typing..."
+    end
+
+    -- the game's look draws this frame's chat (vanillaChat); the ImGui version below
+    -- only while it is not
+    view.active, view.shown, view.now, view.typing, view.typingText =
+        true, shown, now, typing, typingText
+    if VanillaUI ~= nil and VanillaUI.serving("chat") then
+        return
+    end
+
     for idx, m in ipairs(shown) do
         local y = MSG_BASE_Y + (idx - 1) * MSG_LINE_H -- idx 1 (newest) at the bottom
-        local alpha = 255
-        if not typing then
-            local remaining = MESSAGE_TTL_MS - (now - m.at)
-            if remaining < FADE_MS then
-                alpha = math.max(0, math.floor(255 * remaining / FADE_MS))
-            end
-        end
+        local alpha = messageAlpha(m, now)
         local name = nameOf(m.slot)
         -- draw the whole line, then overdraw just the name in gold at the SAME
         -- spot. No width measurement (draw_text_size was unreliable here and put
@@ -320,22 +362,8 @@ local function guiFrame(ctx)
         ctx:draw_text(-0.98, y, 18, name .. ":", rgba(255, 206, 92, alpha))
     end
 
-    -- "someone is typing" notice. currentTypers allocates a table and sorts it;
-    -- with nothing to prune and nobody typing there is nothing for it to do.
-    local typers = NO_TYPERS
-    if next(remoteTyping) ~= nil then
-        typers = currentTypers()
-    end
-    if #typers > 0 then
-        local text
-        if #typers == 1 then
-            text = typers[1] .. " is typing..."
-        elseif #typers == 2 then
-            text = typers[1] .. " and " .. typers[2] .. " are typing..."
-        else
-            text = "Several players are typing..."
-        end
-        ctx:draw_text(-0.98, INDICATOR_Y, 16, text, rgba(178, 158, 128, 210))
+    if typingText ~= nil then
+        ctx:draw_text(-0.98, INDICATOR_Y, 16, typingText, rgba(178, 158, 128, 210))
     end
 
     -- input line while composing, else a faint discovery hint
@@ -367,6 +395,39 @@ local function suppressCampInput()
             end
         end)
     end
+end
+
+--- The chat in the game's own font (src/vanillaUI.lua), from what the last GUI frame
+--- showed: the messages bottom-left with the names in gold, who is typing, and the
+--- line being written in the game's text-entry bar.
+local function vanillaChat(ctx, _screen)
+    if not view.active then
+        return false
+    end
+    -- sizes are capital heights (see vanillaUI)
+    local y = 928
+    for _, m in ipairs(view.shown) do
+        local a = messageAlpha(m, view.now) / 255
+        local name = nameOf(m.slot)
+        VanillaUI.shadowText(ctx, name .. ": " .. m.text, 20, y, 17, "row", "left", "bold", a)
+        VanillaUI.text(ctx, name .. ":", 20, y, 17, "gold", "left", "bold", a)
+        y = y - 30
+    end
+    if view.typingText ~= nil then
+        VanillaUI.shadowText(ctx, view.typingText, 20, 962, 14, "dim", "left", "bold")
+    end
+    if view.typing then
+        VanillaUI.nine(ctx, "entry_bar", 14, 990, 1300, 1030, 8)
+        VanillaUI.text(ctx, "Say: " .. buffer .. "_", 30, 1010, 17, "gold", "left", "bold")
+        VanillaUI.text(ctx, "Say:", 30, 1010, 17, "dim", "left", "bold")
+    elseif #view.shown == 0 and view.typingText == nil then
+        VanillaUI.shadowText(ctx, "[T] chat", 20, 1012, 13, "dim", "left", "bold", 0.45)
+    end
+    return true
+end
+
+if VanillaUI ~= nil and VanillaUI.layer ~= nil then
+    VanillaUI.layer("chat", 30, vanillaChat)
 end
 
 Network.onEvent("chat", onChat)

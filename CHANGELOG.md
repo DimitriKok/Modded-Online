@@ -1,5 +1,481 @@
 # Changelog
 
+## 2.0.0-dev73
+
+The other players in the camp lobby. No server change: the server stays at
+**1.0.13**.
+
+### Everyone in the camp, before the run
+
+Until now the camp was each player alone: the run is in lockstep, but the camp isn't,
+so a room of four showed each player only their own spelunker until the host started
+the run. Now every player in the camp sees the others there:
+
+- climbing down the entry rope when they arrive;
+- walking, jumping and climbing about the camp, facing the way they face;
+- in their own character, with their name above them.
+
+New `src/campPuppets.lua`. Each machine sends where its spelunker is and how it is
+posed, and every other machine in the camp draws that player as a PUPPET.
+
+**A puppet is a picture, not a player:**
+
+- **What it is:** an item (`ITEM_ROCK`) wearing the player's character sheet, posed
+  with their animation frame, at the player's size and draw depth.
+- **What it can't do:** its physics are paused, and it passes through everything. It
+  can't be picked up, whipped, stomped or hurt.
+- **What can't see it:** it is in no player list, so the HUD, the camera, the camp's
+  NPCs, the door ready-check and the hosted mods' player hooks don't see it.
+- **What it doesn't show:** held items, the whip and back items. It's the body only.
+
+**The stream:**
+
+- **The channel:** packets go on the unreliable world channel, which the server
+  already relays to the room in the lobby. No server change. The reliable event
+  channel isn't used: it keeps every event for the life of the room, and positions
+  would grow it without end and stall the chat behind them.
+- **What and how often:** position, animation frame, facing, layer and character, up
+  to 20 times a second while something changes. While a player stands still, a
+  keepalive every 0.4 s. Positions are rounded to 1/100 of a tile.
+- **The other end:** the puppet follows smoothly, and snaps across anything over 3
+  tiles (a teleport). It is taken away when its player leaves the camp (they say so),
+  leaves the room, or hasn't been heard from for 3 s.
+- **Paused games:** sending is done from the GUI frame, so a player with their pause
+  menu open keeps their puppet up on everyone else's screen.
+- **Layers:** a player in the camp's other layer is out of sight, along with their
+  name tag.
+- **Name tags:** drawn in the game's font, with the old look as the fallback, like the
+  rest.
+
+### The run is never touched
+
+Puppets exist only in the camp, outside any run:
+
+- None is spawned while the camp fades.
+- They're destroyed in the camp the moment the run starts, before its first level
+  exists.
+- They're forgotten when the camp is torn down (PRE_LEVEL_DESTRUCTION, a screen
+  change), without touching an entity, because their uids are about to be given out
+  again.
+- A puppet's uid is checked every update to still be one of ours: the entity type and
+  a marker in its `user_data`. A uid the engine has recycled is never written to.
+- The camp already differs on every machine (each one's own movement, save and NPCs),
+  so this adds nothing new for the run start to reset.
+
+### netCore
+
+`Network.onWorldKind(kind, handler)` takes one kind of world datagram ahead of the
+general handler, so the puppets don't go through the run's world-sync code.
+
+### Tests
+
+`tests/test_camp_puppets.py` (new) checks:
+
+- **sending:** what is sent, at most 20 a second, the keepalive, never outside the
+  camp lobby or in a run, the "gone" packet;
+- **the puppet:** spawned in the right sheet, size, depth, frame and facing;
+  untouchable; following smoothly and snapping across a teleport;
+- **the layer:** out of sight from the other one;
+- **removal:** the stale, departed and gone cases; no puppet of ourselves; an unknown
+  character drawn as Ana;
+- **the run:** no puppet outside the camp or during the fade, destroyed as the run
+  starts, a torn-down camp leaving no handle on its uids, a recycled uid never written
+  to;
+- **the rest:** the name tag above the puppet, and netCore's routing of the datagram.
+
+Fifteen deliberate breaks of the new code are each caught by at least one test.
+
+## 2.0.0-dev72
+
+The MODDED ONLINE menu in the main menu's own font. No server change: the server
+stays at **1.0.13**.
+
+### The main menu's font and casing
+
+The main menu draws Play, Online, Options and the rest in the game's italic style,
+in Title Case. The MODDED ONLINE menu and its popups now do the same:
+
+- **The font:** every line of the page and its popups is in the italic style: the
+  title, the rows, their values, the text fields, the hints and the popups' text. The
+  sizes are unchanged.
+- **The casing:** the rows, their values and the popups' buttons are in Title Case,
+  as the main menu writes its own. "HIDE ROOM CODE  OFF" reads "Hide Room Code  Off",
+  and "I UNDERSTAND" reads "I Understand".
+  - "IP" and "OK" stay in capitals.
+  - A value with lowercase in it is left as it is ("1 file(s) synced").
+  - The title on the scroll stays in capitals, as a heading.
+  - The popups' titles are drawn as written ("Restart Required").
+- **Unchanged:** the camp plaque, WAITING FOR PLAYERS, the character-select room
+  code, the run status line and chat keep the bold upright style, which is what the
+  game uses in a level.
+- **The old look** (the fallback) is unchanged, in capitals.
+
+### Tests
+
+`tests/test_vanilla_ui.py` checks that the menu and popups are in the italic style,
+that the in-level text is bold, and the Title Case rules. Three more deliberate
+breaks are each caught: the menu back in bold, no Title Case, and the popups'
+buttons in capitals.
+
+## 2.0.0-dev71
+
+The game's look at the right size. dev70's first screenshots showed everything drawn
+correctly, and every line of text about 1.7 times too big. No server change: the
+server stays at **1.0.13**.
+
+### Fixed: the text was 1.7 times too big
+
+vanillaUI measures the game's font once, from the quads the game lays out for an "H".
+Those quads are tight around the capital, so what they give is the height of a
+capital. dev70 took it for the whole glyph cell (the line height) and sized every line
+for that. "MATCHMAKING", asked for at 44, had capitals 45 px tall.
+
+Every size is now the height of a capital, in 1080p pixels, taken from the mockup the
+layout was drawn on:
+
+- the title on the scroll: 44;
+- the rows and their values: 24 (25 for the selected row);
+- the button hints: 22;
+- popup text: 22, with the title at 32 and the buttons at 25;
+- the camp plaque: 20, 15 and 17;
+- chat: 17;
+- the run status line: 15.
+
+The vertical centring was already right and is unchanged.
+
+### Fixed: the hints ran into each other
+
+On SETTINGS, "LEFT / RIGHT  Change" was drawn over both "ESC / B  Back" and "Z / A
+Select". The middle hint now gets the space between the other two and is shrunk to fit
+it.
+
+### Fixed: arrows on SYNC SAVE DATA
+
+The gold arrows were drawn on any selected row with a value. SYNC SAVE DATA has a
+result to show but nothing to step through. They now appear only where LEFT and RIGHT
+change the value, and a value without them gets more room ("1 file(s) synced" was
+squeezed small).
+
+### Plaques fit their text
+
+The camp plaque, WAITING FOR PLAYERS and the character-select room code are as wide as
+their widest line, within limits, instead of a fixed width.
+
+### Tests
+
+`tests/test_vanilla_ui.py` checks that sizes are capital heights, that the middle hint
+stays between the other two, that the arrows only appear on rows that change, and that
+a plaque grows with its text. Forty-four deliberate breaks of the menu work are each
+caught by at least one test.
+
+## 2.0.0-dev70
+
+The MODDED ONLINE menu now looks like the game's own OPTIONS screen. So do its
+popups, the camp plaque, the character-select room code, the run's status line and
+chat. No server change: the server stays at **1.0.13**.
+
+### The look
+
+Everything is drawn with the game's renderer (`set_post_render_screen`,
+`ON.RENDER_POST_HUD`), from the game's own menu sprite sheets, in the game's font
+(new `src/vanillaUI.lua`):
+
+- **The menu page:**
+  - the OPTIONS screen's layered brick walls (`menu_generic`, `menu_brick2`,
+    `menu_brick1`);
+  - the wood panel along the top, with the parchment scroll across it carrying the
+    page's title;
+  - the rows on the dark wall, the selected one on the red options bar;
+  - a setting's value between the gold arrows, and text fields in the game's
+    text-entry bar;
+  - the ringed bottom panel with the button hints, and the connection status or
+    error in its middle.
+- **Popups:** the game's wood-framed panel, drawn in nine pieces so its border keeps
+  its size at any height, with a gold title, the text wrapped to the frame and the
+  buttons on the red bar.
+- **Plaques:** the camp's room plaque, WAITING FOR PLAYERS and the character-select
+  room code are drawn on the game's dark torn box. The status line and chat get a
+  shadow over the game, and the line being typed sits in the text-entry bar.
+- **The page fades in** over 0.15 s when it opens.
+
+Where it comes from:
+
+- **The sprite rectangles** were measured on the sheets themselves, extracted from
+  `Spel2.exe` with the new `tools/extract_menu_sheets.py`.
+- **The sheet sizes** are the ones the menu probe read back in game. If a sheet
+  isn't that size, for example because a texture mod laid it out differently, the
+  old look is kept and the log says which sheet.
+- **The text:** the script API doesn't say whether the y given to `draw_text` is the
+  top, middle or baseline of the text, so it's measured once from the glyphs the
+  game lays out, and every line is centred on its row with that.
+
+### Always a way back
+
+The old look stays as the automatic fallback. It's drawn instead whenever the game's
+look isn't actually drawing:
+
+- before the render callbacks have run;
+- if they stop;
+- for a layer that raised an error. That layer stays on the old look for the session,
+  and the error is logged once.
+
+The first vanilla draw of each session is bracketed by a breadcrumb,
+`mo_vanillaui.txt`, like modHost's `mo_fatal_calls.txt`. A session that died inside
+that first draw leaves `drawing` behind, and from then on the old look is used until
+the file is deleted. `mo_novanillaui.on` forces the old look.
+
+### Fixed: the menu closed itself during HOST
+
+In dev69's test, hosting closed the CONNECTING page with `no GUI frame for 7698 ms`.
+The whole game had frozen for 7.7 s while the bridge launched, and the first update
+afterwards ran before the first GUI frame. The watchdog took that for a menu nobody
+could see. It now tells the two apart: a gap in the updates themselves means the whole
+game was away, and the menu stays.
+
+### Tests
+
+- `tests/test_vanilla_ui.py` (new) checks:
+  - the page is drawn from the right sheets in the right order;
+  - the title, the rows, the hints, the moving red bar and the flipped arrow;
+  - rectangles cut where they were measured;
+  - text centred on its line whatever the font does;
+  - long labels shrunk to fit;
+  - the fallback before the render calls run and after they stop, and for a failed
+    layer;
+  - the flag file, a sheet of another size, and the breadcrumb both ways;
+  - popups in nine pieces with their text wrapped and unchanged;
+  - the camp plaque, the run status line and chat.
+- `tests/menu_stub.py`: a recording renderer, texture definitions, quads and a font
+  whose glyphs sit somewhere other than where they are drawn.
+- `tests/test_menu_takeover.py`: the GUI stopping while the game runs closes the menu.
+  The whole game freezing doesn't.
+
+Forty deliberate breaks of the new code are each caught by at least one test: the 27
+of dev69, and 13 more of the look and the watchdog.
+
+## 2.0.0-dev69
+
+The fix for dev68's main menu takeover, which switched itself off on the first
+press. No server change: the server stays at **1.0.13**.
+
+### Fixed: MODDED ONLINE switched itself off on the first press
+
+In the first test, MODDED ONLINE showed on the main menu. The first press on it
+opened something for a moment, then the row read ONLINE again and only the `[O]` key
+was left. The desync log said why:
+
+> main menu takeover: OFF -- the game opened its own Online menu after a press that
+> was swallowed
+
+That is the self-check working as meant. The mistake was where the press was
+swallowed.
+
+- **What dev68 did:** it hid the menu input in PRE_UPDATE and put the device's value
+  back at POST_UPDATE. That is right for a transition, which is where inputSync syncs
+  it.
+- **Why that failed:** the main menu doesn't read its input between those two. Either
+  it reads before PRE_UPDATE, so the hiding came too late, or after POST_UPDATE, so
+  the put-back value handed it the very press we had hidden. Either way the game's
+  menu took the press.
+- **Now, the write point:** the input is read and hidden in `ON.POST_PROCESS_INPUT`,
+  straight after the game builds it. The script API names that callback as the place
+  to edit menu input.
+- **Now, no put-back:** nothing is ever put back. Whatever reads the input after
+  that, wherever it sits in the frame, reads our zero. The release latch already
+  keeps swallowing a button that is still held when we let go, which was the only
+  reason for the put-back.
+- **Belt and braces:** PRE_UPDATE hides the input again if anything refilled it
+  before the update. On the main menu its own direction flags
+  (`screen_menu.controls`) are cleared too.
+- **A build without POST_PROCESS_INPUT:** PRE_UPDATE does it all, still without the
+  put-back.
+
+The case that can't work from where we are is now reported instead of failing
+quietly. That is a SELECT on the ONLINE row arriving when the menu is already on its
+way to Online, which means the game read the press before our callback ran. It
+switches the takeover off with `the game took the press before ... ran`.
+
+### Fixed: the probe's flag file, as Windows names it
+
+The first attempt to arm the menu probe made `mo_menuprobe.on.txt`. Windows Explorer's
+New > Text Document does that, and with file extensions hidden it shows as
+`mo_menuprobe.on`. The probe looked for the exact name only, so it never armed.
+`mo_menuprobe.on` and `mo_nomenuhook.on` now count under either name. `.gitignore`
+and the packaging script leave the `.txt` names out too.
+
+### Better failure lines
+
+The self-check's line now says which callback did the swallowing, the menu's state
+at the press, and what the menu was doing when the game turned out to have taken it.
+For example: `(in POST_PROCESS_INPUT, at menu state 7; 32 ms later the menu was id
+0, state 8, moving to 2)`. A second failure would explain itself without a probe
+session.
+
+### On the clock
+
+The repeat for a held direction (0.3 s, then every 70 ms) and the takeover's
+time-outs now count milliseconds, not calls. How often the input callback runs, per
+engine update or per display frame, is not known yet, and the menu should feel the
+same either way.
+
+### The probe says where in a frame the menu moves
+
+`mo_menuprobe.on` now also writes down:
+
+- the order its callbacks run in on the main menu, once;
+- `menu moved between X and Y`: the two callbacks the main menu's state changed
+  between. That is where the menu really reads its input;
+- the input refilled before PRE_UPDATE, or changed during the update, if either ever
+  happens.
+
+The input it logs is taken in POST_PROCESS_INPUT, before anything of ours touches it.
+
+### Tests
+
+- `tests/menu_stub.py`: the stub's main menu can read its input at any of four places
+  in a frame, can linger in its highlight state before moving on, and can have its
+  input filled a second time before the update.
+- The takeover is tested in every combination of those:
+  - SELECT opens our menu and never the game's;
+  - BACK never reaches the game's menu;
+  - VANILLA ONLINE reaches the game;
+  - the input stays hidden while our menu is up.
+- Also new:
+  - nothing is put back, and the menu's direction flags are cleared;
+  - the PRE_UPDATE fallback works;
+  - a press taken before our callback is reported, with the [O] chip back;
+  - the repeat rate doesn't change with the call rate;
+  - the failure line carries its detail;
+  - the probe says where the menu moved, and writes the callback order once.
+
+Twenty-seven deliberate breaks of the new code are each caught by at least one test.
+The first of them puts the swallow back in PRE_UPDATE.
+
+## 2.0.0-dev68
+
+MODDED ONLINE moves into the game's own main menu, and the menu answers a
+controller. It still looks as it did: the game-styled look comes next, once the new
+menu probe has measured the game's own sprites in game. No server change: the server
+stays at **1.0.13**.
+
+### MODDED ONLINE is the main menu's ONLINE row
+
+The game keeps its main-menu rows in a list the script API doesn't expose, so a row
+can't be added. The ONLINE row is taken over instead (`src/mainMenuHook.lua`).
+
+- **The label:** the row reads MODDED ONLINE on the main menu, in the game's casing.
+  Everywhere else it's the game's own text: on other screens, in the game's Online
+  menu, and once the script is switched off. "Online" (string `0xa1023681`) is used
+  nowhere else, so no other text changes.
+- **SELECT on it** opens the MODDED ONLINE menu. The press is swallowed before the
+  engine's update, so the game's Online menu never opens.
+- **VANILLA ONLINE**, the last row of our root page, gives the row back. The label
+  is restored and one SELECT on that row is handed to the game, which opens its own
+  Online menu. Backing out of that menu brings MODDED ONLINE back. A Modded Online
+  room that's still open is left first, with a toast.
+- **Which row is ONLINE:** index 1. The strings and the row icons on `menu_basic`
+  are both in the order Play, Online, Options, Leaderboards, Player Profile, Quit
+  Game. If a press on another row ever opens the game's Online menu, that row is
+  used from then on, and the log says so.
+- **A language change** reloads the string table and wipes the label. It's put back
+  within a second, and the new language's text is what gets restored later.
+
+### When it can't: the [O] chip
+
+The `[O] MODDED ONLINE` chip and the O key are gone, except where the takeover can't
+install. Then they come back, and the reason goes to the desync log. That happens
+when:
+
+- a piece of the script API is missing: `change_string`, `get_string`,
+  `hash_to_stringid`, the main menu's fields, or `ON.PRE_UPDATE`;
+- the menu input can't be read or written;
+- the game opens its own Online menu after a press we swallowed. This self-check also
+  closes our menu, since both menus would answer every press from then on;
+- `mo_nomenuhook.on` is in the pack folder. That's the switch to use if the takeover
+  misbehaves.
+
+It installs on the title screen or the main menu, never during the logos, where the
+string table may not be loaded yet.
+
+### Controllers
+
+The menu and the popups now read the game's own menu input, `game_props.input_menu`
+(new `src/menuInput.lua`), so a controller works the way it does in the game's own
+menus.
+
+- **Nothing reaches the menu underneath:** while our menu or a popup is up, the input
+  is read and then zeroed in PRE_UPDATE, the write point inputSync already uses on a
+  transition. The game's menu stays where it was, highlighted on MODDED ONLINE.
+  During a run the module does nothing, because inputSync owns the field then.
+- **Held directions repeat** after about 0.3 s, counted in engine updates.
+- **The keyboard** works as before (arrows, Z, ESC), and ENTER selects too. While our
+  menu is up the keyboard is still taken from the game.
+- **Closing:** the button that closed the menu is swallowed until it's let go (up to
+  a second), so B or ESC can't also send the game's menu back to the title screen.
+- **The press that opened the menu** can't pick a row: SELECT and BACK are ignored
+  for 0.15 s after it opens.
+- **A popup over the camp or character select** also stops the spelunker while it's
+  up.
+- **A watchdog:** if no GUI frame arrives for 2 s, the menu closes and the game gets
+  its input back, so the main menu can never be left deaf behind a menu nobody can
+  see.
+
+### The menu
+
+- **No CLOSE row:** BACK closes the menu. The root page is HOST, JOIN, MATCHMAKING,
+  DISCORD and SETTINGS, plus VANILLA ONLINE with the takeover.
+- **Settings change with LEFT and RIGHT,** like the game's own options. A held LEFT
+  or RIGHT changes a setting once. SELECT still works.
+- **A CONNECTING page:** hosting, joining and matchmaking used to close the menu at
+  once. The menu now waits on a CONNECTING page (with CANCEL), shows the room once
+  it's reached (`- ROOM ABCD -`), and closes as the screen fades out for character
+  select. An error stays on the page, with BACK.
+
+### Fixed: chat and the popups shared ENTER
+
+In the camp, RESTART REQUIRED could come up while the chat box was open. ENTER then
+answered the popup and sent the line at the same time, and T opened the box behind
+it. Chat now leaves the keys alone while a popup is up.
+
+### The menu probe (new diagnostic)
+
+`mo_menuprobe.on` arms `src/menuProbe.lua`, which writes `mo_menuprobe.txt` a line at
+a time, bounded at 400 lines. It records:
+
+- which script API pieces exist, or the error when one doesn't;
+- every MENU_* texture definition;
+- the main-menu labels and the button-glyph strings;
+- the main menu's state, and the menu input as the engine filled it, as they change;
+- the OPTIONS screen's panels: where each sits, and which part of its sheet it shows;
+- engine updates per GUI frame, and which render hooks fire on each screen.
+
+Words in the flag file add modes. `draw` puts test text in the game font on the main
+menu, and on OPTIONS every MENU_* sheet with the panels outlined on it, for a
+screenshot. `capture` checks whether the game still reads the keyboard into the menu
+input while the keyboard is taken. HANDOFF section 15 says what to run.
+
+### Tests
+
+- `tests/menu_stub.py` (new, not a test file) is the shared stub. It models the
+  engine's update, the main menu, and how the game's menu answers the input its
+  update actually read.
+- `tests/test_main_menu_hook.py` (new): when a press is swallowed and when the menu
+  opens, in every menu state; the label and its casing; the hand-over to VANILLA
+  ONLINE and its time-outs; the self-checks; install, and every reason it can fail.
+- `tests/test_menu_input.py` (new): edges and repeats; the game seeing nothing while
+  our menu is up; nothing written during a run; PRE_UPDATE returning nothing; the
+  release latch; the held press that opened the menu; popups in the camp.
+- `tests/test_menu_takeover.py` (new) runs the three modules together: opening from
+  the ONLINE row, controller and keyboard navigation, VANILLA ONLINE there and back,
+  the fallback chip, the self-check, a build where ONLINE is another row, controller
+  answers to the popups, LEFT and RIGHT on settings, the CONNECTING page, the
+  watchdog, chat against a popup, and the module order in `main.lua`.
+- `tests/test_menu_probe.py` (new): inert without the flag, a fresh file per launch,
+  errors logged with their text, the line cap and the collapsing of repeats.
+- `tests/test_settings_menu.py`: the root page without CLOSE, and ESC closing it.
+
+Twenty-one deliberate breaks of the new code are each caught by at least one test.
+
 ## 2.0.0-dev67
 
 Three things for the public test. No server change: the server stays at **1.0.13**.

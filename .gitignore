@@ -23,6 +23,8 @@
 # diagnostic switch left on in somebody else's checkout.
 /mo_*.on
 /mo_*.off
+# ...as Windows Explorer names them with file extensions hidden
+/mo_*.on.txt
 /mo_fatal_calls.txt
 
 # Diagnostic output.
@@ -31,6 +33,8 @@
 /crash_frame.txt
 /crash_notes.txt
 /mo_journal.txt
+/mo_menuprobe.txt
+/mo_vanillaui.txt
 /modded_online_boot.log
 # ...and every other log, e.g. the test players' (server/fake_player.py writes
 # test_player_<name>.log here).

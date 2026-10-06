@@ -1,20 +1,28 @@
---- Modded Online — the ONLINE MODDED menu.
+--- Modded Online — the MODDED ONLINE menu.
 ---
---- A game-styled fullscreen menu drawn over the main menu (no Playlunky
---- options tab involved). A hint on the main menu shows the open key; while
---- the menu is open the game's own keyboard input is suppressed
---- (io.wantkeyboard), so navigation can use the normal keys.
+--- A game-styled fullscreen menu drawn over the main menu (no Playlunky options tab
+--- involved). It opens from the game's own main menu: mainMenuHook relabels the
+--- ONLINE row MODDED ONLINE and hands its SELECT here (`module.open`). On a build
+--- where that can't install, a hint on the main menu shows the [O] key instead.
 ---
----   ONLINE MODDED
----     HOST  -> Name / Server IP / Server Port / HOST NEW GAME
+--- While the menu is open the game's own keyboard input is suppressed
+--- (io.wantkeyboard) and its menu input is swallowed (menuInput), so the vanilla menu
+--- underneath stays put. The keyboard is read here; a controller arrives through
+--- menuInput, as the game's own MENU input.
+---
+---   MODDED ONLINE
+---     HOST  -> Server IP / Server Port / HOST NEW GAME
 ---     JOIN  -> Server IP / Room Code / JOIN GAME
+---     MATCHMAKING, DISCORD
 ---     SETTINGS -> HIDE ROOM CODE / TEST PLAYERS / SYNC SAVE DATA /
 ---                 AUTOMATICALLY SEND LOGS / AUTOMATICALLY SYNC DATA /
 ---                 ENABLE DEBUG MESSAGES
+---     VANILLA ONLINE -> the game's own Online menu (with the takeover only)
 ---
---- Hosting/joining connects and launches the game's play flow: pick your
---- character, land in the camp (that marks you READY), and the host starts
---- the run by entering the camp's main door.
+--- Hosting/joining waits on a CONNECTING page, then launches the game's play flow:
+--- pick your character, land in the camp (that marks you READY), and the host
+--- starts the run by entering the camp's main door. The menu stays up until the
+--- screen fades out for character select.
 ---
 --- The first time Modded Online starts, four popups come first, in the same style
 --- (FIRST_RUN below): two notices, then whether to switch on AUTOMATICALLY SEND
@@ -115,12 +123,26 @@ local function drawRow(ctx, left, right, y, text, selected)
 end
 
 -- nil=closed. Pages: root | host | hostdedi | matchtype | matchsearch |
--- matchnone | friendtype | joinofficial | joindedi | settings
+-- matchnone | friendtype | joinofficial | joindedi | settings | connecting | joined
 local page = nil        --- @type string?
 local cursor = 1
 local editing = nil     --- @type string? # label of the field being typed into
 local editBuffer = ""
 local roomCode = ""
+local openedMs = nil    --- @type number? # when the menu last opened
+local releaseUntilMs = nil --- @type number? # the keyboard stays ours until then
+local lastGuiMs = nil   --- @type number? # the last GUI frame, for capturing()
+
+--- SELECT and BACK are ignored this long after the menu opens. The press that opened
+--- it (ENTER or Z on the main menu's row) is still down on the GUI frame that
+--- follows, and would otherwise pick HOST at once.
+local ARM_MS = 150
+--- After the menu closes the keyboard stays ours this long, so the key that closed it
+--- does not land on the game's menu underneath (the popups have the same window).
+local MENU_RELEASE_MS = 300
+--- With no GUI frame for this long, nothing of ours is on screen: stop swallowing the
+--- game's input rather than leave the main menu deaf behind an invisible menu.
+local GUI_STALE_MS = 2000
 
 -- ---------------------------------------------------------------- keyboard
 
@@ -142,11 +164,13 @@ local function pressed(keycode, allowRepeat)
 end
 
 local KEYS = {
-    open = KEY.O,
+    open = KEY.O,            -- only when the main menu takeover is not in place
     up = KEY.UP,
     down = KEY.DOWN,
+    left = 37,               -- VK_LEFT / VK_RIGHT: change a setting's value
+    right = 39,
     select = KEY.Z,          -- menu confirm, like the game's jump button
-    commit = KEY.RETURN,     -- finish typing in a text field
+    commit = KEY.RETURN,     -- finish typing in a text field; also confirms
     back = KEY.ESCAPE,
     backspace = KEY.BACKSPACE,
 }
@@ -224,8 +248,33 @@ end
 -- ---------------------------------------------------------------- pages
 
 local function closeMenu()
-    page = nil
     editing = nil
+    if page == nil then
+        return
+    end
+    page = nil
+    openedMs = nil
+    releaseUntilMs = get_ms() + MENU_RELEASE_MS
+    if MenuInput ~= nil then
+        MenuInput.releaseLatch() -- the button that closed it must not reach the game
+        MenuInput.clear()
+    end
+end
+
+--- Is MODDED ONLINE a row of the game's own main menu (mainMenuHook)?
+--- @return boolean
+local function takeoverActive()
+    return MainMenuHook ~= nil and MainMenuHook.active ~= nil and MainMenuHook.active() == true
+end
+
+--- The [O] chip and key: when the takeover could not install, or on a build without
+--- mainMenuHook at all. Not in the moment it is still being tried.
+--- @return boolean
+local function fallbackKeys()
+    if MainMenuHook == nil or MainMenuHook.active == nil then
+        return true
+    end
+    return MainMenuHook.active() == false
 end
 
 -- The community Discord. `start ""` hands the URL to the OS default browser; the
@@ -239,28 +288,42 @@ local function doDiscord()
     end)
 end
 
+-- Where BACK goes from the CONNECTING and JOINED pages: the page that connected.
+local connectBackPage, connectBackCursor = "root", 1
+
+--- Wait on the server on a page of our own rather than closing: the outcome (an
+--- error, or the room) shows here, and the menu stays up until the play flow fades
+--- the screen out for character select.
+--- @param fromPage string
+--- @param fromCursor integer
+local function enterConnecting(fromPage, fromCursor)
+    connectBackPage, connectBackCursor = fromPage, fromCursor
+    page = "connecting"
+    cursor = 1
+end
+
 local function doHost()
     Network.saveConfig()
     Network.hostGame()
-    closeMenu()
+    enterConnecting("hostdedi", 3)
 end
 
 local function doHostOfficial()
     Network.saveConfig()
     Network.hostOfficial()
-    closeMenu()
+    enterConnecting("host", 1)
 end
 
 local function doJoin()
     Network.saveConfig()
     Network.joinGame(roomCode)
-    closeMenu()
+    enterConnecting("joindedi", 3)
 end
 
 local function doJoinOfficial()
     Network.saveConfig()
     Network.joinOfficial(roomCode)
-    closeMenu()
+    enterConnecting("joinofficial", 2)
 end
 
 --- START QUEUE: probe for an OPEN (unstarted) lobby without opening one. The menu
@@ -277,17 +340,25 @@ end
 local function doMatchmakeNew()
     Network.saveConfig()
     Network.matchmake() -- find-or-open an unstarted lobby (opens one, since none exist)
-    closeMenu()
+    enterConnecting("matchnone", 1)
 end
 
 --- JOIN EXISTING GAME: drop into a public game already in progress (late-join).
 local function doMatchmakeStarted()
     Network.saveConfig()
     Network.matchmake("started")
-    closeMenu()
+    enterConnecting("matchnone", 2)
 end
 
--- ESC / the open key steps one page back up this tree (root closes the menu).
+--- VANILLA ONLINE: the game's own Online menu, from the row we took over.
+local function doVanillaOnline()
+    if MainMenuHook ~= nil and MainMenuHook.requestVanillaOnline ~= nil then
+        MainMenuHook.requestVanillaOnline()
+    end
+end
+
+-- ESC / BACK steps one page back up this tree (root closes the menu). CONNECTING and
+-- JOINED go back to whichever page connected (connectBackPage).
 local PARENT = {
     host = "root", hostdedi = "host",
     friendtype = "root",
@@ -296,39 +367,74 @@ local PARENT = {
     settings = "root",
 }
 
---- Streamer toggle: mask the room code everywhere it's shown. A Z-select action
---- whose label reflects the current state (pageItems runs each frame).
-local function hideCodeToggle()
+--- An ON/OFF setting. SELECT flips it, and so do LEFT and RIGHT, like a vanilla
+--- options row (a held LEFT or RIGHT does not keep flipping it). The label always
+--- states the current value, since pageItems runs each frame.
+--- @param label string
+--- @param key string # its Network.config key
+--- @return table
+local function switchRow(label, key)
+    local function flip()
+        Network.config[key] = not Network.config[key]
+        Network.saveConfig()
+    end
+    local value = Network.config[key] and "ON" or "OFF"
     return {
-        label = "HIDE ROOM CODE  [" .. (Network.config.hideRoomCode and "ON" or "OFF") .. "]",
-        action = function()
-            Network.config.hideRoomCode = not Network.config.hideRoomCode
-            Network.saveConfig()
+        label = label .. "  [" .. value .. "]",
+        name = label,
+        value = value,
+        action = flip,
+        change = function(_, isRepeat)
+            if not isRepeat then
+                flip()
+            end
         end,
     }
 end
 
+--- Streamer toggle: mask the room code everywhere it's shown.
+local function hideCodeToggle()
+    return switchRow("HIDE ROOM CODE", "hideRoomCode")
+end
+
+--- @param count integer
+local function setTestPlayers(count)
+    Network.config.testPlayer = count
+    Network.saveConfig()
+    -- changing the count mid-session should affect the room we are in
+    -- now, not only the next one (launchTestPlayer replaces the old set)
+    if count > 0 then
+        Network.launchTestPlayer()
+    else
+        Network.stopTestPlayers()
+    end
+end
+
 --- Solo testing: put stand-in players in whatever room we open next, so the
---- multiplayer paths can be exercised with nobody else online. Cycles
---- OFF -> 1 -> 2 -> 3 -> OFF; three is a full room, since we are the fourth.
---- Off by default, and the label always states the current count.
+--- multiplayer paths can be exercised with nobody else online. SELECT and RIGHT
+--- cycle OFF -> 1 -> 2 -> 3 -> OFF, LEFT the other way; three is a full room, since
+--- we are the fourth. Off by default, and the label always states the current count.
 local function testPlayerToggle()
     local count = math.floor(tonumber(Network.config.testPlayer) or 0)
+    local function cycle(dir)
+        local next_ = math.floor(tonumber(Network.config.testPlayer) or 0) + dir
+        if next_ > Network.MAX_TEST_PLAYERS then
+            next_ = 0
+        elseif next_ < 0 then
+            next_ = Network.MAX_TEST_PLAYERS
+        end
+        setTestPlayers(next_)
+    end
+    local value = count > 0 and tostring(count) or "OFF"
     return {
-        label = "TEST PLAYERS  [" .. (count > 0 and tostring(count) or "OFF") .. "]",
-        action = function()
-            local next_ = math.floor(tonumber(Network.config.testPlayer) or 0) + 1
-            if next_ > Network.MAX_TEST_PLAYERS then
-                next_ = 0
-            end
-            Network.config.testPlayer = next_
-            Network.saveConfig()
-            -- changing the count mid-session should affect the room we are in
-            -- now, not only the next one (launchTestPlayer replaces the old set)
-            if next_ > 0 then
-                Network.launchTestPlayer()
-            else
-                Network.stopTestPlayers()
+        label = "TEST PLAYERS  [" .. value .. "]",
+        name = "TEST PLAYERS",
+        value = value,
+        action = function() cycle(1) end,
+        -- not on a held key: each step starts or stops a test player's process
+        change = function(dir, isRepeat)
+            if not isRepeat then
+                cycle(dir)
             end
         end,
     }
@@ -349,6 +455,8 @@ local function syncSaveItem()
     end
     return {
         label = "SYNC SAVE DATA" .. (note ~= nil and ("  [" .. note .. "]") or ""),
+        name = "SYNC SAVE DATA",
+        value = note,
         action = function()
             if SaveShare ~= nil and SaveShare.syncToMod ~= nil then
                 SafeCall("menuUI:syncSaveData", SaveShare.syncToMod)
@@ -361,38 +469,31 @@ end
 --- posts to (LogShip). Off by default; switching it off stops an upload already
 --- under way.
 local function autoSendLogsToggle()
-    return {
-        label = "AUTOMATICALLY SEND LOGS  [" .. (Network.config.autoSendLogs and "ON" or "OFF") .. "]",
-        action = function()
-            Network.config.autoSendLogs = not Network.config.autoSendLogs
-            Network.saveConfig()
-        end,
-    }
+    return switchRow("AUTOMATICALLY SEND LOGS", "autoSendLogs")
 end
 
 --- SYNC SAVE DATA, done for the player every time the game's main menu comes up
 --- (SaveShare.pollAutoSync). Off by default. Its result shows on the SYNC SAVE DATA
 --- row, since both are the same copy.
 local function autoSyncToggle()
-    return {
-        label = "AUTOMATICALLY SYNC DATA  [" .. (Network.config.autoSyncSave and "ON" or "OFF") .. "]",
-        action = function()
-            Network.config.autoSyncSave = not Network.config.autoSyncSave
-            Network.saveConfig()
-        end,
-    }
+    return switchRow("AUTOMATICALLY SYNC DATA", "autoSyncSave")
 end
 
 --- The print() lines at the top left of the screen: ours and the hosted mods'
 --- (main.lua gates them). Off by default; on for anyone chasing a problem.
 local function debugMessagesToggle()
-    return {
-        label = "ENABLE DEBUG MESSAGES  [" .. (Network.config.debugMessages and "ON" or "OFF") .. "]",
-        action = function()
-            Network.config.debugMessages = not Network.config.debugMessages
-            Network.saveConfig()
-        end,
-    }
+    return switchRow("ENABLE DEBUG MESSAGES", "debugMessages")
+end
+
+--- BACK from CONNECTING or JOINED: give the room up and return to the page that
+--- connected.
+local function leaveConnect()
+    if Network.phase ~= nil and Network.PHASE ~= nil and Network.phase ~= Network.PHASE.IDLE
+        and Network.leave ~= nil then
+        Network.leave()
+    end
+    page = connectBackPage or "root"
+    cursor = connectBackCursor or 1
 end
 
 local function pageItems()
@@ -469,57 +570,163 @@ local function pageItems()
             debugMessagesToggle(),
             { label = "BACK", action = function() page = "root"; cursor = 5 end },
         }
+    elseif page == "connecting" then
+        -- transient: waiting on the server; an error stays on this page (drawMenu)
+        local waiting = Network.PHASE ~= nil and Network.phase == Network.PHASE.CONNECTING
+        return {
+            { label = waiting and "CANCEL" or "BACK", action = leaveConnect },
+        }
+    elseif page == "joined" then
+        -- in the room; the play flow takes over from the main menu in a moment
+        return {
+            { label = "LEAVE ROOM", action = leaveConnect },
+        }
     end
-    return {
+    local root = {
         { label = "HOST", action = function() page = "host"; cursor = 1 end },
         { label = "JOIN", action = function() page = "friendtype"; cursor = 1 end },
         { label = "MATCHMAKING", action = function() page = "matchtype"; cursor = 1 end },
         { label = "DISCORD", action = doDiscord },
         { label = "SETTINGS", action = function() page = "settings"; cursor = 1 end },
-        { label = "CLOSE", action = closeMenu },
     }
+    -- BACK closes the menu, so there is no CLOSE row. VANILLA ONLINE only exists
+    -- while the ONLINE row is ours to give back.
+    if takeoverActive() then
+        root[#root + 1] = { label = "VANILLA ONLINE", action = doVanillaOnline }
+    end
+    return root
 end
 
-local function handleInput(items)
-    if editing ~= nil then
-        pollTypedInput()
-        if pressed(KEYS.commit) then
-            for _, item in ipairs(items) do
-                if item.label == editing and item.set ~= nil then
-                    item.set(editBuffer)
-                end
-            end
-            editing = nil
-        elseif pressed(KEYS.back) then
-            editing = nil -- cancel, keep the old value
+--- Is the menu armed for SELECT and BACK yet (ARM_MS)?
+--- @return boolean
+local function armed()
+    return openedMs == nil or get_ms() - openedMs >= ARM_MS
+end
+
+--- One step up the page tree.
+local function goBack()
+    if page == "root" then
+        closeMenu()
+    elseif page == "connecting" or page == "joined" then
+        leaveConnect()
+    else
+        if page == "matchsearch" then
+            Network.leave() -- backing out of the search aborts the in-flight queue
         end
+        page = PARENT[page] or "root"
+        cursor = 1
+    end
+end
+
+--- One menu action, from the keyboard or the game's menu input alike:
+--- up | down | left | right | select | back. `isRepeat`: a held direction repeating.
+--- @param action string
+--- @param isRepeat boolean
+local function dispatch(action, isRepeat)
+    local items = pageItems()
+    if #items == 0 then
         return
     end
-    if pressed(KEYS.up) then
+    if cursor > #items then
+        cursor = #items
+    end
+    if action == "up" then
         cursor = cursor > 1 and cursor - 1 or #items
-    end
-    if pressed(KEYS.down) then
+    elseif action == "down" then
         cursor = cursor < #items and cursor + 1 or 1
-    end
-    if pressed(KEYS.select) then
+    elseif action == "left" or action == "right" then
+        local item = items[cursor]
+        if item.change ~= nil then
+            item.change(action == "left" and -1 or 1, isRepeat)
+        end
+    elseif action == "select" then
+        if not armed() then
+            return
+        end
         local item = items[cursor]
         if item.action ~= nil then
             item.action()
-        else
+        elseif item.get ~= nil then
             editing = item.label
             editBuffer = item.get()
             capsMode = false
         end
-    elseif pressed(KEYS.back) or pressed(KEYS.open) then
-        if page == "root" then
-            closeMenu()
-        else
-            if page == "matchsearch" then
-                Network.leave() -- backing out of the search aborts the in-flight queue
-            end
-            page = PARENT[page] or "root"
-            cursor = 1
+    elseif action == "back" then
+        if armed() then
+            goBack()
         end
+    end
+end
+
+--- Finish typing: hand the buffer to the field being edited.
+local function commitEdit()
+    for _, item in ipairs(pageItems()) do
+        if item.label == editing and item.set ~= nil then
+            item.set(editBuffer)
+        end
+    end
+    editing = nil
+end
+
+--- The keyboard's menu keys. Up and down repeat while held, as the game's do.
+local function pollKeyboard()
+    if pressed(KEYS.up, true) then
+        dispatch("up", false)
+    end
+    if pressed(KEYS.down, true) then
+        dispatch("down", false)
+    end
+    if pressed(KEYS.left, true) then
+        dispatch("left", not pressed(KEYS.left))
+    end
+    if pressed(KEYS.right, true) then
+        dispatch("right", not pressed(KEYS.right))
+    end
+    if pressed(KEYS.select) or pressed(KEYS.commit) then
+        dispatch("select", false)
+    elseif pressed(KEYS.back) or (fallbackKeys() and pressed(KEYS.open)) then
+        dispatch("back", false)
+    end
+end
+
+--- One action from the game's menu input (a controller; see menuInput).
+--- @param action string
+--- @param isRepeat boolean
+local function dispatchPad(action, isRepeat)
+    if page == nil then
+        return
+    end
+    if editing ~= nil then
+        -- typing belongs to the keyboard; the pad can only finish or cancel it, and
+        -- not even that where keyboard presses would arrive here as well
+        if MenuInput ~= nil and MenuInput.KEYBOARD_IN_MENU_INPUT then
+            return
+        end
+        if action == "select" then
+            commitEdit()
+        elseif action == "back" then
+            editing = nil
+        end
+        return
+    end
+    dispatch(action, isRepeat)
+end
+
+--- The open menu's input for one GUI frame: typing, or the keyboard's menu keys,
+--- then whatever the controller pressed since the last frame.
+local function handleInput()
+    if editing ~= nil then
+        pollTypedInput()
+        if pressed(KEYS.commit) then
+            commitEdit()
+        elseif pressed(KEYS.back) then
+            editing = nil -- cancel, keep the old value
+        end
+    elseif not (MenuInput ~= nil and MenuInput.KEYBOARD_IN_MENU_INPUT and takeoverActive()) then
+        pollKeyboard()
+    end
+    if MenuInput ~= nil then
+        MenuInput.drain(dispatchPad)
     end
 end
 
@@ -551,7 +758,11 @@ local function drawMenu(ctx)
         joinofficial = "- OFFICIAL SERVER -",
         joindedi = "- DEDICATED SERVER -",
         settings = "- SETTINGS -",
+        connecting = "- CONNECTING -",
     })[page]
+    if page == "joined" then
+        subtitle = "- ROOM " .. shownCode(Network.room) .. " -"
+    end
     if subtitle ~= nil then
         drawCentered(ctx, 0, stripB - 0.055, 22, subtitle, COLOR_DIM)
     end
@@ -586,21 +797,23 @@ local function drawMenu(ctx)
     local footer = editing ~= nil
         and string.format("TYPE to edit    SHIFT caps    CAPSLOCK toggle%s    ENTER save    ESC cancel",
             capsMode and " (ON)" or "")
-        or "ARROWS move     Z select     ESC back"
+        or "ARROWS move     Z / ENTER select     ESC back"
     drawCentered(ctx, 0, B + 0.11, 18, footer, COLOR_DIM)
     if Network.phase == Network.PHASE.CONNECTING then
         local status = (page == "matchsearch") and "Searching for an open game..."
             or "Connecting to the server..."
         drawCentered(ctx, 0, B + 0.055, 20, status, COLOR_TITLE)
+    elseif page == "joined" then
+        drawCentered(ctx, 0, B + 0.055, 20, "Joined! Starting the game...", COLOR_TITLE)
     elseif Network.lastError ~= nil then
         drawCentered(ctx, 0, B + 0.055, 20, "! " .. Network.lastError, COLOR_ERROR)
     end
 end
 
---- Camp status: who is ready, and how the run starts. Drawn in a small
---- framed stone plaque in the top-left so it reads over the camp.
---- @param ctx GuiDrawContext
-local function drawCampStatus(ctx)
+--- What the camp plaque says: the room and how many are ready, how the run starts,
+--- and one line per player. Both looks draw from this.
+--- @return string, string, table # header, hint, { { text, ready } }
+local function campView()
     local ready, total = 0, 0
     for _, player in ipairs(Network.lobbyPlayers) do
         total = total + 1
@@ -608,12 +821,8 @@ local function drawCampStatus(ctx)
             ready = ready + 1
         end
     end
-    local L, R, T = -0.98, -0.44, 0.98
-    local B = 0.72 - math.max(0, total - 1) * 0.06
-    drawPanel(ctx, L, T, R, B)
-    ctx:draw_text(L + 0.03, T - 0.05, 22, string.format(
-        "ROOM %s  %s   %d / %d READY", shownCode(Network.room),
-        Network.isPublicRoom() and "[PUBLIC]" or "[PRIVATE]", ready, total), COLOR_TITLE)
+    local header = string.format("ROOM %s  %s   %d / %d READY", shownCode(Network.room),
+        Network.isPublicRoom() and "[PUBLIC]" or "[PRIVATE]", ready, total)
     local hint
     if Network.isPublicRoom() then
         -- public: everyone readies at the door; it auto-starts when all are ready,
@@ -628,8 +837,8 @@ local function drawCampStatus(ctx)
     else
         hint = "Waiting for the host to start..."
     end
-    ctx:draw_text(L + 0.03, T - 0.11, 17, hint, COLOR_DIM)
-    for index, player in ipairs(Network.lobbyPlayers) do
+    local players = {}
+    for _, player in ipairs(Network.lobbyPlayers) do
         -- show WHICH camp door each player is readied at, so a mismatched
         -- shortcut is obvious instead of silently blocking the start
         local where = ""
@@ -641,10 +850,27 @@ local function drawCampStatus(ctx)
                 where = "  -> 1-1"
             end
         end
-        ctx:draw_text(L + 0.03, T - 0.17 - (index - 1) * 0.06, 18,
-            string.format("%s  %s%s", player.ready and "[READY]" or "[ ... ]",
-                player.name, where),
-            player.ready and COLOR_ITEM or COLOR_DIM)
+        players[#players + 1] = {
+            string.format("%s  %s%s", player.ready and "[READY]" or "[ ... ]", player.name, where),
+            player.ready == true,
+        }
+    end
+    return header, hint, players
+end
+
+--- Camp status: who is ready, and how the run starts. Drawn in a small
+--- framed stone plaque in the top-left so it reads over the camp.
+--- @param ctx GuiDrawContext
+local function drawCampStatus(ctx)
+    local header, hint, players = campView()
+    local L, R, T = -0.98, -0.44, 0.98
+    local B = 0.72 - math.max(0, #players - 1) * 0.06
+    drawPanel(ctx, L, T, R, B)
+    ctx:draw_text(L + 0.03, T - 0.05, 22, header, COLOR_TITLE)
+    ctx:draw_text(L + 0.03, T - 0.11, 17, hint, COLOR_DIM)
+    for index, player in ipairs(players) do
+        ctx:draw_text(L + 0.03, T - 0.17 - (index - 1) * 0.06, 18, player[1],
+            player[2] and COLOR_ITEM or COLOR_DIM)
     end
 end
 
@@ -673,12 +899,37 @@ end
 --- GAME / JOIN EXISTING GAME). Any other error stays on-screen via drawMenu.
 local function pollMatchSearch()
     if Network.phase == Network.PHASE.LOBBY then
-        closeMenu() -- in a lobby now: character select launches from here
+        -- in a lobby now: character select launches from here
+        connectBackPage, connectBackCursor = "matchtype", 1
+        page = "joined"
+        cursor = 1
     elseif Network.lastErrorCode == "no_unstarted_game" then
         Network.lastError = nil
         Network.lastErrorCode = nil
         page = "matchnone"
         cursor = 1
+    end
+end
+
+--- The pages that wait on the server: move on when the room is reached or lost, and
+--- close as the play flow fades the main menu out for character select.
+local function pollConnect()
+    if page == "matchsearch" then
+        pollMatchSearch()
+    end
+    if page == "connecting" and Network.isActive() then
+        page = "joined"
+        cursor = 1
+    elseif page == "joined" and not Network.isActive() then
+        -- the room went away before the run began; lastError says why
+        page = connectBackPage or "root"
+        cursor = connectBackCursor or 1
+    end
+    if page == "connecting" or page == "joined" then
+        local ok, ls = pcall(get_local_state)
+        if ok and ls ~= nil and ls.loading ~= nil and ls.loading ~= FADE.NONE then
+            closeMenu()
+        end
     end
 end
 
@@ -688,7 +939,9 @@ end
 local statusText = nil
 local statusRoom, statusPlayers, statusPing, statusHidden = nil, nil, nil, nil
 
-local function drawRunStatus(ctx)
+--- The run status line's text, rebuilt only when what it says changes.
+--- @return string
+local function runStatusLine()
     -- activePlayers, NOT playerCount: a departed player keeps their slot in the
     -- roster (their spelunker is stood still rather than removed, which is what
     -- keeps the simulation deterministic), so playerCount still counted them and
@@ -710,7 +963,12 @@ local function drawRunStatus(ctx)
         statusText = string.format("MODDED ONLINE   room %s   %d players   %d ms",
             shownCode(room), players, ping)
     end
-    ctx:draw_text(-0.99, 0.99, 0, statusText, COLOR_DIM)
+    return statusText
+end
+
+--- @param ctx GuiDrawContext
+local function drawRunStatus(ctx)
+    ctx:draw_text(-0.99, 0.99, 0, runStatusLine(), COLOR_DIM)
 end
 
 --- Lockstep stall notice, drawn while the sim waits on a peer's inputs. Styled
@@ -911,6 +1169,21 @@ function module.showRestartNotice()
     restartPending = true
 end
 
+-- The controller's presses for this GUI frame's popup, counted from menuInput's
+-- queue. A popup answers to UP, DOWN and SELECT; BACK does nothing, like ESC.
+local padUp, padDown, padSelect = 0, 0, 0
+
+--- @param action string
+local function countPopupPad(action, _isRepeat)
+    if action == "up" then
+        padUp = padUp + 1
+    elseif action == "down" then
+        padDown = padDown + 1
+    elseif action == "select" then
+        padSelect = padSelect + 1
+    end
+end
+
 --- One frame of a popup sequence: the keys, then the drawing.
 --- @param ctx GuiDrawContext
 --- @param seq table # FIRST_RUN or RESTART
@@ -921,6 +1194,12 @@ local function popupFrame(ctx, seq, wasDrawn)
         get_io().wantkeyboard = true
     end)
     local now = get_ms()
+    if popupSeq ~= seq or not wasDrawn or popupShownMs == nil then
+        -- a direction already held on the controller is not a press for this popup
+        if MenuInput ~= nil then
+            MenuInput.beginCapture()
+        end
+    end
     if popupSeq ~= seq then
         popupSeq, popupStep, popupChoice, popupLayout = seq, 1, 1, nil
         popupShownMs = now
@@ -928,14 +1207,18 @@ local function popupFrame(ctx, seq, wasDrawn)
         popupShownMs = now -- back on screen after time away: the pause applies again
     end
     local popup = seq[popupStep]
-    if pressed(KEYS.up) then
+    padUp, padDown, padSelect = 0, 0, 0
+    if MenuInput ~= nil then
+        MenuInput.drain(countPopupPad)
+    end
+    if pressed(KEYS.up) or padUp > 0 then
         popupChoice = popupChoice > 1 and popupChoice - 1 or #popup.buttons
     end
-    if pressed(KEYS.down) then
+    if pressed(KEYS.down) or padDown > 0 then
         popupChoice = popupChoice < #popup.buttons and popupChoice + 1 or 1
     end
     if now - popupShownMs >= POPUP_INPUT_DELAY_MS
-        and (pressed(KEYS.select) or pressed(KEYS.commit))
+        and (pressed(KEYS.select) or pressed(KEYS.commit) or padSelect > 0)
     then
         if popup.setting ~= nil then
             Network.config[popup.setting] = popup.buttons[popupChoice].value == true
@@ -974,16 +1257,118 @@ local function popupFrame(ctx, seq, wasDrawn)
         popupLayout.step = popupStep
         popupLayout.metric = metric
     end
-    drawPopup(ctx, popup, popupLayout)
+    if not (VanillaUI ~= nil and VanillaUI.serving("popup")) then
+        drawPopup(ctx, popup, popupLayout)
+    end
+end
+
+-- ---------------------------------------------------------------- api
+
+--- Open the menu on its root page: the ONLINE row's SELECT (mainMenuHook), or the
+--- [O] key where the takeover is not in place.
+--- @param source string? # for the probe log
+--- @param unarmed boolean? # no ARM_MS pause: the key that opened it is not a menu key
+function module.open(source, unarmed)
+    if page ~= nil then
+        return
+    end
+    page = "root"
+    cursor = 1
+    editing = nil
+    openedMs = (unarmed ~= true) and get_ms() or nil
+    releaseUntilMs = nil
+    if MenuInput ~= nil then
+        MenuInput.beginCapture()
+    end
+    if MenuProbe ~= nil and MenuProbe.note ~= nil then
+        MenuProbe.note("menuUI: opened (%s)", tostring(source))
+    end
+end
+
+--- Close the menu (VANILLA ONLINE hands the main menu back).
+function module.close()
+    closeMenu()
+end
+
+--- @return boolean
+function module.isOpen()
+    return page ~= nil
+end
+
+--- Was a popup on screen at the last GUI frame?
+--- @return boolean
+function module.popupVisible()
+    return popupDrawn
+end
+
+--- When capturing() was last asked. It is asked every engine update, so a long gap
+--- means the whole game was stopped (a process launch, a load), not just its GUI.
+local lastAskedMs = nil
+--- Longer than this between two asks is the whole game stopping, not the GUI.
+local STALL_MS = 250
+
+--- Should the game's menu input be ours right now (menuInput asks every update)?
+--- The menu or a popup is up, or one just closed and its key may still be down.
+---
+--- Only while GUI frames are arriving: if they stop, nothing of ours is on screen,
+--- and a menu still open would leave the main menu deaf for no visible reason. It
+--- is closed instead, and the game gets its input back.
+---
+--- Not when the WHOLE game stopped: dev69's first session closed the menu with "no
+--- GUI frame for 7698 ms" right after HOST, because the game itself had frozen for
+--- 7.7 s (the bridge launching) and the first update after it ran before the first
+--- GUI frame. A gap in the asking itself is that: the GUI clock starts again.
+--- @return boolean
+function module.capturing()
+    if lastGuiMs == nil then
+        return false
+    end
+    local now = get_ms()
+    if lastAskedMs ~= nil and now - lastAskedMs > STALL_MS then
+        lastGuiMs = now
+    end
+    lastAskedMs = now
+    if now - lastGuiMs > GUI_STALE_MS then
+        if page ~= nil then
+            page, editing, openedMs = nil, nil, nil
+            if MenuProbe ~= nil and MenuProbe.note ~= nil then
+                MenuProbe.note("menuUI: closed -- no GUI frame for %d ms", now - lastGuiMs)
+            end
+        end
+        return false
+    end
+    if page ~= nil or popupDrawn then
+        return true
+    end
+    if releaseUntilMs ~= nil and now < releaseUntilMs then
+        return true
+    end
+    return popupClosedMs ~= nil and now - popupClosedMs < POPUP_RELEASE_MS
 end
 
 -- ---------------------------------------------------------------- frame
 
+--- What is on screen, as of the last GUI frame: the game's look draws these (see
+--- "the game's look" below), and the ImGui version only where it is not.
+local show = { menu = false, popup = false, camp = false, code = false, waiting = false,
+               status = false }
+
+--- Is the game's look drawing `name` (src/vanillaUI.lua)? Then the ImGui version stays
+--- out of the way.
+--- @param name string
+--- @return boolean
+local function vanillaServing(name)
+    return VanillaUI ~= nil and VanillaUI.serving(name)
+end
+
 --- @param ctx GuiDrawContext
 local function guiFrame(ctx)
+    lastGuiMs = get_ms()
     local screen = get_local_state().screen
     local wasDrawn = popupDrawn
     popupDrawn = false
+    show.menu, show.popup, show.camp, show.code, show.waiting, show.status =
+        false, false, false, false, false, false
     if Network.isInRun() then
         if screen == SCREEN.LEVEL or screen == SCREEN.TRANSITION then
             -- Held on a transition waiting for the other players to finish with
@@ -992,9 +1377,16 @@ local function guiFrame(ctx)
             local holding = EventSync ~= nil and EventSync.transitionHolding ~= nil
                 and EventSync.transitionHolding()
             if InputSync.isStalled() or holding then
-                drawWaitingPanel(ctx) -- stalled: the framed plaque replaces the status line
+                -- stalled: the framed plaque replaces the status line
+                show.waiting = true
+                if not vanillaServing("waiting") then
+                    drawWaitingPanel(ctx)
+                end
             else
-                drawRunStatus(ctx)
+                show.status = true
+                if not vanillaServing("status") then
+                    drawRunStatus(ctx)
+                end
             end
         end
         -- local cosmetic fade over a back-layer swap (mimics the vanilla door
@@ -1014,17 +1406,26 @@ local function guiFrame(ctx)
             closeMenu()
         end
         popupDrawn = true
+        show.popup = true
         popupFrame(ctx, seq, wasDrawn)
         return
     end
-    if popupClosedMs ~= nil and get_ms() - popupClosedMs < POPUP_RELEASE_MS then
+    if (popupClosedMs ~= nil and get_ms() - popupClosedMs < POPUP_RELEASE_MS)
+        or (releaseUntilMs ~= nil and get_ms() < releaseUntilMs)
+    then
         pcall(function()
             get_io().wantkeyboard = true
         end)
+        if MenuInput ~= nil then
+            MenuInput.clear()
+        end
         return
     end
     if screen == SCREEN.CAMP and Network.isActive() then
-        drawCampStatus(ctx)
+        show.camp = true
+        if not vanillaServing("camp") then
+            drawCampStatus(ctx)
+        end
         return
     end
     if screen == SCREEN.CHARACTER_SELECT then
@@ -1033,8 +1434,13 @@ local function guiFrame(ctx)
         end
         -- Show the room code while the player is still CHOOSING; hide it the moment
         -- they confirm and the screen begins fading out (loading leaves NONE).
-        if Network.isActive() and get_local_state().loading == FADE.NONE then
-            drawCharSelectCode(ctx)
+        if Network.isActive() and get_local_state().loading == FADE.NONE
+            and tostring(Network.room or "") ~= ""
+        then
+            show.code = true
+            if not vanillaServing("code") then
+                drawCharSelectCode(ctx)
+            end
         end
         return
     end
@@ -1045,18 +1451,20 @@ local function guiFrame(ctx)
         return
     end
     if page == nil then
-        -- a small bronze "chip" advertising the open key, bottom-left
-        ctx:draw_rect_filled(-0.99, -0.845, -0.63, -0.925, 0.02, COLOR_PANEL)
-        ctx:draw_rect(-0.99, -0.845, -0.63, -0.925, 0.02, 1.5, COLOR_BORDER)
-        ctx:draw_text(-0.965, -0.87, 24, "[O]  MODDED ONLINE", COLOR_TITLE)
         editing = nil
-        -- A freshly injected shim only takes effect on the NEXT launch, so say so
-        -- plainly instead of leaving it to a console line nobody reads. There is
-        -- deliberately NO restart hotkey: the game can't relaunch itself without
-        -- dropping the Playlunky-injected mods, so the player restarts it.
-        if pressed(KEYS.open) then
-            page = "root"
-            cursor = 1
+        if MenuInput ~= nil then
+            MenuInput.clear()
+        end
+        -- The main menu's own ONLINE row opens us (mainMenuHook). Only where that
+        -- could not install does a small bronze "chip" advertise the open key,
+        -- bottom-left.
+        if fallbackKeys() then
+            ctx:draw_rect_filled(-0.99, -0.845, -0.63, -0.925, 0.02, COLOR_PANEL)
+            ctx:draw_rect(-0.99, -0.845, -0.63, -0.925, 0.02, 1.5, COLOR_BORDER)
+            ctx:draw_text(-0.965, -0.87, 24, "[O]  MODDED ONLINE", COLOR_TITLE)
+            if pressed(KEYS.open) then
+                module.open("the O key", true)
+            end
         end
         return
     end
@@ -1064,15 +1472,194 @@ local function guiFrame(ctx)
     pcall(function()
         get_io().wantkeyboard = true
     end)
-    if page == "matchsearch" then
-        pollMatchSearch() -- may switch pages or close the menu on the queue result
+    pollConnect() -- may switch pages, or close the menu as the play flow begins
+    if page ~= nil then
+        handleInput()
     end
     if page ~= nil then
-        handleInput(pageItems())
+        show.menu = true
+        if not vanillaServing("menu") then
+            drawMenu(ctx)
+        end
     end
-    if page ~= nil then
-        drawMenu(ctx)
+end
+
+-- ---------------------------------------------------------------- the game's look
+--
+-- The same menu, popups and plaques, drawn with the game's renderer, its font and
+-- its own menu sprites (src/vanillaUI.lua). These run from the game's render
+-- callbacks and draw whatever the last GUI frame decided is on screen (`show`); the
+-- ImGui versions above are the fallback while these are not running.
+
+--- The title on the scroll, per page: what the vanilla Options screen does with its
+--- own sections.
+local PAGE_TITLES = {
+    root = "MODDED ONLINE", host = "HOST GAME", hostdedi = "DEDICATED SERVER",
+    matchtype = "MATCHMAKING", matchsearch = "MATCHMAKING", matchnone = "NO OPEN GAMES",
+    friendtype = "JOIN A FRIEND", joinofficial = "OFFICIAL SERVER", joindedi = "DEDICATED SERVER",
+    settings = "SETTINGS", connecting = "CONNECTING",
+}
+--- Words that stay in capitals in Title Case.
+local KEEP_CAPS = { IP = true, OK = true }
+
+--- "HIDE ROOM CODE" as the main menu would write it: "Hide Room Code". The labels are
+--- capitals for the ImGui look (and its tests); the game's own menus are in Title Case
+--- (Play, Online, Player Profile), so this look writes them that way. A word with any
+--- lowercase in it is left as it is ("1 file(s) synced").
+--- @param s string
+--- @return string
+local function titleCase(s)
+    return (s:gsub("%S+", function(word)
+        if word:find("[a-z]") ~= nil or KEEP_CAPS[word] or #word < 2 then
+            return word
+        end
+        return word:sub(1, 1) .. word:sub(2):lower()
+    end))
+end
+module.titleCase = titleCase
+
+--- The page fades in over this long when it opens.
+local FADE_IN_MS = 150
+local shownSinceMs = nil
+
+--- @return table
+local function menuModel()
+    local items = pageItems()
+    -- drawMenu clamps this too, and does not run while this look is drawing (a page
+    -- can lose a row: VANILLA ONLINE goes when the takeover stands down)
+    if cursor > #items then
+        cursor = #items
     end
+    local rows = {}
+    local selectedChanges = false
+    for i, item in ipairs(items) do
+        local row = { name = titleCase(item.name or item.label),
+                      value = item.value ~= nil and titleCase(item.value) or nil,
+                      selected = i == cursor, changes = item.change ~= nil }
+        if item.get ~= nil then
+            local isEditing = editing == item.label
+            local raw = isEditing and editBuffer or tostring(item.get() or "")
+            if item.secret and Network.config.hideRoomCode and raw ~= "" then
+                raw = string.rep("*", #raw)
+            end
+            row.field = (raw ~= "" or isEditing) and raw or "..."
+            row.editing = isEditing
+        end
+        if i == cursor and item.change ~= nil then
+            selectedChanges = true
+        end
+        rows[i] = row
+    end
+    local m = {
+        title = page == "joined" and ("ROOM " .. shownCode(Network.room))
+            or (PAGE_TITLES[page] or "MODDED ONLINE"),
+        rows = rows,
+        hintLeft = editing ~= nil and "ESC  Cancel" or "ESC / B  Back",
+        hintRight = editing ~= nil and "ENTER  Save" or "Z / A  Select",
+    }
+    if editing ~= nil then
+        m.middle = capsMode and "TYPE  (CAPS ON)" or "TYPE  -  SHIFT for capitals"
+    elseif Network.PHASE ~= nil and Network.phase == Network.PHASE.CONNECTING then
+        m.middle = page == "matchsearch" and "Searching for an open game..."
+            or "Connecting to the server..."
+    elseif page == "joined" then
+        m.middle = "Joined! Starting the game..."
+    elseif Network.lastError ~= nil then
+        m.middle, m.middleError = "! " .. tostring(Network.lastError), true
+    elseif selectedChanges then
+        m.middle = "LEFT / RIGHT  Change"
+    end
+    local now = get_ms()
+    shownSinceMs = shownSinceMs or now
+    m.alpha = math.min(1, (now - shownSinceMs) / FADE_IN_MS)
+    return m
+end
+
+local function vanillaMenu(ctx, screen)
+    if not show.menu or page == nil or (screen ~= SCREEN.MENU and screen ~= SCREEN.TITLE) then
+        shownSinceMs = nil
+        return false
+    end
+    VanillaUI.page(ctx, menuModel())
+    return true
+end
+
+local function vanillaPopup(ctx, _screen)
+    if not show.popup or popupSeq == nil then
+        return false
+    end
+    local popup = popupSeq[popupStep]
+    if popup == nil then
+        return false
+    end
+    -- as written: the popups' titles and buttons are already in the main menu's Title
+    -- Case (the ImGui look is what puts them in capitals)
+    local buttons = {}
+    for i, button in ipairs(popup.buttons) do
+        buttons[i] = button.label
+    end
+    VanillaUI.dialog(ctx, {
+        title = popup.title,
+        text = popup.text,
+        buttons = buttons,
+        choice = popupChoice,
+        footer = #buttons > 1 and "ARROWS move     Z / A  Select" or "Z / A  Select",
+    })
+    return true
+end
+
+local function vanillaCamp(ctx, _screen)
+    if not show.camp then
+        return false
+    end
+    local header, hint, players = campView()
+    local lines = { { header, "gold", 20 }, { hint, "dim", 15 } }
+    for _, player in ipairs(players) do
+        lines[#lines + 1] = { player[1], player[2] and "row" or "dim", 17 }
+    end
+    VanillaUI.plaque(ctx, 24, 18, VanillaUI.plaqueWidth(ctx, lines, 360, 720), lines)
+    return true
+end
+
+local function vanillaCode(ctx, _screen)
+    local code = tostring(Network.room or "") -- raw: always visible here (drawCharSelectCode)
+    if not show.code or code == "" then
+        return false
+    end
+    local lines = { { "ROOM  " .. code, "gold", 30 }, { "invite friends with this code", "dim", 14 } }
+    local w = VanillaUI.plaqueWidth(ctx, lines, 300, 560)
+    local h = VanillaUI.plaqueHeight(lines)
+    VanillaUI.plaque(ctx, 1920 - 24 - w, 1080 - 24 - h, w, lines)
+    return true
+end
+
+local WAITING_LINES = { { "WAITING FOR PLAYERS", "gold", 20 },
+                        { "Syncing with the other players...", "dim", 15 } }
+
+local function vanillaWaiting(ctx, _screen)
+    if not show.waiting then
+        return false
+    end
+    VanillaUI.plaque(ctx, 24, 18, VanillaUI.plaqueWidth(ctx, WAITING_LINES, 360, 600),
+        WAITING_LINES)
+    return true
+end
+
+local function vanillaStatus(ctx, _screen)
+    if not show.status then
+        return false
+    end
+    VanillaUI.shadowText(ctx, runStatusLine(), 14, 14, 15, "dim", "left", "bold")
+    return true
+end
+
+if VanillaUI ~= nil and VanillaUI.layer ~= nil then
+    VanillaUI.layer("menu", 10, vanillaMenu)
+    VanillaUI.layer("camp", 20, vanillaCamp)
+    VanillaUI.layer("code", 20, vanillaCode)
+    VanillaUI.layer("waiting", 20, vanillaWaiting)
+    VanillaUI.layer("status", 20, vanillaStatus)
+    VanillaUI.layer("popup", 40, vanillaPopup)
 end
 
 -- Global infrastructure callback (menu UI must exist outside any level).

@@ -14,8 +14,12 @@ mod — just enable it alongside your content mods.
   to PATH** in the installer, then restart Spelunky 2. `py`, `python` and
   `python3` are all accepted; Windows' Microsoft-Store placeholders for
   `python.exe` are correctly *not* treated as an install.
-- Usage: main menu → **MODDED ONLINE** window → **HOST** or **JOIN**. The first
-  time it starts, four popups come first:
+- Usage: the game's main menu → **MODDED ONLINE** (the game's Online row, renamed)
+  → **HOST** or **JOIN**. A controller works as well as the keyboard. **VANILLA
+  ONLINE**, at the bottom of that menu, opens the game's own Online menu. On a
+  Playlunky build where the row can't be taken over, a `[O] MODDED ONLINE` hint shows
+  on the main menu instead, and O opens it. The first time it starts, four popups
+  come first:
   - how to set mods up;
   - a notice about the mod;
   - whether to switch on **AUTOMATICALLY SEND LOGS**;
@@ -277,5 +281,10 @@ fails the test with the frame it died on, instead of quietly hanging.
 | `src/netCore.lua` | UDP session, reliable ordered event channel, config |
 | `src/inputSync.lua` | lockstep input gate, desync detection, floor resync |
 | `src/eventSync.lua` | run lifecycle, seed authority, instant-restart redirect |
+| `src/menuProbe.lua` | diagnostic: what the game's menus look like from Lua (`mo_menuprobe.on`) |
+| `src/menuInput.lua` | the game's own menu input (controllers) for our menu and popups |
+| `src/mainMenuHook.lua` | MODDED ONLINE as the main menu's Online row; VANILLA ONLINE |
+| `src/vanillaUI.lua` | the menu, popups and plaques in the game's own font and menu sprites |
+| `src/campPuppets.lua` | the other players in the camp lobby, as puppets |
 | `src/menuUI.lua` | MODDED ONLINE window + in-run status line |
 | `src/chat.lua` | in-run text chat |

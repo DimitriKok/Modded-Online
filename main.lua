@@ -13,7 +13,7 @@
 
 meta = {
     name = "Modded Online (loader build)",
-    version = "2.0.0-dev67",
+    version = "2.0.0-dev73",
     description = "Play scriptable mods together via a self-hosted server",
     author = "EatYoCake + DoctorPuppy",
     online_safe = false, -- not for the *official* online — that's the point
@@ -183,8 +183,22 @@ local MODULES = {
     "src.eventSync",
     -- desync logs to the server's Discord, for players who opted in
     "src.logShip",
+    -- The menu probe (mo_menuprobe.on), first of the menu modules so its PRE_UPDATE
+    -- sees the menu input before menuInput's swallows it.
+    "src.menuProbe",
+    -- The game's own menu input, and MODDED ONLINE as the main menu's ONLINE row.
+    -- After inputSync and eventSync, so their PRE_UPDATEs run first; before menuUI,
+    -- which they open and ask about.
+    "src.menuInput",
+    "src.mainMenuHook",
+    -- The game's own font and menu sprites. Before menuUI and chat, which register
+    -- what they draw with it.
+    "src.vanillaUI",
     "src.menuUI",
     "src.chat",
+    -- The other players in the camp lobby, as puppets (after vanillaUI, which draws
+    -- their name tags).
+    "src.campPuppets",
     -- The determinism guarantees a hosted mod runs under. Loaded before modHost,
     -- which installs them into every sandbox it builds.
     "src.determinism",

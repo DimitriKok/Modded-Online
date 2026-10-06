@@ -1,9 +1,13 @@
 """The MODDED ONLINE menu's SETTINGS page (src/menuUI.lua).
 
-The root page is the four actions, SETTINGS and CLOSE. HIDE ROOM CODE, TEST
-PLAYERS and SYNC SAVE DATA moved to SETTINGS, which also holds the two new
-switches, AUTOMATICALLY SEND LOGS and AUTOMATICALLY SYNC DATA. Both are saved in
-config.json like the others.
+The root page is the four actions and SETTINGS; BACK closes the menu, so there is
+no CLOSE row (since dev68). HIDE ROOM CODE, TEST PLAYERS and SYNC SAVE DATA moved
+to SETTINGS, which also holds the two new switches, AUTOMATICALLY SEND LOGS and
+AUTOMATICALLY SYNC DATA. Both are saved in config.json like the others.
+
+These run without mainMenuHook, so the menu opens from the [O] key: the fallback a
+build without the main menu takeover gets (tests/test_menu_takeover.py covers the
+takeover).
 
 These run the shipped menu against a stubbed engine: keys are pressed, a GUI
 frame runs, and what the menu drew is read back.
@@ -114,10 +118,25 @@ def open_settings(rt):
     return frame(rt, "Z")
 
 
-def test_the_root_page_is_the_actions_settings_and_close():
+def test_the_root_page_is_the_actions_and_settings():
     rt = runtime()
     frame(rt, "O")
-    assert rows(frame(rt)) == ["> HOST", "JOIN", "MATCHMAKING", "DISCORD", "SETTINGS", "CLOSE"]
+    assert rows(frame(rt)) == ["> HOST", "JOIN", "MATCHMAKING", "DISCORD", "SETTINGS"]
+
+
+def test_there_is_no_vanilla_online_row_without_the_takeover():
+    """VANILLA ONLINE gives the ONLINE row back; without the takeover there is
+    nothing to give back."""
+    rt = runtime()
+    frame(rt, "O")
+    assert "VANILLA ONLINE" not in [r.lstrip("> ") for r in rows(frame(rt))]
+
+
+def test_escape_on_the_root_page_closes_the_menu():
+    rt = runtime()
+    frame(rt, "O")
+    frame(rt, "ESCAPE")
+    assert rows(frame(rt)) == []
 
 
 def test_settings_holds_the_three_moved_settings_and_the_three_new_ones():
@@ -199,7 +218,7 @@ def test_back_returns_to_the_root_page_on_settings():
     open_settings(rt)
     frame(rt, "UP")                     # wraps to BACK
     drawn = frame(rt, "Z")
-    assert rows(drawn) == ["HOST", "JOIN", "MATCHMAKING", "DISCORD", "> SETTINGS", "CLOSE"]
+    assert rows(drawn) == ["HOST", "JOIN", "MATCHMAKING", "DISCORD", "> SETTINGS"]
 
 
 def test_escape_from_settings_goes_back_to_the_root_page():
@@ -215,7 +234,7 @@ def test_every_row_clears_the_footer():
     last one's highlight bar must still end above the footer line. The root page
     keeps the full spacing."""
     rt = runtime()
-    for drawn, count in ((open_settings(rt), 7), (frame(rt, "ESCAPE"), 6)):
+    for drawn, count in ((open_settings(rt), 7), (frame(rt, "ESCAPE"), 5)):
         row_ys = [float(d["y"]) for d in drawn if d["size"] in ROW_SIZES]
         footer_y = [float(d["y"]) for d in drawn if d["size"] == FOOTER_SIZE][0]
         assert len(row_ys) == count
@@ -224,7 +243,7 @@ def test_every_row_clears_the_footer():
         assert len(set(gaps)) == 1, "uneven spacing"
         # a highlight bar (0.05 above a row, 0.06 below) never reaches the next row
         assert gaps[0] >= 0.11 - 1e-9, gaps[0]
-        if count == 6:
+        if count == 5:
             assert abs(gaps[0] - 0.12) < 1e-9, "the root page was squeezed for no reason"
 
 

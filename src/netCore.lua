@@ -951,6 +951,17 @@ function module.onWorld(handler)
     worldHandler = handler
 end
 
+--- Handlers for one kind (`d.k`) of world datagram each, taken ahead of the general
+--- handler above. The server relays world datagrams to the room in any phase, the
+--- lobby included, which is what the camp's puppets ride on (campPuppets, k = "pp").
+local worldKindHandlers = {}
+
+--- @param kind string
+--- @param handler fun(slot: integer, data: table)
+function module.onWorldKind(kind, handler)
+    worldKindHandlers[kind] = handler
+end
+
 --- Send an unreliable authoritative-world datagram (host's game only).
 --- @param data table
 function module.sendWorld(data)
@@ -1624,8 +1635,13 @@ local function handleMessage(msg)
             SafeCall("netCore:stateHandler", stateHandler, msg.slot, msg.d)
         end
     elseif msgType == "world" then
-        if worldHandler ~= nil and msg.slot ~= module.slot then
-            SafeCall("netCore:worldHandler", worldHandler, msg.slot, msg.d)
+        if msg.slot ~= module.slot then
+            local kindHandler = type(msg.d) == "table" and worldKindHandlers[msg.d.k] or nil
+            if kindHandler ~= nil then
+                SafeCall("netCore:worldKindHandler", kindHandler, msg.slot, msg.d)
+            elseif worldHandler ~= nil then
+                SafeCall("netCore:worldHandler", worldHandler, msg.slot, msg.d)
+            end
         end
     elseif msgType == "event_ack" then
         pendingOut[math.floor(tonumber(msg.cseq) or 0)] = nil
