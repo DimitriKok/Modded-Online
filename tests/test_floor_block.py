@@ -53,6 +53,17 @@ def test_it_reads_exactly_like_the_gen_lines(tmp_path):
     assert gen.endswith("prng " + engage)
 
 
+def test_the_water_probes_lines_go_inside_the_block(tmp_path):
+    """dev76's measurement lines sit in the floor's own block, after the histogram."""
+    rt = trace.runtime(tmp_path)
+    rt.execute(STATE)
+    rt.execute("DesyncLog.init()")
+    rt.execute("DesyncLog.floorSnapshot(9, 1, 2, { [388] = 7 }, { 'water: one', 'water list: two' })")
+    lines = (tmp_path / "desync_log.txt").read_text(encoding="utf-8").splitlines()
+    at = next(i for i, line in enumerate(lines) if line.startswith("  entities: 7 total"))
+    assert lines[at + 1:at + 3] == ["  water: one", "  water list: two"]
+
+
 def test_a_build_whose_prng_cannot_be_read_still_writes_the_block(tmp_path):
     lines = floor_block(tmp_path, "prng = nil")
     assert any("entities: 7 total" in line for line in lines)

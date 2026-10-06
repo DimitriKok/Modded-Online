@@ -325,6 +325,327 @@ function module.newClock()
     }
 end
 
+-- ------------------------------------------------------------- the water probe
+--
+-- MEASUREMENT ONLY (dev76): nothing here changes what any mod sees or does.
+--
+-- dev75 hides FX_WATER_SURFACE from a hosted mod's ON.LEVEL in a room. That keeps
+-- the machines in sync, at the price of 2.5's swamp lily pads and the HD mod's lily
+-- pads and frogs. Whether they can come back depends on WHAT differs between the
+-- machines' water when the mods look, and no log so far records the water at all:
+--
+--   * nothing: the 2-1 difference came from the streams the dev75 anchor sealed;
+--   * the same surfaces, listed in another order: a sort brings the pads back;
+--   * surfaces that differ at ON.LEVEL and agree a frame or two later: the water is
+--     still settling, and waiting for it brings them back;
+--   * water that stays different: only the world host's waterline can fix it.
+--
+-- So in a room every machine fingerprints the liquid and the surface effects: at
+-- generation; as ON.LEVEL begins, twice a few ms apart to see whether anything
+-- moves while Lua holds the main thread; as the mod's own queries see them; and as
+-- the gate engages. inputSync sends the result with the floor digest, and a
+-- non-host logs one verdict line per floor against the world host's. Reads only: no
+-- PRNG draw, no spawn, no write to any entity.
+
+local PROBE_SPIN_MS = 4
+local PROBE_SPIN_CAP = 1000000 -- a timer that does not advance must not hang the load
+local PROBE_LIST_MAX = 300
+local PROBE_HASH_MOD = 2147483647
+
+--- This floor's measurements: made at POST_LEVEL_GENERATION in a room, nil otherwise.
+local probe = nil
+
+--- What the probe looks for, read when it runs (the tests load us without an API).
+--- @return integer?, integer, integer, integer # FX_WATER_SURFACE, MASK.LIQUID, MASK.FX, LAYER.BOTH
+local function probeKinds()
+    local fxType, liquidMask, fxMask, both = nil, 24576, 64, -128
+    pcall(function() fxType = ENT_TYPE.FX_WATER_SURFACE end)
+    pcall(function() liquidMask = math.floor(MASK.LIQUID) end)
+    pcall(function() fxMask = math.floor(MASK.FX) end)
+    pcall(function() both = LAYER.BOTH end)
+    return fxType, liquidMask, fxMask, both
+end
+
+--- A position as one sortable integer: layer, then x, then y. `scale` 100 keeps
+--- hundredths of a tile; 1 keeps whole tiles (the coarse key).
+--- @return integer
+local function positionKey(x, y, layer, scale)
+    local qx = math.floor(x * scale + 0.5) + 0x100000
+    local qy = math.floor(y * scale + 0.5) + 0x100000
+    local l = (layer == 1) and 1 or 0
+    return (l << 42) | ((qx & 0x1FFFFF) << 21) | (qy & 0x1FFFFF)
+end
+
+--- @param keys integer[]
+--- @return integer
+local function hashKeys(keys)
+    local h = #keys % PROBE_HASH_MOD
+    for i = 1, #keys do
+        h = (h * 1000003 + keys[i] % PROBE_HASH_MOD) % PROBE_HASH_MOD
+    end
+    return h
+end
+
+--- The same, whatever order the keys came in.
+--- @param keys integer[]
+--- @return integer
+local function hashSorted(keys)
+    local copy = {}
+    for i = 1, #keys do
+        copy[i] = keys[i]
+    end
+    table.sort(copy)
+    return hashKeys(copy)
+end
+
+--- Fine and coarse keys of these entities' positions, in the order given.
+--- @param uids any
+--- @return integer[] fine
+--- @return integer[] coarse
+local function positionKeys(uids)
+    local fine, coarse = {}, {}
+    local okLen, len = pcall(function() return #uids end)
+    if not okLen or type(len) ~= "number" then
+        return fine, coarse
+    end
+    for i = 1, len do
+        local ok, x, y, l = pcall(get_position, uids[i])
+        if ok and type(x) == "number" and type(y) == "number" then
+            fine[#fine + 1] = positionKey(x, y, l, 100)
+            coarse[#coarse + 1] = positionKey(x, y, l, 1)
+        end
+    end
+    return fine, coarse
+end
+
+--- Fingerprint whatever the ENGINE's own query returns (never the sandbox's).
+--- @return table # { n, ord, set, tiles, keys }
+local function probeSample(types, mask)
+    local fp = { n = 0, ord = 0, set = 0, tiles = 0, keys = {} }
+    if types == nil then
+        return fp
+    end
+    local _, _, _, both = probeKinds()
+    local ok, uids = pcall(get_entities_by, types, mask, both)
+    if not ok or uids == nil then
+        return fp
+    end
+    local fine, coarse = positionKeys(uids)
+    fp.n, fp.keys = #fine, fine
+    fp.ord, fp.set, fp.tiles = hashKeys(fine), hashSorted(fine), hashSorted(coarse)
+    return fp
+end
+
+--- The engine frame and the run's simulated frame, for "did anything tick between".
+--- @return integer, integer
+local function probeClock()
+    local frame, sim = -1, -1
+    pcall(function() frame = math.floor(get_frame()) end)
+    pcall(function() sim = math.floor(get_local_state().time_total) end)
+    return frame, sim
+end
+
+--- Hold the main thread a few ms: anything that changes meanwhile was changed by
+--- another thread. os.clock first, get_ms if it is missing, and a bound on both,
+--- because a timer that never advances inside one callback would otherwise hang
+--- the load forever.
+local function probeSpin()
+    local timer, scale = nil, 1
+    if os ~= nil and type(os.clock) == "function" then
+        timer, scale = os.clock, 1000
+    elseif type(get_ms) == "function" then
+        timer = get_ms
+    end
+    if timer == nil then
+        return
+    end
+    local ok, started = pcall(timer)
+    if not ok or type(started) ~= "number" then
+        return
+    end
+    for _ = 1, PROBE_SPIN_CAP do
+        local okNow, now = pcall(timer)
+        if not okNow or type(now) ~= "number" or (now - started) * scale >= PROBE_SPIN_MS then
+            return
+        end
+    end
+end
+
+--- POST_LEVEL_GENERATION: a new floor. The liquid as generated, before any of the
+--- mod's own post-generation hooks (2.5 adds its rushing water in one).
+--- @param active fun(): boolean
+local function probeGeneration(active)
+    probe = nil
+    if not active() then
+        return
+    end
+    local fxType, liquidMask, fxMask = probeKinds()
+    local frame, sim = probeClock()
+    probe = {
+        gen = probeSample(0, liquidMask),
+        genFx = probeSample(fxType, fxMask).n,
+        genFrame = frame, genSim = sim,
+        mod = { queries = 0, hidden = 0, ord = 0, set = 0 },
+    }
+end
+
+--- ON.LEVEL, ahead of every callback the mod registers: what it is about to see.
+--- @param active fun(): boolean
+local function probeLevel(active)
+    if probe == nil or probe.level ~= nil or not active() then
+        return
+    end
+    local fxType, liquidMask, fxMask = probeKinds()
+    local frame, sim = probeClock()
+    local liquid, fx = probeSample(0, liquidMask), probeSample(fxType, fxMask)
+    local moving = false
+    if liquid.n + fx.n > 0 then
+        probeSpin()
+        local liquid2, fx2 = probeSample(0, liquidMask), probeSample(fxType, fxMask)
+        moving = liquid2.n ~= liquid.n or liquid2.set ~= liquid.set
+            or fx2.n ~= fx.n or fx2.ord ~= fx.ord
+    end
+    probe.level = { liquid = liquid, fx = fx, moving = moving, frame = frame, sim = sim }
+end
+
+--- The surface effects one of the mod's ON.LEVEL queries was about to be given, in
+--- the order the engine gave them. Queries run in the same order on every machine,
+--- so the running hashes compare query by query.
+--- @param uids integer[]
+local function probeModView(uids)
+    if probe == nil then
+        return
+    end
+    local keys = positionKeys(uids)
+    local mod = probe.mod
+    mod.queries = mod.queries + 1
+    mod.hidden = mod.hidden + #keys
+    mod.ord = (mod.ord * 1000003 + hashKeys(keys)) % PROBE_HASH_MOD
+    mod.set = (mod.set * 1000003 + hashSorted(keys)) % PROBE_HASH_MOD
+end
+
+--- @param keys integer[]
+--- @return string
+local function probeList(keys)
+    local parts = {}
+    for i = 1, math.min(#keys, PROBE_LIST_MAX) do
+        local key = keys[i]
+        parts[#parts + 1] = string.format("%.2f,%.2f,%d",
+            (((key >> 21) & 0x1FFFFF) - 0x100000) / 100,
+            ((key & 0x1FFFFF) - 0x100000) / 100, key >> 42)
+    end
+    if #keys > PROBE_LIST_MAX then
+        parts[#parts + 1] = string.format("(+%d more)", #keys - PROBE_LIST_MAX)
+    end
+    return table.concat(parts, " ")
+end
+
+--- Called by inputSync as the gate engages a floor: one more look, then the whole
+--- floor's measurements. nil outside a room.
+--- @return { wire: table, lines: string[]? }?
+function module.waterReport()
+    if probe == nil then
+        return nil
+    end
+    local fxType, liquidMask, fxMask = probeKinds()
+    local frame, sim = probeClock()
+    local liquid, fx = probeSample(0, liquidMask), probeSample(fxType, fxMask)
+    local lvl = probe.level or {
+        liquid = probeSample(nil), fx = probeSample(nil), moving = false, frame = -1, sim = -1,
+    }
+    local gen, mod = probe.gen, probe.mod
+    local wire = {
+        gn = gen.n, gh = gen.set,
+        ln = lvl.liquid.n, lh = lvl.liquid.set,
+        fn = lvl.fx.n, fo = lvl.fx.ord, fs = lvl.fx.set, ft = lvl.fx.tiles,
+        mv = lvl.moving and 1 or 0,
+        mq = mod.queries, mn = mod.hidden, mo = mod.ord, ms = mod.set,
+        en = liquid.n, eh = liquid.set, ef = fx.n, es = fx.set,
+    }
+    local lines = nil
+    if gen.n + lvl.liquid.n + lvl.fx.n + liquid.n + fx.n > 0 then
+        lines = {
+            string.format("water: generated liquid %d #%08X, surfaces %d | at ON.LEVEL"
+                .. " (%+d frames, %+d sim) liquid %d #%08X, surfaces %d ord #%08X set #%08X"
+                .. " tiles #%08X, moving %s | the mod asked %d time(s): %d hidden ord #%08X"
+                .. " set #%08X | at engage (%+d frames, %+d sim) liquid %d #%08X, surfaces"
+                .. " %d set #%08X",
+                gen.n, gen.set, probe.genFx,
+                lvl.frame - probe.genFrame, lvl.sim - probe.genSim,
+                lvl.liquid.n, lvl.liquid.set, lvl.fx.n, lvl.fx.ord, lvl.fx.set, lvl.fx.tiles,
+                lvl.moving and "YES" or "no",
+                mod.queries, mod.hidden, mod.ord, mod.set,
+                frame - probe.genFrame, sim - probe.genSim,
+                liquid.n, liquid.set, fx.n, fx.set),
+            "water surfaces at ON.LEVEL, as the engine listed them (x,y,layer): "
+                .. probeList(lvl.fx.keys),
+        }
+    end
+    return { wire = wire, lines = lines }
+end
+
+--- A non-host's verdict for one floor, from its own report and the world host's.
+--- nil on a floor with no water on either machine.
+--- @param mine table
+--- @param host table
+--- @param s integer
+--- @return string?
+function module.waterVerdict(mine, host, s)
+    local function probeField(t, k)
+        return math.floor(tonumber(t[k]) or -1)
+    end
+    local function probeWet(t)
+        return probeField(t, "gn") > 0 or probeField(t, "ln") > 0 or probeField(t, "fn") > 0
+            or probeField(t, "en") > 0 or probeField(t, "ef") > 0
+    end
+    if not probeWet(mine) and not probeWet(host) then
+        return nil
+    end
+    local function probeSame(...)
+        for _, k in ipairs({ ... }) do
+            if probeField(mine, k) ~= probeField(host, k) then
+                return false
+            end
+        end
+        return true
+    end
+    local function probeWord(b)
+        return b and "MATCH" or "DIFFER"
+    end
+    local asked = probeField(mine, "mq") > 0 or probeField(host, "mq") > 0
+    local fxOrd, fxSet = probeSame("fn", "fo"), probeSame("fn", "fs")
+    local modOrd, modSet = probeSame("mq", "mn", "mo"), probeSame("mq", "mn", "ms")
+    local engage = probeSame("en", "eh", "ef", "es")
+    local seenSame, seenSet = fxOrd, fxSet
+    if asked then
+        seenSame, seenSet = modOrd, modSet
+    end
+    local verdict
+    if seenSame then
+        verdict = "MATCH: the mod would have seen the same surfaces on both machines"
+    elseif seenSet then
+        verdict = "ORDER: the same surfaces, listed in a different order"
+    elseif engage then
+        verdict = "SETTLING: different when the mod looked, the same by the first frame"
+    else
+        verdict = "DIFFERENT: the water was still different at the first frame"
+    end
+    local fxHow = fxOrd and "same order" or (fxSet and "other order"
+        or (probeSame("fn", "ft") and "same tiles, moved within them" or "different"))
+    return string.format("WATER PROBE seq=%d: %s%s | generated liquid %s | at ON.LEVEL:"
+        .. " liquid %s, surfaces %s (%d here, %d on the host: %s) | what the mod saw: %s"
+        .. " | at engage: %s | moving during ON.LEVEL: here %s, host %s",
+        s, verdict, asked and "" or " (the mod did not ask on this floor)",
+        probeWord(probeSame("gn", "gh")), probeWord(probeSame("ln", "lh")), probeWord(fxOrd),
+        probeField(mine, "fn"), probeField(host, "fn"), fxHow,
+        asked and (modOrd and "MATCH" or (modSet and "same set, other order" or "DIFFER"))
+            or "n/a",
+        probeWord(engage), probeField(mine, "mv") == 1 and "YES" or "no",
+        probeField(host, "mv") == 1 and "YES" or "no")
+end
+
+local probeInstalled = false
+
 -- --------------------------------------------------------------------- install
 
 --- Give a hosted mod's environment every guarantee above.
@@ -550,17 +871,19 @@ function module.install(env, opts)
     --- @param list any
     --- @return table kept
     --- @return integer hidden
+    --- @return integer[] hiddenUids # in the order the engine listed them
     local function splitWaterFx(list)
-        local kept, hidden = {}, 0
+        local kept, hidden, hiddenUids = {}, 0, {}
         for i = 1, #list do
             local uid = list[i]
             if entityTypeOf(uid) == waterFx then
                 hidden = hidden + 1
+                hiddenUids[hidden] = uid
             else
                 kept[#kept + 1] = uid
             end
         end
-        return kept, hidden
+        return kept, hidden, hiddenUids
     end
 
     --- The query's own answer, without the water surface effects.
@@ -576,7 +899,13 @@ function module.install(env, opts)
         if list == nil then
             return list
         end
-        local ok, kept, hidden = pcall(splitWaterFx, list)
+        local ok, kept, hidden, hiddenUids = pcall(splitWaterFx, list)
+        -- The water probe (measurement only): what this query would have given the
+        -- mod. Every query counts, an empty one too -- one machine finding a surface
+        -- where the other finds none is exactly the difference being looked for.
+        if ok and probe ~= nil then
+            pcall(probeModView, hiddenUids)
+        end
         if not ok or hidden == 0 then
             return list
         end
@@ -862,6 +1191,19 @@ function module.install(env, opts)
     set_callback(onFrame, ON.GAMEFRAME)
     set_callback(clock.invalidate, ON.PRE_LOAD_SCREEN)
     set_callback(snapshotLiquid, ON.POST_LEVEL_GENERATION)
+
+    -- The water probe (measurement only, see above): once, however many mods are
+    -- hosted, since it looks at the engine's water and not at any one mod. Here, so
+    -- its ON.LEVEL look comes before every callback the mod registers.
+    if not probeInstalled then
+        probeInstalled = true
+        set_callback(function()
+            pcall(probeGeneration, isActive)
+        end, ON.POST_LEVEL_GENERATION)
+        set_callback(function()
+            pcall(probeLevel, isActive)
+        end, ON.LEVEL)
+    end
 
     control = {
         newRun = checkNewRun,

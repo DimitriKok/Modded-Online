@@ -1,5 +1,72 @@
 # Changelog
 
+## 2.0.0-dev76
+
+A measurement build, so the lily pads can come back. Gameplay is exactly dev75's: in
+a room, a hosted mod's ON.LEVEL still sees no water-surface effects, so 2.5's swamp
+still has no lily pads online. No server change: the server stays at **1.0.13**.
+Both players must be on dev76 for the two machines to be compared.
+
+### Why measure
+
+dev75 hides the water-surface effects at ON.LEVEL because the two machines can
+disagree about them. Whether the lily pads can come back without that trade-off
+depends on how they disagree, and nothing in the logs so far records the water:
+
+- **MATCH:** they no longer do. The 2-1 difference came from the random-number
+  streams, which dev75's ON.LEVEL anchor already sealed, and the hiding can go.
+- **ORDER:** the same surfaces, listed in a different order. Sorting the answer
+  brings the pads back unchanged.
+- **SETTLING:** different when the mods look, the same by the first lockstep frame.
+  Waiting for the water to settle brings them back.
+- **DIFFERENT:** still different at the first frame. Only the world host's
+  waterline, sent to everyone, can fix that.
+
+### What it records
+
+On every floor with water, in a room, each machine fingerprints the liquid and the
+water-surface effects:
+
+- **at generation,** before the mod's own post-generation hooks;
+- **as ON.LEVEL begins,** ahead of every callback the mod registers. It looks twice,
+  a few milliseconds apart: anything that changed in between was changed by another
+  thread while Lua held the main one;
+- **as the mod's own queries see them:** every query the dev75 filter answers, an
+  empty one included, in the order the engine listed the surfaces;
+- **as the gate engages,** on the first lockstep frame.
+
+The fingerprints travel with the floor digest. Each floor block in the desync log
+gets two more lines: `water:` with every fingerprint, and the list of surfaces as the
+engine gave them. A player who is not the world host also gets one verdict line per
+floor with water, comparing their machine with the host's:
+
+    WATER PROBE seq=9: MATCH: the mod would have seen the same surfaces on both machines | ...
+
+The verdict is about what the mod asked for. 2.5 asks for the front layer only, so a
+back-layer surface that differs is shown in the line but does not change the verdict.
+
+The probe only reads: no random-number draw, no spawn, no write to any entity. It
+does nothing in solo play.
+
+### Tests
+
+`tests/test_water_probe.py`, on modelled machines:
+
+- the four verdicts, and a dry floor saying nothing;
+- the verdict follows what the mod asked for;
+- every point is recorded, the probe looks before the mod does, and an empty query
+  counts;
+- water moving while the mods look is caught, and a clock that never advances
+  cannot hang the load;
+- each floor starts afresh, two hosted mods share one probe, and solo play is not
+  measured;
+- the probe draws nothing and changes nothing;
+- the joining player says each verdict once, whichever report arrives first; the
+  world host never judges itself; a host without water on its report is not judged.
+
+`tests/test_floor_block.py`: the water lines go inside the floor's block. 18
+deliberate breaks of the probe are each caught, and dev75's 29 still are.
+
 ## 2.0.0-dev75
 
 The 2.5 swamp desync. In room BGNY (on dev73), the two machines built different shops

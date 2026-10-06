@@ -1744,6 +1744,30 @@ function module.checkFloorDigest(s)
     end
 end
 
+--- Non-host only, MEASUREMENT ONLY (dev76): compare this floor's water probe with
+--- the world host's and log one verdict line (Determinism.waterVerdict). Nothing
+--- acts on the result. Like checkFloorDigest it needs both reports for the same
+--- floor, so it is tried from both ends, and says it once per floor.
+--- @param s integer
+function module.checkWaterProbe(s)
+    if Network.isWorldHost() then
+        return
+    end
+    local mine, host = myFloorDigest, hostFloorDigests[s]
+    if mine == nil or mine.seq ~= s or host == nil or mine.water == nil
+        or host.water == nil or mine.waterSaid then
+        return
+    end
+    mine.waterSaid = true
+    if Determinism == nil or Determinism.waterVerdict == nil or DesyncLog == nil then
+        return
+    end
+    local ok, line = pcall(Determinism.waterVerdict, mine.water, host.water, s)
+    if ok and type(line) == "string" then
+        DesyncLog.event("%s", line)
+    end
+end
+
 --- Broadcast our fingerprint for the floor that just engaged and check it against
 --- the host's (if already received). Every machine sends; only non-hosts check.
 function module.sendWorldDigest()
@@ -1756,16 +1780,30 @@ function module.sendWorldDigest()
         DesyncLog.enter("floorDigest+dump")
     end
     local seedHash, entHash, counts = computeFloorDigest()
-    myFloorDigest = { seq = seq, seed = seedHash, ent = entHash }
-    Network.sendEvent("worldchk", { s = seq, sd = seedHash, e = entHash })
+    -- the water probe's last look and the floor's measurements (dev76, measurement
+    -- only): sent with the digest so a non-host can compare, and written into the
+    -- floor block on every machine
+    local water = nil
+    if Determinism ~= nil and Determinism.waterReport ~= nil then
+        local ok, report = pcall(Determinism.waterReport)
+        if ok and type(report) == "table" then
+            water = report
+        end
+    end
+    myFloorDigest = { seq = seq, seed = seedHash, ent = entHash,
+        water = water ~= nil and water.wire or nil }
+    Network.sendEvent("worldchk", { s = seq, sd = seedHash, e = entHash,
+        w = water ~= nil and water.wire or nil })
     if DesyncLog ~= nil then
-        DesyncLog.floorSnapshot(seq, seedHash, entHash, counts)
+        DesyncLog.floorSnapshot(seq, seedHash, entHash, counts,
+            water ~= nil and water.lines or nil)
         DesyncLog.leave("floorDigest+dump")
     end
     module.checkFloorDigest(seq)
+    module.checkWaterProbe(seq)
 end
 
---- @param payload { s: integer, sd: integer, e: integer }
+--- @param payload { s: integer, sd: integer, e: integer, w: table? }
 --- @param originSlot integer
 local function onWorldChk(payload, originSlot)
     -- only the world host's fingerprint is authoritative
@@ -1779,9 +1817,11 @@ local function onWorldChk(payload, originSlot)
     hostFloorDigests[s] = {
         seed = math.floor(tonumber(payload.sd) or 0),
         ent = math.floor(tonumber(payload.e) or 0),
+        water = type(payload.w) == "table" and payload.w or nil,
     }
     hostFloorDigests[s - 3] = nil -- floors long past can be dropped
     module.checkFloorDigest(s)
+    module.checkWaterProbe(s)
 end
 
 -- -------------------------------------------------------------- desync check

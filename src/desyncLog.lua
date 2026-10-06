@@ -890,7 +890,8 @@ end
 --- @param seedHash integer
 --- @param entHash integer
 --- @param counts table<integer, integer>? # entity type id -> count, from the digest
-function module.floorSnapshot(s, seedHash, entHash, counts)
+--- @param extra string[]? # more lines for the block (the water probe's, dev76)
+function module.floorSnapshot(s, seedHash, entHash, counts, extra)
     if not MO_LOG or logPath == nil then
         return
     end
@@ -983,6 +984,11 @@ function module.floorSnapshot(s, seedHash, entHash, counts)
                 hist[#hist + 1] = string.format("%s=%d", entName(id), counts[id])
             end
             add(string.format("  entities: %d total | %s", total, table.concat(hist, " ")))
+        end
+        if type(extra) == "table" then
+            for _, line in ipairs(extra) do
+                add("  " .. tostring(line))
+            end
         end
 
         if full then

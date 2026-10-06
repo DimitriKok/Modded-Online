@@ -6,7 +6,7 @@ them.
 
 ## Start here
 
-**Build: `2.0.0-dev55` → `dev75`. The server must be redeployed at `1.0.13`.**
+**Build: `2.0.0-dev55` → `dev76`. The server must be redeployed at `1.0.13`.**
 Section 3's fix is half a server fix and does nothing without it (1.0.11 or later).
 Section 6 has a server half too, but its client half works on its own. A client on a
 server other than the one it expects says so in a toast and in the log. Check with
@@ -30,7 +30,7 @@ server other than the one it expects says so in a toast and in the log. Check wi
 | 14 | ENABLE DEBUG MESSAGES, and a RESTART REQUIRED popup | **NEW** in dev67, not yet tried in game — section 14 |
 | 15 | MODDED ONLINE as the main menu's ONLINE row, controller input, and the menu probe | **NEW** in dev68. In dev68's game test the takeover switched itself off on the first press; **FIXED** in dev69 and **confirmed in game** (the row opens our menu and stays put). The game-styled look is **NEW** in dev70 and drew correctly in game, with every line of text 1.7 times too big; **sized** in dev71; dev72 puts the menu in the main menu's own font (italic, Title Case); not yet tried in game — section 15 |
 | 16 | The other players shown in the camp lobby (climbing down the rope, walking about) | **NEW** in dev73. In its first two-player test nobody saw anybody: not one packet was sent. **FIXED** in dev74, not yet tried in game — section 16 |
-| 17 | 2.5's swamp desynced on 2-1: one machine built 2.5's new Wheel of Fortune, the other kept the dice shop | **FIXED** in dev75, not yet confirmed in game — section 17 |
+| 17 | 2.5's swamp desynced on 2-1: one machine built 2.5's new Wheel of Fortune, the other kept the dice shop | **FIXED** in dev75, not yet confirmed in game. The fix hides the swamp's lily pads online; dev76 **measures** whether they can come back — section 17 |
 
 **Git state:** everything is on `origin/fix/peer-save-restore`; the patch-delivered
 commits from the no-push-access session have landed. `git log --oneline
@@ -853,7 +853,29 @@ followed.
   engage.
 
 **The cost:** no 2.5 swamp lily pads online, and no HD-mod procedural lily pads or the
-frogs on them. Both are decoration.
+frogs on them. Both are decoration, but the aim is for nothing about a hosted mod to
+change, so dev76 measures whether they can come back (below).
+
+**dev76: measuring the water.** Gameplay is unchanged from dev75. In a room, each
+machine fingerprints the liquid and the water-surface effects at generation, as
+ON.LEVEL begins (twice, a few ms apart), as the mod's own queries see them, and as
+the gate engages. The floor block gets a `water:` line and the surface list, and
+the player who is not the world host gets one `WATER PROBE` verdict per floor with
+water (`Determinism.waterVerdict`, sent with the floor digest). What each verdict
+means for the lily pads:
+
+| Verdict | What differs | The fix it points to |
+|---|---|---|
+| `MATCH` | nothing the mod would see | stop hiding the surfaces: dev75's anchor was the fix |
+| `ORDER` | the order the engine lists them in | sort the answer by position |
+| `SETTLING` | the surfaces when the mod looks, not by the first frame | wait for the water to settle before the mod's ON.LEVEL; look at `moving` to see whether it settles while Lua waits |
+| `DIFFERENT` | the water itself, still at the first frame | the world host's waterline, sent to everyone before they build the floor |
+
+**To run the measurement:** two players on dev76, through 2.5's swamp (2-1 to 2-4),
+and through the HD mod's jungle if you can. Then collect both `desync_log.txt` files.
+The `WATER PROBE` lines are in the joining player's log. Decide only on floors where
+the mod asked (no "the mod did not ask" in the line); one `DIFFERENT` outweighs any
+number of `MATCH`es.
 
 **To confirm in game (two machines, 2.5):**
 
@@ -966,7 +988,7 @@ On a machine whose Python has no pytest or lupa, uv supplies both for the run:
 uv run --no-project --with pytest --with lupa python -m pytest tests/ -q
 ```
 
-914 passing, none failing (dev75). The 16 long-standing failures went in dev67, with the two
+939 passing, none failing (dev76). The 16 long-standing failures went in dev67, with the two
 stale test files they came from: `tests/test_world_mailbox.py` (the world mailbox
 deleted in dev44) and `tests/test_seeded_run.py` (the seeded-run flag removed in
 dev46). A failure here now means something broke.
