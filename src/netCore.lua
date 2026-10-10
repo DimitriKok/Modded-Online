@@ -1067,6 +1067,66 @@ local pythonCmd = nil
 local pythonChecked = false
 local pythonNoticeShown = false
 
+--- Is the game running under Wine: Proton, on Linux or a Steam Deck? Wine puts
+--- WINECONFIGDIR and its siblings in every Windows process's environment, and
+--- Windows never does.
+--- @return boolean
+local function underWine()
+    local found = false
+    pcall(function()
+        for _, name in ipairs({ "WINECONFIGDIR", "WINEHOMEDIR", "WINEDATADIR", "WINELOADER" }) do
+            local value = os.getenv(name)
+            if value ~= nil and value ~= "" then
+                found = true
+                return
+            end
+        end
+    end)
+    return found
+end
+module.underWine = underWine
+
+-- Where a Windows Python install puts its interpreter, for when `where` finds none.
+--
+-- Under Proton `where` finds nothing at all up to Proton 9: Wine's is a stub that
+-- prints nothing until Wine 10. So a Python installed inside the game's prefix,
+-- exactly as the Linux notes in the README say, was still "not installed". A
+-- Windows install with "Add python.exe to PATH" left unticked is an install too.
+-- Each place is checked with io.open: nothing is run.
+local PYTHON_MINORS = { 15, 14, 13, 12, 11, 10, 9, 8 }
+
+--- @return string? # the full path of an interpreter or of the `py` launcher
+local function pythonOnDisk()
+    local places = {}
+    local function add(dir, file)
+        if type(dir) == "string" and dir ~= "" then
+            places[#places + 1] = dir .. "\\" .. file
+        end
+    end
+    local localAppData = os.getenv("LOCALAPPDATA")
+    -- the launcher, installed for everyone (into Windows) or for this user only
+    add(os.getenv("WINDIR") or os.getenv("SystemRoot") or "C:\\Windows", "py.exe")
+    add(localAppData, "Programs\\Python\\Launcher\\py.exe")
+    for _, minor in ipairs(PYTHON_MINORS) do
+        local version = "Python3" .. minor
+        add(localAppData, "Programs\\Python\\" .. version .. "\\python.exe")
+        add(localAppData, "Programs\\Python\\" .. version .. "-32\\python.exe")
+        add(os.getenv("ProgramFiles") or "C:\\Program Files", version .. "\\python.exe")
+        add(os.getenv("ProgramFiles(x86)"), version .. "-32\\python.exe")
+        add("C:", version .. "\\python.exe")
+        -- the Python install manager's own runtimes (3.14 on)
+        add(localAppData, "Python\\pythoncore-3." .. minor .. "-64\\python.exe")
+    end
+    for _, path in ipairs(places) do
+        local handle = io.open(path, "rb")
+        if handle ~= nil then
+            handle:close()
+            return path
+        end
+    end
+    return nil
+end
+
 --- Detect a usable interpreter ONCE, and remember it.
 ---
 --- Uses `where`, NOT `<cmd> --version`. On Windows a machine with no Python still
@@ -1099,8 +1159,28 @@ local function detectPython()
             break
         end
     end
+    local how = "by where"
+    if pythonCmd == nil then
+        local path = nil
+        pcall(function()
+            path = pythonOnDisk()
+        end)
+        if path ~= nil then
+            -- quoted: the folders have spaces in them ("Program Files")
+            pythonCmd = '"' .. path .. '"'
+            how = "where it was installed; where found none"
+        end
+    end
     if pythonCmd ~= nil then
         dbgf("using '%s' to run the helper scripts", pythonCmd)
+    end
+    -- In the log too, held until a run opens it: a Linux capture has to say which
+    -- Python the helpers ran on, or that there was none.
+    local log = rawget(_G, "DesyncLog")
+    if log ~= nil and type(log.earlyEvent) == "function" then
+        pcall(log.earlyEvent, "python: %s%s", pythonCmd ~= nil
+            and string.format("%s (found %s)", pythonCmd, how) or "none found",
+            underWine() and " | under Wine (Proton)" or "")
     end
     return pythonCmd
 end
@@ -1116,13 +1196,30 @@ function module.requirePython(what)
     if cmd ~= nil then
         return cmd
     end
-    module.lastError = "Python is required — see the page that just opened"
+    local wine = underWine()
+    if wine then
+        module.lastError = "Python for Windows is required inside Proton — see the README"
+    else
+        module.lastError = "Python is required — see the page that just opened"
+    end
     if not pythonNoticeShown then
         pythonNoticeShown = true
-        errorf("Python is not installed, so %s cannot start. Modded Online's server, "
-            .. "bridge and test players are Python scripts. Install Python from %s "
-            .. "(tick \"Add python.exe to PATH\"), then restart Spelunky 2.", what, PYTHON_DOWNLOAD_URL)
-        pcall(toast, "Python is required to play online — opening the download page")
+        if wine then
+            -- The game is a Windows program here, and it looks for a Windows Python
+            -- in its own Proton prefix: the Linux one is out of its sight.
+            errorf("Python for Windows is not installed in Spelunky 2's Proton prefix, so "
+                .. "%s cannot start. The game runs as a Windows program under Proton and "
+                .. "cannot use Linux's python3. Install the Windows Python from %s into the "
+                .. "prefix, e.g. protontricks-launch --appid 418530 python-3.13.x-amd64.exe, "
+                .. "then restart Spelunky 2. README.md, \"Playing on Linux\", has the steps.",
+                what, PYTHON_DOWNLOAD_URL)
+            pcall(toast, "Python for Windows is needed inside Proton — see README.md")
+        else
+            errorf("Python is not installed, so %s cannot start. Modded Online's server, "
+                .. "bridge and test players are Python scripts. Install Python from %s "
+                .. "(tick \"Add python.exe to PATH\"), then restart Spelunky 2.", what, PYTHON_DOWNLOAD_URL)
+            pcall(toast, "Python is required to play online — opening the download page")
+        end
         pcall(function()
             os.execute(string.format('start "" "%s"', PYTHON_DOWNLOAD_URL))
         end)

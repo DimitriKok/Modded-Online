@@ -1,5 +1,51 @@
 # Changelog
 
+## 2.0.0-dev80
+
+Playing on Linux: the mod finds a Windows Python installed inside the game's Proton
+prefix, and says so in Proton's terms when there is none. Nothing about play changes,
+and the server stays at **1.0.13**. Both players still need dev80, because the lobby
+only lets the same Modded Online version play together.
+
+### What happened
+
+Spelunky 2 runs on Linux through Proton, as a Windows program in a Wine prefix, and so
+does everything the mod starts. A player who had installed Python on Linux (Omarchy's
+installer, `/usr/bin/python3`) got "Python is not installed": the game cannot see a
+Linux program. It needs the Windows Python, installed inside the prefix.
+
+Even that was not enough before this build. The mod found Python only through Windows'
+`where` command, and Wine's `where` is a stub that prints nothing up to Wine 9 (Wine
+implements it from 10.0). So on Proton 9 or older a Windows Python in the prefix was
+still "not installed".
+
+### Fixed
+
+- **When `where` finds nothing, the mod looks where a Windows install puts Python**:
+  the `py` launcher in `C:\Windows` or in the user's `Programs\Python\Launcher`, then
+  Python 3.15 down to 3.8 in the user's `Programs\Python`, in `Program Files` (and the
+  32-bit ones), in `C:\Python3x`, and in the Python install manager's own folders.
+  Nothing is run to look: each place is a file check. A found path is launched quoted.
+  On Windows this also finds an install whose "Add python.exe to PATH" was left
+  unticked. The Microsoft Store placeholders are still not taken for Python.
+- **Under Proton, the message says what to install and where**: `Python for Windows is
+  not installed in Spelunky 2's Proton prefix ... e.g. protontricks-launch --appid
+  418530 python-3.13.x-amd64.exe`, and points at the README's new "Playing on Linux
+  (Proton)". Wine is recognised by the variables it puts in every Windows process's
+  environment (`WINECONFIGDIR` and the rest).
+- **The desync log says which Python the helpers run on**, once a session:
+  `python: py (found by where)`, `python: "C:\windows\py.exe" (found where it was
+  installed; where found none) | under Wine (Proton)`, or `python: none found`.
+
+### Tests
+
+New: `tests/test_python_detect.py` (Python on the PATH used by name as before, the Store
+placeholder still not Python, an install off the PATH found, the newest first, the
+launcher before any one interpreter, worked out once a session, Proton 9 finding the
+prefix's Python, Proton 10 through `where`, the Proton message, Windows not taken for
+Wine, the log line for each case, a found path launched quoted). 1097 passing, 1
+skipped, under Lua 5.4 and 5.5; the server suite passes unchanged.
+
 ## 2.0.0-dev79
 
 The crash leaving the summit's second floor, and the Lua error before it that left

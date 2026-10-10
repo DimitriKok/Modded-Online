@@ -13,7 +13,10 @@ mod — just enable it alongside your content mods.
   "not recognised" box from a console you never asked for — tick **Add python.exe
   to PATH** in the installer, then restart Spelunky 2. `py`, `python` and
   `python3` are all accepted; Windows' Microsoft-Store placeholders for
-  `python.exe` are correctly *not* treated as an install.
+  `python.exe` are correctly *not* treated as an install. An install left off
+  the PATH is found where the installer put it. **On Linux** it has to be the
+  Windows Python, inside the game's Proton prefix: see "Playing on Linux
+  (Proton)" below.
 - Usage: the game's main menu → **MODDED ONLINE** (the game's Online row, renamed)
   → **HOST** or **JOIN**. A controller works as well as the keyboard. **VANILLA
   ONLINE**, at the bottom of that menu, opens the game's own Online menu. On a
@@ -79,6 +82,42 @@ mod — just enable it alongside your content mods.
   leave it off: it copies Modded Online's progress over the mod's every time.
 - Settings persist in `config.json` next to this file.
 - Console: set `MO_DEBUG = true` in the in-game console for verbose logs.
+
+## Playing on Linux (Proton)
+
+Spelunky 2 runs on Linux through Proton, as a Windows program inside a Wine prefix,
+and so does everything Modded Online starts. The server, the bridge and the test
+players need **the Windows version of Python, installed inside the game's Proton
+prefix**. The Linux `python3` from your distribution is out of the game's sight, and
+installing it does nothing for the mod.
+
+1. Install protontricks (on Arch: `yay -S protontricks`; there is also a Flatpak,
+   `com.github.Matoking.protontricks`).
+2. Start Spelunky 2 once through Steam if you never have, so that its prefix exists.
+3. From python.org, download Python 3.13's **Windows installer (64-bit)**,
+   `python-3.13.x-amd64.exe` (the classic installer, not the Python install manager).
+4. Run it inside Spelunky 2's prefix (Steam app id 418530):
+
+   ```bash
+   protontricks-launch --appid 418530 ~/Downloads/python-3.13.x-amd64.exe
+   ```
+
+5. On the installer's first page leave **Use admin privileges when installing py.exe**
+   ticked (it puts `py.exe` in the prefix's `C:\windows`), tick **Add python.exe to
+   PATH**, and choose **Install Now**.
+6. Start the game and use MODDED ONLINE as on Windows.
+
+Before dev80 the mod found Python only through Windows' `where` command, which Wine
+implements from 10.0 on: with Proton 9 or older, Python installed this way still read
+as missing. dev80 also looks where the installer puts it, so any Proton version works.
+
+If the installer will not run, Python's **Windows embeddable package (64-bit)** works
+too: unzip it to `drive_c/Python313` inside the prefix
+(`steamapps/compatdata/418530/pfx/` in the Steam library that has the game), and the
+mod finds `C:\Python313\python.exe` there.
+
+The helpers run under Proton like the game, so after you quit, Steam can show
+Spelunky 2 as running for up to a minute while the bridge closes itself.
 
 ## Testing on your own (TEST PLAYERS)
 

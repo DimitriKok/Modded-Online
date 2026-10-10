@@ -6,7 +6,7 @@ them.
 
 ## Start here
 
-**Build: `2.0.0-dev55` → `dev79`. The server must be redeployed at `1.0.13`.**
+**Build: `2.0.0-dev55` → `dev80`. The server must be redeployed at `1.0.13`.**
 Section 3's fix is half a server fix and does nothing without it (1.0.11 or later).
 Section 6 has a server half too, but its client half works on its own. A client on a
 server other than the one it expects says so in a toast and in the log. Check with
@@ -34,8 +34,9 @@ server other than the one it expects says so in a toast and in the log. Check wi
 | 18 | The peer got a Lua error on 4-1 (`attempt to call a number value`) and crashed 2 s into 4-2 | **NOT FIXED: cause not known.** The crash was in the engine, after a hosted update callback returned. dev77 makes the next one name itself — section 18 |
 | 19 | 4-2 desynced 45 s in (room VOYY), and the resync that followed got stuck on the transition for 20 s | **FIXED** in dev78. dev78's run (room UVLQ, 1-1 to 2-2, twice through world 1) had no desync at all. The desync: GAMEFRAME (and every hosted ON.FRAME moved to it) and the mod's global timers ran on frames the lockstep gate held, and a hosted PRE_UPDATE before the gate read the last frame's decision. The stall: the transition barrier held our own resync warp. Also in dev78: the pet on a quick restart, and the logs to Discord at the popup — section 19 |
 | 20 | The host crashed leaving the summit's 2-2 (room UVLQ), and a Lua error a couple of floors earlier left nothing in either log | **NOT FIXED: cause not known.** The crash was in 2-2's teardown, after 2.5's PRE_LEVEL_DESTRUCTION wrapper (`helpers2.lua:533`) returned. dev79 stops the leak sweep destroying the ~360 entities 2.5 parks on those floors (the one thing hosting did there that solo 2.5 does not), and makes the next crash and the next error name themselves — section 20 |
+| 21 | On Linux (Proton) the mod said "Python is not installed" with Python installed | **FIXED** in dev80, not yet tried in game. The game is a Windows program under Proton and needs the Windows Python inside its prefix; on Proton 9 and older Wine's `where` is a stub, so the mod now also looks where a Windows install puts Python — section 21 |
 
-**Git state:** the work is on `main`; dev77 to dev79 were pushed to
+**Git state:** the work is on `main`; dev77 to dev80 were pushed to
 `claude/vigilant-cori-chwlul` for review. `git log --oneline origin/main..HEAD` shows
 what a branch adds.
 
@@ -1160,6 +1161,41 @@ moment says whose it was.
 2. A Lua error with a `MODDED ONLINE ERROR` line is ours, with `HOSTED MOD ERROR` the
    mod's, with neither an entity hook (or 2.5's own SafeCall printing).
 
+## 21. Linux (Proton): "Python is not installed" with Python installed — FIXED in dev80, NOT YET TRIED IN GAME
+
+**The report:** testing on Omarchy (Arch) with Python installed by Omarchy's installer,
+the game said Python was not installed.
+
+**Why:** under Proton the game, and every helper it starts (`start ... py server.py`),
+is a Windows program in the game's Wine prefix (`compatdata/418530/pfx`). It cannot
+use Linux's `/usr/bin/python3`; it needs the Windows Python installed inside that
+prefix. And `detectPython` found Python only through `where`, which Wine's
+`programs/where` implements from **Wine 10.0** on (wine-10.0, Proton 10.0, Experimental);
+up to Wine 9 / Proton 9 it is a stub that prints nothing. So with Proton 9 even a
+Windows Python in the prefix read as missing.
+
+**dev80 (`netCore.lua`):** when `where` finds nothing, `pythonOnDisk` checks with
+`io.open` the places a Windows install puts Python (the launcher in `%WINDIR%` and in
+`%LOCALAPPDATA%\Programs\Python\Launcher`; 3.15 down to 3.8 per user, in Program
+Files, in `C:\Python3x`, and the install manager's `%LOCALAPPDATA%\Python\pythoncore-*`);
+a hit is launched quoted. `underWine()` (WINECONFIGDIR, WINEHOMEDIR, WINEDATADIR or
+WINELOADER in the environment, which Wine sets for every Windows process) switches the
+missing-Python message and toast to the Proton instructions. README.md has "Playing on
+Linux (Proton)": protontricks-launch with the classic Windows installer, or the
+embeddable zip unpacked to `drive_c/Python313`.
+
+**Also seen in Wine's sources, not changed:** Wine's `taskkill` has no `/FI`, so the
+"replace a leftover server or bridge by window title" calls do nothing under Proton.
+The bridge does not need them (a new bridge asks the old one to stand down over its
+port). A leftover auto-launched server is not replaced, but it exits once it holds no
+rooms.
+
+**To confirm in game:** on Linux, install the Windows Python into the prefix as the
+README says, start the game on the Proton it uses, and join or host. The desync log's
+`python:` line says what was found and how; with Proton 9 it should read
+`python: "C:\windows\py.exe" (found where it was installed; where found none) | under
+Wine (Proton)`.
+
 ## Diagnostic tooling (flags and the files they write)
 
 All flag files live in the pack folder. They are files, not settings, for the reason
@@ -1240,7 +1276,7 @@ On a machine whose Python has no pytest or lupa, uv supplies both for the run:
 uv run --no-project --with pytest --with lupa python -m pytest tests/ -q
 ```
 
-1083 passing, none failing, 1 skipped (it needs hdmod next to this pack) (dev79), under Lua 5.4 and 5.5. The 16 long-standing failures went in dev67, with the two
+1097 passing, none failing, 1 skipped (it needs hdmod next to this pack) (dev80), under Lua 5.4 and 5.5. The 16 long-standing failures went in dev67, with the two
 stale test files they came from: `tests/test_world_mailbox.py` (the world mailbox
 deleted in dev44) and `tests/test_seeded_run.py` (the seeded-run flag removed in
 dev46). A failure here now means something broke.
