@@ -1,5 +1,111 @@
 # Changelog
 
+## 2.0.0-dev79
+
+The crash leaving the summit's second floor, and the Lua error before it that left
+nothing in the log. No server change: the server stays at **1.0.13**. Both players
+must be on dev79, because what the leak sweep destroys changes, and so do the callback
+ids (the new load marks below are callbacks of ours).
+
+### What dev78's capture showed (room UVLQ, 1-1 to 2-2)
+
+- **No desync.** Both runs (1-1 to 1-4, then 1-1 to 2-2) matched on every floor: no
+  `FLOOR DESYNC`, no `POSITION DESYNC`, no checksum mismatch, and the two `level order`
+  lines agreed on every floor. The dev78 fixes held.
+- **The host crashed leaving 2-2.** Both machines reached the door on the same frame
+  (11:7502) and ran our PRE_LOAD_SCREEN callback. The peer went on to build the
+  transition and waited there for the host. The host's last trace mark was
+  `OUT mod helpers2.lua:533`: 2.5's wrapper for its PRE_LEVEL_DESTRUCTION callbacks
+  had returned. The process died after that, in 2-2's teardown, before the
+  transition's PRE_LEVEL_GENERATION. None of our callbacks run during a teardown, so
+  the trace could say no more, and every one of 2.5's PRE_LEVEL_DESTRUCTION callbacks
+  is that same function of helpers2.lua's.
+- **On 2-1 and 2-2 hosting did one thing solo 2.5 never does.** 2.5 parked about 360
+  entities outside the level as each of those floors began, and the leak sweep
+  destroyed all of them at frame 450 on both machines (366 on 2-1, 360 on 2-2). Solo,
+  2.5 leaves them where they are until the level's teardown takes them, and 2.5 can
+  still hold what it parked. Not proven to be the cause: an entity freed and then read
+  again crashes one machine and not another, which is what happened here.
+- **The Lua error a couple of floors earlier is in neither log.** Since dev77 an error
+  raised through our wrapper of a hosted callback goes to the desync log, so this one
+  came from somewhere else: one of Modded Online's own callbacks, whose errors were
+  never logged, or a callback the engine calls directly. The sound, console,
+  render-screen and instagib APIs handed theirs to the engine unwrapped, and a mod's
+  entity hooks still do.
+
+### Changed: the leak sweep leaves 2.5's usual parked entities alone
+
+- **It waits for a pile-up.** Parked entities are destroyed only while more than 1000
+  are parked on the floor. The lair boss's claws, the leak the sweep was built for, run
+  into the thousands. Fewer stay where 2.5 put them, as when playing alone.
+- **It never touches an ACTIVEFLOOR.** A push block or a falling platform can be a grid
+  entity, and 2.5 parks with `move_entity`, which leaves the level's grid as it was. The
+  engine removes a grid entity through `destroy_grid`, not a plain `destroy()`.
+- **Each floor's log says what was parked**, once, whether or not any of it is touched:
+  `parked outside the level by the mod: 360 at frame 150 (ITEM_ROCK 200, ...) -- left
+  where the mod put them, as unhosted (swept past 1000)`. A sweep line says what it
+  destroyed, by type.
+
+### The next crash and the next error say more
+
+- **A trace mark says what a hosted callback is for**: the event it was registered for
+  or the API, and, where the mod's own wrapper keeps them, the name the mod gave it and
+  where the function it wraps is defined:
+  `OUT mod helpers2.lua:533 (<2.5's name for it> @ <file>.lua:<line>) PRE_LEVEL_DESTRUCTION`.
+  2.5 registers nearly everything through Helpers2's wrappers, which close over a
+  `callbackName` or `debugName` and the `callback` they protect; both are read once, at
+  registration, and only while a trace or the profiler wants a name. A hosted error in
+  the desync log carries the same name.
+- **Each phase of a load leaves a mark**: `load:PRE_LEVEL_DESTRUCTION`,
+  `load:PRE_LAYER_DESTRUCTION 0`, and so on to `load:POST_LOAD_SCREEN`, and each screen
+  change a line in crash_notes.txt (`load: screen 12 -> 13`). Written only with
+  `mo_trace.on`. The callbacks are registered on every machine whatever the flags, so
+  the callback ids still match between machines.
+- **The sound, console, render-screen and instagib callbacks go through the hosted
+  wrapper** like the mod's other callbacks: named, run at our depth zero, and their
+  errors logged. One registered with a value that cannot be called is named at
+  registration (`passed a number, not a function, as the callback to
+  set_vanilla_sound_callback(...)`), as dev77 does for the rest. The engine calls a
+  sound callback from FMOD's thread whenever the sound plays, so those leave no trace
+  mark: the trace is one line, and a sound could overwrite the mark that says where the
+  main thread was. Their errors are still logged.
+- **An error in one of Modded Online's own callbacks is logged too**, as
+  `*** MODDED ONLINE ERROR in eventSync.lua:<line>: ...` with its stack, the first in
+  full and then a line every few seconds. Playlunky shows ours and a hosted mod's under
+  the same name, so the log can now say whose an error was. A mod's error passing up
+  through one of ours (the ordered ON.LEVEL batch, the world capture) is logged once,
+  as the mod's. The error still goes on to the engine unchanged.
+- A render-screen hook's id is not taken for the mod's in the clear guard: a screen
+  counts its own hooks from 1, so the same number can be one of our callbacks.
+
+### Known, not fixed
+
+- **A mod's entity hooks** (`set_pre_update_state_machine`, `set_pre_kill` and the
+  rest) still go to the engine directly, so an error in one reaches spelunky.log only.
+  2.5 protects its own with its `SafeCall`.
+- **2.5's `Helpers2.gameFrame` registers for `ON.GAME_FRAME`**, which the engine does
+  not define (it is `ON.GAMEFRAME`), so a callback registered through it never runs as
+  a game-frame callback. That is 2.5's to fix, and the registration still goes to the
+  engine as it is. The log now names the first such registration
+  (`registered a callback (helpers2.lua:501) for an event that does not exist`), so
+  the next capture says whether 2.5 ever calls it.
+
+### Tests
+
+New: `tests/test_engine_called_callbacks.py` (the sound callback wrapped in third
+place and still the mod's to clear, each API's non-callable named, naming the mod's
+arguments never raising, a render-screen hook still skipping the default rendering and
+its id not the mod's, instagib's the mod's to clear, the event or API in errors and in
+the trace, the mod's own name through one and two Helpers2-style wrappers, a long name
+leaving room for the clock, a sound callback leaving the trace alone, a registration
+for an event that does not exist named once, a mark per load phase, PRE_LOAD_SCREEN
+never skipped, the same registrations with and without the trace, the census line, an
+error of ours logged as ours and the error value kept, the mod's error through one of
+ours logged once as the mod's). Added to: `tests/test_leak_sweep.py` (a summit-sized
+floor left alone, a pile-up past the limit swept in uid order, only what was parked
+long enough, never an ACTIVEFLOOR, the census once a floor). 1083 passing, 1 skipped,
+under Lua 5.4 and 5.5; the server suite passes unchanged.
+
 ## 2.0.0-dev78
 
 The run that desynced on 4-2 and then got stuck, and the Discord logs now go the

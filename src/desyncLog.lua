@@ -1155,5 +1155,83 @@ function module.positionDesync(key, mineHash, theirHash, streak)
     end)
 end
 
+--- A census as one line, most common first: "ITEM_ROCK 200, FX_SPARK 100, +3 more
+--- kinds". For the sweep's notes (eventSync), which must not build a type-name map
+--- of their own: eventSync's main chunk is at Lua's limit of locals.
+--- @param counts table<integer, integer> # ENT_TYPE id -> count
+--- @param max integer
+--- @return string
+function module.typeCounts(counts, max)
+    local rows = {}
+    for id, n in pairs(counts or {}) do
+        rows[#rows + 1] = { name = entName(id), n = n }
+    end
+    table.sort(rows, function(a, b)
+        if a.n ~= b.n then
+            return a.n > b.n
+        end
+        return a.name < b.name
+    end)
+    local parts = {}
+    for i = 1, math.min(#rows, max) do
+        parts[#parts + 1] = rows[i].name .. " " .. tostring(rows[i].n)
+    end
+    if #rows > max then
+        parts[#parts + 1] = string.format("+%d more kind(s)", #rows - max)
+    end
+    if #parts == 0 then
+        return "none"
+    end
+    return table.concat(parts, ", ")
+end
+
+-- ------------------------------------------------- the load, phase by phase
+--
+-- A level's teardown and the next screen's build run none of our per-frame
+-- callbacks, so a crash there left crash_frame.txt at whatever had run last. Room
+-- UVLQ's host: `OUT mod helpers2.lua:533` -- 2.5's PRE_LEVEL_DESTRUCTION wrapper --
+-- and nothing after it, so nothing to say how far into the teardown the engine got.
+-- Each phase of a load now leaves its own mark (`load:PRE_LAYER_DESTRUCTION 0`, ...),
+-- and each screen change a line in crash_notes.txt. Nothing is written unless the
+-- trace is armed (mo_trace.on).
+do
+    local on = rawget(_G, "ON")
+    local phases = {
+        "PRE_LOAD_SCREEN", "PRE_LEVEL_DESTRUCTION", "PRE_LAYER_DESTRUCTION",
+        "POST_LAYER_DESTRUCTION", "POST_LEVEL_DESTRUCTION", "PRE_LEVEL_CREATION",
+        "PRE_LAYER_CREATION", "POST_LAYER_CREATION", "PRE_LOAD_LEVEL_FILES",
+        "PRE_LEVEL_GENERATION", "POST_LEVEL_GENERATION", "POST_LEVEL_CREATION",
+        "POST_LOAD_SCREEN",
+    }
+    if type(on) == "table" and type(set_callback) == "function" then
+        for _, phase in ipairs(phases) do
+            local event = on[phase]
+            if event ~= nil then
+                local mark = "load:" .. phase
+                local screenChange = phase == "PRE_LOAD_SCREEN"
+                -- nothing is returned: PRE_LOAD_SCREEN reads a true as "skip the load"
+                set_callback(function(layer)
+                    if not traceActive() then
+                        return
+                    end
+                    local name = mark
+                    if type(layer) == "number" then
+                        name = mark .. " " .. tostring(layer)
+                    end
+                    module.frameMark(name)
+                    module.frameDone(name)
+                    if screenChange then
+                        pcall(function()
+                            local st = get_local_state()
+                            module.traceNote("load: screen %s -> %s | sim %s",
+                                tostring(st.screen), tostring(st.screen_next), simClock())
+                        end)
+                    end
+                end, event)
+            end
+        end
+    end
+end
+
 DesyncLog = module
 return module

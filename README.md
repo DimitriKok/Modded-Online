@@ -245,11 +245,15 @@ fails the test with the frame it died on, instead of quietly hanging.
   state-machine update — which an entity that far outside the level never gets, so
   every swept entity leaks. A long lair-boss fight piles up thousands, the sim
   rate decays (the "known 2.5 lag"), and the engine eventually dies inside its own
-  update. Modded Online finishes the job: entities parked at the sentinel X for
-  60+ simulated frames are destroyed on a fixed cadence in sorted uid order, so
-  every machine destroys the identical set on the identical frame. Players, mounts
-  and engine furniture are never touched. Drop `mo_nosweep.on` in the pack folder
-  to disable it; the desync-log header records which way it ran (`leaksweep=`).
+  update. Modded Online finishes the job once they pile up: while more than 1000
+  are parked, entities parked at the sentinel X for 300+ simulated frames are
+  destroyed on a fixed cadence in sorted uid order, so every machine destroys the
+  identical set on the identical frame. Fewer are left where 2.5 put them, as when
+  playing alone (since dev79: the few hundred 2.5 parks as a summit floor begins
+  were the last thing hosting did differently before a crash leaving one). Players,
+  mounts, active floors and engine furniture are never touched. Each floor's log
+  says what was parked. Drop `mo_nosweep.on` in the pack folder to disable it; the
+  desync-log header records which way it ran (`leaksweep=`).
 - **Reliable events**: the ordered channel is applied strictly in sequence on the
   client, so a single event a client never receives holds back every later one.
   The server therefore re-sends until acked and **never gives up** while the

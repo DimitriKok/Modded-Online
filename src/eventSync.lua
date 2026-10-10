@@ -1510,7 +1510,8 @@ end
 local PARKED_X = -900           -- 2.5 parks at -1000; the level starts at 0
 -- Simulated frames between sweeps. Was 30 (twice a second), which measured as
 -- the single most expensive thing Modded Online does: the scan walks every
--- MONSTER|ITEM|ACTIVEFLOOR|DECORATION|FX|EXPLOSION|ROPE entity on the floor,
+-- MONSTER|ITEM|ACTIVEFLOOR|DECORATION|FX|EXPLOSION|ROPE entity on the floor (no
+-- ACTIVEFLOOR since dev79),
 -- calling get_entity and a pcall for each, and it allocates a uid list plus two
 -- tables every time. A capture showed this callback taking 25-34ms in a single
 -- frame -- twice a 60fps budget -- while destroying nothing all session.
@@ -1538,8 +1539,39 @@ local SWEEP_GRACE = 300
 -- player is a native access violation, and a mount can be carrying one. LOGICAL,
 -- FLOOR and BG are absent too: those are the engine's own furniture, and nothing
 -- 2.5 sweeps is one.
-local SWEEP_MASKS = MASK.MONSTER | MASK.ITEM | MASK.ACTIVEFLOOR
+--
+-- NOT ACTIVEFLOOR, since dev79. A push block or a falling platform can be a GRID
+-- entity, and 2.5 parks with `move_entity`, which moves the entity and leaves the
+-- level's grid as it was. The engine has a separate path for removing a grid entity
+-- (`destroy_grid`, `layer:destroy_grid_entity`); a plain `destroy()` of one the grid
+-- still lists can leave the grid pointing at freed memory, and the next thing to walk
+-- the grid -- the level's own teardown -- reads it. That is the shape of room UVLQ's
+-- crash (below, at SWEEP.LIMIT).
+local SWEEP_MASKS = MASK.MONSTER | MASK.ITEM
     | MASK.DECORATION | MASK.FX | MASK.EXPLOSION | MASK.ROPE
+-- WHEN to sweep, since dev79: only once the mod's parked entities pile up past
+-- LIMIT. Below it they stay where 2.5 put them, which is exactly what 2.5 does in
+-- solo -- its own destroy never runs out there -- until the level's teardown takes
+-- them with everything else.
+--
+-- Room UVLQ: on both summit floors (2-1, 2-2) 2.5 parked ~360 entities as the floor
+-- began (its `replaceSpawnedEntities`, for one, parks every entity it replaces) and
+-- this sweep destroyed them all at frame 450. The host then crashed in 2-2's teardown, the
+-- instant one of 2.5's PRE_LEVEL_DESTRUCTION callbacks returned (crash_frame.txt:
+-- `OUT mod helpers2.lua:533`, 2.5's preLevelDestruction wrapper). Not proven to be
+-- the cause, but it is the one thing hosting did on those floors that solo 2.5
+-- never does: 2.5 can still hold what it parked (by uid, which the engine recycles
+-- once we free it, or by reference), and its teardown is what would reach it. The
+-- pile-up this was built for -- the lair boss's claws, thousands of them -- is far
+-- past LIMIT and still swept.
+local SWEEP = { LIMIT = 1000, censusLogged = false }
+--- An entity's type, read protected for the same reason as its x (readEntityX), and
+--- kept in the table rather than as a local: this chunk is at Lua's limit of locals.
+--- @param e Entity
+--- @return integer
+function SWEEP.typeOf(e)
+    return e.type.id
+end
 local parkedSince = {}          -- uid -> time_level it was first seen parked
 -- The last simulated frame actually swept. POST_UPDATE fires per RENDERED frame,
 -- so while the lockstep gate holds the simulation still, `state.time_level` stops
@@ -1586,7 +1618,8 @@ local function pollSweepParked()
         return
     end
     lastSweptFrame = now
-    local parkedNow, victims = {}, {}
+    local parkedNow, victims, kinds = {}, {}, {}
+    local parked = 0
     pcall(function()
         for _, uid in ipairs(get_entities_by(0, SWEEP_MASKS, LAYER.BOTH)) do
             local e = get_entity(uid)
@@ -1598,10 +1631,17 @@ local function pollSweepParked()
                 end
             end
             if x ~= nil and x <= PARKED_X then
+                parked = parked + 1
                 local since = parkedSince[uid] or now
                 parkedNow[uid] = since
                 if now - since >= SWEEP_GRACE then
                     victims[#victims + 1] = uid
+                end
+                if not SWEEP.censusLogged then
+                    local okT, kind = pcall(SWEEP.typeOf, e)
+                    if okT and kind ~= nil then
+                        kinds[kind] = (kinds[kind] or 0) + 1
+                    end
                 end
             end
         end
@@ -1609,18 +1649,35 @@ local function pollSweepParked()
     -- forget uids that are no longer parked (2.5 got to them, or the uid was
     -- recycled onto a live entity), so this table cannot grow without bound
     parkedSince = parkedNow
-    if #victims == 0 then
+    -- Once a floor, what the mod has parked out there, whether or not any of it is
+    -- touched: the next capture says what 2.5 parks, and what it was left with.
+    if parked > 0 and not SWEEP.censusLogged and DesyncLog ~= nil then
+        SWEEP.censusLogged = true
+        local census = "?"
+        if DesyncLog.typeCounts ~= nil then
+            census = DesyncLog.typeCounts(kinds, 6)
+        end
+        DesyncLog.event("parked outside the level by the mod: %d at frame %d (%s) -- %s",
+            parked, now, census, parked > SWEEP.LIMIT
+                and string.format("past %d: swept once parked %d frames", SWEEP.LIMIT, SWEEP_GRACE)
+                or string.format("left where the mod put them, as unhosted (swept past %d)", SWEEP.LIMIT))
+    end
+    if #victims == 0 or parked <= SWEEP.LIMIT then
         return
     end
     table.sort(victims) -- identical destruction order on every machine
-    local destroyed = 0
+    local destroyed, gone = 0, {}
     for _, uid in ipairs(victims) do
         parkedSince[uid] = nil
         local e = get_entity(uid)
         if e ~= nil then
+            local okT, kind = pcall(SWEEP.typeOf, e)
             local ok = pcall(function() e:destroy() end)
             if ok then
                 destroyed = destroyed + 1
+                if okT and kind ~= nil then
+                    gone[kind] = (gone[kind] or 0) + 1
+                end
             end
         end
     end
@@ -1632,8 +1689,12 @@ local function pollSweepParked()
     -- needs to be able to tell those apart.
     if DesyncLog ~= nil and destroyed > 0 and (firstOfFloor or now >= sweepNoticeAt) then
         sweepNoticeAt = now + 600
-        DesyncLog.event("swept %d leaked entity(s) parked outside the level (%d this floor, at frame %d)",
-            destroyed, sweptTotal, now)
+        local census = "?"
+        if DesyncLog.typeCounts ~= nil then
+            census = DesyncLog.typeCounts(gone, 6)
+        end
+        DesyncLog.event("swept %d leaked entity(s) parked outside the level (%d this floor, at frame %d,"
+            .. " %d were parked): %s", destroyed, sweptTotal, now, parked, census)
     end
 end
 
@@ -2166,6 +2227,7 @@ function module.onGateEngaged(screenKind)
         doorHeldLast = {}
         parkedSince = {}        -- same reason: a new level reuses the uid space
         sweptTotal = 0
+        SWEEP.censusLogged = false
         -- MUST be reset with them. time_level restarts at 0 every floor but this
         -- did not, so a leftover deadline from a long previous floor silenced the
         -- sweep notice for the whole start of the next one -- and a capture that

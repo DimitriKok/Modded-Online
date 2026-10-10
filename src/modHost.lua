@@ -710,6 +710,14 @@ local REGISTRATION_APIS = {
     "register_option_combo",
     "register_option_button",
     "register_console_command",
+    -- dev79: the remaining global APIs that store a callback for the engine to call
+    -- later. Until now they went straight to the engine, unnamed and unchecked: a
+    -- value that cannot be called reaches Playlunky as `attempt to call a number
+    -- value` with an empty stack, and none of our log says which. Room UVLQ's host
+    -- saw one a couple of floors before its crash, and our log has nothing of it.
+    "set_pre_render_screen",
+    "set_post_render_screen",
+    "set_on_player_instagib",
 }
 
 --- The registration APIs whose FIRST argument is the callback the engine will call.
@@ -725,6 +733,95 @@ local CALLBACK_FIRST = {
     set_timeout = true,
     set_global_timeout = true,
 }
+
+--- ...and the ones whose callback comes later, by its position.
+local CALLBACK_AT = {
+    set_vanilla_sound_callback = 3,
+    register_console_command = 2,
+    set_pre_render_screen = 2,
+    set_post_render_screen = 2,
+    set_on_player_instagib = 2,
+}
+
+--- Which argument of `name` is the callback, if any.
+--- @param name string
+--- @return integer?
+local function callbackIndex(name)
+    if CALLBACK_FIRST[name] then
+        return 1
+    end
+    return CALLBACK_AT[name]
+end
+
+--- APIs whose callback the engine calls from ANOTHER thread. Overlunky runs a vanilla
+--- sound callback on FMOD's ("Callbacks are executed on another thread, so avoid
+--- touching any global state, only the local Lua state is protected"), whenever the
+--- sound plays -- between our frames, with the main thread anywhere at all. Hosted, it
+--- is still named and its errors still logged; it just leaves the crash trace alone
+--- (see Callbacks.hosted).
+local OFF_THREAD = {
+    set_vanilla_sound_callback = true,
+}
+
+--- APIs whose id is NOT a callback id of the script's: a screen keeps its own count,
+--- cleared through clear_screen_callback(screen, id). Taking one for the mod's in the
+--- clear_callback guard could hand the mod one of OUR callback ids that happens to
+--- carry the same number.
+local NOT_A_CALLBACK_ID = {
+    set_pre_render_screen = true,
+    set_post_render_screen = true,
+}
+
+--- ON's names by value, for the label on a hosted callback (see Callbacks.hosted).
+local onNames = nil
+
+--- `tostring`, protected: a table's __tostring is the mod's code, and naming what the
+--- mod passed must never be what raises.
+--- @param v any
+--- @return string
+local function textOf(v)
+    local ok, text = pcall(tostring, v)
+    return ok and type(text) == "string" and text or "?"
+end
+
+--- Where a function of the mod's is defined, as `file.lua:line`.
+--- @param fn any
+--- @return string
+local function definedAt(fn)
+    local dbg = rawget(_G, "debug")
+    if type(fn) == "function" and type(dbg) == "table" and type(dbg.getinfo) == "function" then
+        local ok, info = pcall(dbg.getinfo, fn, "S")
+        if ok and type(info) == "table" then
+            local src = tostring(info.short_src or info.source or "?")
+            return (src:match("([^/\\]+)$") or src) .. ":" .. tostring(info.linedefined or "?")
+        end
+    end
+    return textOf(fn)
+end
+
+--- What a registration was FOR: the event for set_callback, else the API.
+--- @param name string
+--- @param event any
+--- @return string
+local function registrationLabel(name, event)
+    if name ~= "set_callback" then
+        return name
+    end
+    if onNames == nil then
+        onNames = {}
+        local on = rawget(_G, "ON")
+        if type(on) == "table" then
+            for key, value in pairs(on) do
+                -- the first name alphabetically, should two share a value
+                if type(key) == "string" and type(value) == "number"
+                    and (onNames[value] == nil or key < onNames[value]) then
+                    onNames[value] = key
+                end
+            end
+        end
+    end
+    return onNames[event] or ("ON " .. tostring(event))
+end
 
 --- Every live registration every hosted mod has made, by API, since boot -- and
 --- where the count stood at the last floor. Timers counted in engine frames
@@ -1174,6 +1271,10 @@ function module.newSandbox(report, opts)
     -- engine called it, not Lua -- which is exactly what room FVJF's peer saw on 4-1,
     -- with nothing to say which registration it was. Named here, once per API.
     local nonCallableSaid = {}
+    -- ...and one registered for an event that does not exist, which arrives as nil: an
+    -- ON name the engine does not define. 2.5's Helpers2.gameFrame registers for
+    -- `ON.GAME_FRAME`, where the engine's is ON.GAMEFRAME. Named once, with where.
+    local noEventSaid = false
 
     -- What the lockstep needs of a hosted callback on its way to the engine (the
     -- gate's decision first, timers counted in frames the world moved): only where
@@ -1209,13 +1310,14 @@ function module.newSandbox(report, opts)
                 if not module.wrapDisabled() then
                     hostedWrap = Callbacks.hosted
                 end
-            elseif CALLBACK_FIRST[name] and Callbacks ~= nil and not module.wrapDisabled() then
+            elseif callbackIndex(name) ~= nil and Callbacks ~= nil and not module.wrapDisabled() then
                 -- The timers and the spawn and tile-code hooks go through the same
                 -- wrapper since dev77, for the same two reasons: the crash trace and
                 -- the profile can name them (the FVJF crash trace could see only the
                 -- mod's set_callback callbacks), and our depth is zero inside them --
                 -- a spawn hook set off by a spawn of OURS used to run at our depth,
-                -- where the mod's own bare clear_callback() in it was refused.
+                -- where the mod's own bare clear_callback() in it was refused. The
+                -- sound, console, screen and instagib callbacks since dev79.
                 hostedWrap = Callbacks.hosted
             end
             -- Playlunky's option APIs take (id, label, long_desc, value). hdmod
@@ -1226,26 +1328,46 @@ function module.newSandbox(report, opts)
             local isOption = name:sub(1, 16) == "register_option_"
             if type(real) == "function" then
                 env[name] = function(...)
+                    local event = select(2, ...)
                     report.callbacks[#report.callbacks + 1] = {
                         api = name,
-                        event = select(2, ...),
+                        -- not the callback itself, where that is what comes second (a
+                        -- console command, a render-screen or instagib hook): this list
+                        -- runs from boot and must not keep every one of them alive
+                        event = type(event) ~= "function" and event or nil,
                     }
                     tally[name] = (tally[name] or 0) + 1
                     -- named before the call, not after: if this is what kills the
                     -- process, the trace has to already say so
                     if module.onProgress ~= nil then
                         pcall(module.onProgress, name,
-                            name .. " " .. tostring((select(1, ...))))
+                            name .. " " .. textOf((select(1, ...))))
                     end
                     local first = ...
-                    if CALLBACK_FIRST[name] and not nonCallableSaid[name]
-                        and not callableValue(first) then
+                    local cbAt = callbackIndex(name)
+                    local cb = nil
+                    if cbAt ~= nil then
+                        cb = (select(cbAt, ...))
+                    end
+                    if cbAt ~= nil and not nonCallableSaid[name] and not callableValue(cb) then
                         nonCallableSaid[name] = true
+                        local shown = {}
+                        for i = 1, math.min(select("#", ...), 4) do
+                            shown[i] = textOf((select(i, ...)))
+                        end
                         errorf("mod host: %s passed a %s, not a function, as the callback"
-                            .. " to %s(%s, %s) -- the engine will raise \"attempt to call a"
+                            .. " to %s(%s) -- the engine will raise \"attempt to call a"
                             .. " %s value\" each time it fires. Named once.",
-                            tostring(opts.packDir or "the hosted mod"), type(first), name,
-                            tostring(first), tostring((select(2, ...))), type(first))
+                            tostring(opts.packDir or "the hosted mod"), type(cb), name,
+                            table.concat(shown, ", "), type(cb))
+                    end
+                    if name == "set_callback" and event == nil and not noEventSaid then
+                        noEventSaid = true
+                        errorf("mod host: %s registered a callback (%s) for an event that"
+                            .. " does not exist (nil) -- an ON name the engine does not"
+                            .. " define, such as ON.GAME_FRAME for ON.GAMEFRAME. It will"
+                            .. " not run when the mod means it to. Named once.",
+                            tostring(opts.packDir or "the hosted mod"), definedAt(first))
                     end
                     -- Keep the mod's ON.LOAD handler. Because the mod runs in
                     -- OUR state, this is an ordinary Lua function we hold a
@@ -1256,9 +1378,17 @@ function module.newSandbox(report, opts)
                         module.loadHandlers[#module.loadHandlers + 1] = first
                     end
                     local id
-                    if hostedWrap ~= nil and type(first) == "function" then
-                        local fn = hostedWrap(first)
-                        local event = select(2, ...)
+                    if hostedWrap ~= nil and cbAt ~= nil and cbAt > 1 and type(cb) == "function" then
+                        -- the callback is not the first argument: put the wrapped one
+                        -- back where it came from, everything else untouched. Labelled
+                        -- with what comes first -- the sound, the command, the screen,
+                        -- the player -- which is what tells two of them apart.
+                        local args = table.pack(...)
+                        args[cbAt] = hostedWrap(cb, name .. " " .. textOf(first),
+                            OFF_THREAD[name] == true)
+                        id = real(table.unpack(args, 1, args.n))
+                    elseif hostedWrap ~= nil and type(first) == "function" then
+                        local fn = hostedWrap(first, registrationLabel(name, event))
                         if lockstepAware and HELD_PROOF_TIMERS[name] and type(event) == "number"
                             and type(rawGlobalInterval) == "function" then
                             -- counted in the frames the world moved (heldProofTimer)
@@ -1280,7 +1410,7 @@ function module.newSandbox(report, opts)
                     else
                         id = real(...)
                     end
-                    if type(id) == "number" then
+                    if type(id) == "number" and not NOT_A_CALLBACK_ID[name] then
                         owned[id] = true
                     end
                     return id

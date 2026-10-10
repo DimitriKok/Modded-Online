@@ -24,7 +24,8 @@ DESYNC_LOG = (PACK / "src" / "desyncLog.lua").read_text(encoding="utf-8")
 NL = chr(10)
 
 
-def runtime(tmp_path, flags=()):
+def runtime(tmp_path, flags=(), engine=""):
+    """desyncLog.lua on stubs; `engine` is Lua run just before it loads, to change one."""
     for name in flags:
         (tmp_path / name).write_text("", encoding="utf-8")
     root = str(tmp_path).replace(chr(92), "/")
@@ -60,6 +61,8 @@ function get_game_manager() return nil end
 function get_type() return nil end
 Network = {isInRun = function() return false end, isActive = function() return false end}
 """)
+    if engine:
+        rt.execute(engine)
     rt.execute(DESYNC_LOG)
     return rt
 

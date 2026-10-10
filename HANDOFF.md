@@ -6,7 +6,7 @@ them.
 
 ## Start here
 
-**Build: `2.0.0-dev55` → `dev78`. The server must be redeployed at `1.0.13`.**
+**Build: `2.0.0-dev55` → `dev79`. The server must be redeployed at `1.0.13`.**
 Section 3's fix is half a server fix and does nothing without it (1.0.11 or later).
 Section 6 has a server half too, but its client half works on its own. A client on a
 server other than the one it expects says so in a toast and in the log. Check with
@@ -32,9 +32,10 @@ server other than the one it expects says so in a toast and in the log. Check wi
 | 16 | The other players shown in the camp lobby (climbing down the rope, walking about) | **NEW** in dev73. In its first two-player test nobody saw anybody: not one packet was sent. **FIXED** in dev74, not yet tried in game — section 16 |
 | 17 | 2.5's swamp desynced on 2-1: one machine built 2.5's new Wheel of Fortune, the other kept the dice shop | **FIXED** in dev75; dev76's capture (FVJF) ran 1-1 to 4-2 with every floor matching. dev76 **measured** the water: identical on both machines. The real cause was the ON.LEVEL callback ORDER (Overlunky's unordered_map). dev77 brings the lily pads back and runs a hosted mod's ON.LEVEL callbacks in registration order; not yet tried in game — section 17 |
 | 18 | The peer got a Lua error on 4-1 (`attempt to call a number value`) and crashed 2 s into 4-2 | **NOT FIXED: cause not known.** The crash was in the engine, after a hosted update callback returned. dev77 makes the next one name itself — section 18 |
-| 19 | 4-2 desynced 45 s in (room VOYY), and the resync that followed got stuck on the transition for 20 s | **FIXED** in dev78, not yet tried in game. The desync: GAMEFRAME (and every hosted ON.FRAME moved to it) and the mod's global timers ran on frames the lockstep gate held, and a hosted PRE_UPDATE before the gate read the last frame's decision. The stall: the transition barrier held our own resync warp. Also in dev78: the pet on a quick restart, and the logs to Discord at the popup — section 19 |
+| 19 | 4-2 desynced 45 s in (room VOYY), and the resync that followed got stuck on the transition for 20 s | **FIXED** in dev78. dev78's run (room UVLQ, 1-1 to 2-2, twice through world 1) had no desync at all. The desync: GAMEFRAME (and every hosted ON.FRAME moved to it) and the mod's global timers ran on frames the lockstep gate held, and a hosted PRE_UPDATE before the gate read the last frame's decision. The stall: the transition barrier held our own resync warp. Also in dev78: the pet on a quick restart, and the logs to Discord at the popup — section 19 |
+| 20 | The host crashed leaving the summit's 2-2 (room UVLQ), and a Lua error a couple of floors earlier left nothing in either log | **NOT FIXED: cause not known.** The crash was in 2-2's teardown, after 2.5's PRE_LEVEL_DESTRUCTION wrapper (`helpers2.lua:533`) returned. dev79 stops the leak sweep destroying the ~360 entities 2.5 parks on those floors (the one thing hosting did there that solo 2.5 does not), and makes the next crash and the next error name themselves — section 20 |
 
-**Git state:** the work is on `main`; dev77 and dev78 were pushed to
+**Git state:** the work is on `main`; dev77 to dev79 were pushed to
 `claude/vigilant-cori-chwlul` for review. `git log --oneline origin/main..HEAD` shows
 what a branch adds.
 
@@ -1083,6 +1084,82 @@ on a server that forwards logs):**
 in the engine's hash order, with ids that differ between machines; dev77's ordered
 dispatch covers ON.LEVEL only. A mod that changes the world from a render callback.
 
+## 20. Room UVLQ: the host crashed leaving 2-2 — CAUSE NOT KNOWN; dev79 changes the sweep and makes the next one name itself
+
+**The capture** (dev78, host slot 1 = the player who crashed, peer slot 2; 2.5 hosted;
+both had `mo_trace.on`):
+
+- Two runs: 1-1 to 1-4 (ended on 1-4 at 16:38:56, `endMyAdventure`), then 1-1 to 2-2.
+  Every floor matched on both machines; no checksum mismatch; the `level order` lines
+  agreed.
+- **The crash.** Both machines reached 2-2's exit on the same frame, `11:7502`, and logged
+  `>> preLoadScreen` / `<< preLoadScreen`. The peer then logged `preLevelGeneration` and
+  `postLevelGeneration` (the transition) and waited at `12:7` for the host. The host's log
+  ends at `<< preLoadScreen`; its crash_frame.txt reads
+  `OUT mod helpers2.lua:533 | sim 11:7502 | 16:48:22`. Line 533 is the function
+  `Helpers2.preLevelDestruction` hands to `set_callback(..., ON.PRE_LEVEL_DESTRUCTION)`,
+  shared by every PRE_LEVEL_DESTRUCTION callback of 2.5's. It returned; the process died
+  after that and before the transition's PRE_LEVEL_GENERATION: in 2-2's teardown, or the
+  start of building the transition. crash_notes.txt ends at 16:38:57, with the journal
+  shown after the first run.
+- **The leak sweep on the summit.** On 2-1 and on 2-2 (world 2, theme 3) the sweep destroyed
+  what 2.5 had parked at x = -1000 in each floor's first 150 frames: 366 on 2-1, 360 on
+  2-2, at frame 450, identically on both machines. (A later pass before frame 1050 would
+  not have been logged: after a floor's first sweep line the next waits 600 frames.)
+  Nothing was swept on any other floor of the session; a floor's first sweep is always
+  logged. 2.5's `replaceSpawnedEntities` (helpers2.lua:789) parks each
+  entity it replaces through `sweepUnderTheRug` (711): `move_entity` to (-1000, -1000) and
+  a post-update hook that destroys it, which never runs out there (README, "Leaked
+  entities"). Solo, those stay parked until the teardown takes them. The old sweep line did
+  not say what they were.
+- **The Lua error** the player saw "a couple of floors before" is in neither desync log: no
+  `HOSTED MOD ERROR`, no `*** ERROR`. So it was not raised through `Callbacks.hosted`. Until
+  dev79 the other places a Lua error could come from without reaching our log were: one of
+  OUR callbacks (their errors went to the engine only), the sound / console / render-screen /
+  instagib callbacks (handed to the engine raw), and the mod's entity hooks (still raw).
+- Also noted: 2.5's `Helpers2.gameFrame` (helpers2.lua:496) registers for `ON.GAME_FRAME`,
+  which Overlunky's ON table does not have. Whether 2.5 calls it is not known.
+
+**dev79:**
+
+- `eventSync.lua` (pollSweepParked): destroys only while more than `SWEEP.LIMIT` (1000)
+  entities are parked; never ACTIVEFLOOR (grid entities; `destroy_grid` is the engine's
+  path for those). Once a floor, `parked outside the level by the mod: N at frame F
+  (TYPE n, ...)`; a sweep line has the destroyed types. Deterministic on both machines,
+  as before: same count, same uid order.
+- `callbacks.lua` (`Callbacks.hosted(fn, label, offThread)`): the trace mark and the error
+  name carry what the callback was registered for, and (`ownName`) the `callbackName` /
+  `debugName` and the `callback` / `wrappedCallback` a mod's wrapper closes over, followed
+  up to three wrappers deep. Read once, at registration, only while tracing or profiling.
+  `offThread` (the vanilla sound callbacks, which FMOD's thread calls) leaves no mark.
+- `callbacks.lua` (`record`): our own callbacks run under `xpcall`; an error is logged as
+  `*** MODDED ONLINE ERROR in file:line`, unless it is a hosted callback's passing up
+  through ours (`raisedByMod`), which is already logged as the mod's.
+- `modHost.lua`: `set_vanilla_sound_callback` (callback third), `register_console_command`,
+  `set_pre_render_screen`, `set_post_render_screen`, `set_on_player_instagib` (second) go
+  through the hosted wrapper and the non-callable check (`CALLBACK_AT`). A render-screen id
+  is not `owned` (`NOT_A_CALLBACK_ID`). A `set_callback` for a nil event is named once.
+  The registration record no longer keeps a callback passed second.
+- `desyncLog.lua`: `load:<PHASE> [layer]` marks for the thirteen load phases from
+  PRE_LOAD_SCREEN to POST_LOAD_SCREEN, and `load: screen A -> B` in crash_notes.txt.
+  Registered unconditionally (ids must match across machines); write only when tracing.
+
+**Next time it crashes:** before relaunching, copy from the crashing machine
+`crash_frame.txt`, `crash_notes.txt` (and the `.prev` copies if it was relaunched),
+`desync_log.txt` and **spelunky.log**, and spelunky.log from the other machine as well.
+spelunky.log is the only place Playlunky writes the text of a Lua error it shows, with the
+time; a `MODDED ONLINE ERROR` or `HOSTED MOD ERROR` line in the desync log at the same
+moment says whose it was.
+
+**To read the next capture:**
+
+1. The `parked outside the level` line on each summit floor says what 2.5 parks there. If
+   2-2 no longer crashes with them left alone, the sweep was the cause; if it still does,
+   the crash_frame line now says which load phase it reached
+   (`OUT load:PRE_LAYER_DESTRUCTION 1`, say) and which of 2.5's callbacks ran last, by name.
+2. A Lua error with a `MODDED ONLINE ERROR` line is ours, with `HOSTED MOD ERROR` the
+   mod's, with neither an entity hook (or 2.5's own SafeCall printing).
+
 ## Diagnostic tooling (flags and the files they write)
 
 All flag files live in the pack folder. They are files, not settings, for the reason
@@ -1091,7 +1168,7 @@ starting. Create them empty unless the table says the contents mean something.
 
 | Flag | Effect |
 |---|---|
-| `mo_trace.on` | per-frame crash trace → `crash_frame.txt` (one line: what was running when the process died) and `crash_notes.txt` (appending, bounded to 400 lines). Writes every frame — expect stutter. |
+| `mo_trace.on` | per-frame crash trace → `crash_frame.txt` (one line: what was running when the process died) and `crash_notes.txt` (appending, bounded to 400 lines). Writes every frame — expect stutter. Since dev79 a hosted callback's mark names its event or API and the mod's own name for it, and each load phase leaves a `load:` mark. Keep the same flags on both machines: the journal probe registers a callback only where one of its flags is present, which moves every later callback id on that machine. |
 | `mo_nodeterminism.on` | hosted mods run on raw `pairs` / `math.random` / `get_frame`. **Networked runs desync.** |
 | `mo_nowrap.on` | hosted callbacks go to the engine unwrapped. Loses their names in the trace. |
 | `mo_journalprobe.on` | logs what the engine offered the journal-chapter callback and what the mod returned, to `mo_journal.txt` and `spelunky.log`. Overrides nothing; no per-frame cost. **This is the one to use for section 2's missing measurement.** |
@@ -1163,7 +1240,7 @@ On a machine whose Python has no pytest or lupa, uv supplies both for the run:
 uv run --no-project --with pytest --with lupa python -m pytest tests/ -q
 ```
 
-1045 passing, none failing, 1 skipped (it needs hdmod next to this pack) (dev78), under Lua 5.4 and 5.5. The 16 long-standing failures went in dev67, with the two
+1083 passing, none failing, 1 skipped (it needs hdmod next to this pack) (dev79), under Lua 5.4 and 5.5. The 16 long-standing failures went in dev67, with the two
 stale test files they came from: `tests/test_world_mailbox.py` (the world mailbox
 deleted in dev44) and `tests/test_seeded_run.py` (the seeded-run flag removed in
 dev46). A failure here now means something broke.

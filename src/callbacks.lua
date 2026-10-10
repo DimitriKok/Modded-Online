@@ -190,26 +190,40 @@ function module.depth()
     return depth
 end
 
+local hostedTraceback -- the message handler, below with the hosted errors
+local logOurError     -- below too
+--- The error a hosted callback raised on its way up through one of ours, which called
+--- into the mod (the ordered ON.LEVEL batch, the world capture): the mod's, logged as
+--- such already, and not to be logged again as ours. Cleared as each of ours starts.
+local raisedByMod = nil
+
 --- Wrap one of OUR callbacks: mark it live, and count it on the stack.
 ---
 --- Only the first return value is forwarded, which is all any of our callbacks
 --- produces. `nil` is returned as NOTHING rather than as an explicit nil, because
 --- ON.PRE_UPDATE distinguishes the two: a value returned there means "skip the
 --- engine's update this frame", and that is the lockstep gate's whole mechanism.
+---
+--- An error is logged on its way out (logOurError), like a hosted callback's: until
+--- dev79 one raised by a callback of OURS reached spelunky.log only, under the same
+--- "Mod: fyi.modded-online-loader" a hosted mod's errors carry, so a capture could not
+--- say whose it was.
 --- @param entry table
 --- @param fn function
 --- @return function
 local function record(entry, fn)
     return function(...)
         entry.lastRanMs = nowMs()
+        raisedByMod = nil
         depth = depth + 1
         local startedAt = profiling and entry.lastRanMs or 0
-        local ok, value = pcall(fn, ...)
+        local ok, value = xpcall(fn, hostedTraceback, ...)
         depth = depth - 1
         if profiling then
             chargeTo("ours " .. tostring(entry.where), startedAt)
         end
         if ok ~= true then
+            pcall(logOurError, entry, value)
             error(value, 0)
         end
         if value == nil then
@@ -254,7 +268,7 @@ end
 --- a message handler replaces the original one -- so every step is protected.
 --- @param err any
 --- @return any err
-local function hostedTraceback(err)
+function hostedTraceback(err)
     hostedErrTrace = nil
     local dbg = rawget(_G, "debug")
     if type(dbg) == "table" and type(dbg.traceback) == "function" then
@@ -269,30 +283,44 @@ end
 --- @param where string
 --- @param value any
 --- @param trace string?
-local function logHostedError(where, value, trace)
+--- @param whose string? # "HOSTED MOD ERROR" unless it is one of ours
+local function logHostedError(where, value, trace, whose)
     local log = rawget(_G, "DesyncLog")
     if log == nil then
         return
     end
+    whose = whose or "HOSTED MOD ERROR"
+    local key = whose .. " " .. where
     local now = nowMs()
-    if not hostedErrSeen[where] then
-        hostedErrSeen[where] = true
-        hostedErrLast[where] = now
+    if not hostedErrSeen[key] then
+        hostedErrSeen[key] = true
+        hostedErrLast[key] = now
         -- the first, in full, even from the lobby: held until a run opens the log
         if type(log.earlyEvent) == "function" then
-            pcall(log.earlyEvent, "*** HOSTED MOD ERROR in %s: %s", where,
+            pcall(log.earlyEvent, "*** %s in %s: %s", whose, where,
                 trace or safeText(value))
         end
         return
     end
-    if now - (hostedErrLast[where] or 0) >= HOSTED_ERR_REPEAT_MS then
-        hostedErrLast[where] = now
+    if now - (hostedErrLast[key] or 0) >= HOSTED_ERR_REPEAT_MS then
+        hostedErrLast[key] = now
         if type(log.event) == "function" then
             local text = safeText(value)
-            pcall(log.event, "*** HOSTED MOD ERROR again in %s: %s", where,
+            pcall(log.event, "*** %s again in %s: %s", whose, where,
                 text:match("^[^\n]*") or text)
         end
     end
+end
+
+--- @param entry table
+--- @param value any
+function logOurError(entry, value)
+    local mod = raisedByMod
+    raisedByMod = nil
+    if mod ~= nil and rawequal(mod, value) then
+        return
+    end
+    logHostedError(tostring(entry.where), value, hostedErrTrace, "MODDED ONLINE ERROR")
 end
 
 --- For a hosted callback's error caught somewhere other than the wrapper below: log
@@ -302,6 +330,7 @@ end
 --- @param value any
 --- @param trace string?
 function module.noteHostedError(where, value, trace)
+    raisedByMod = value
     logHostedError(where, value, trace)
     if type(value) == "string" and noted[value] == nil then
         if notedCount >= 32 then
@@ -339,6 +368,89 @@ local function innermost(fn)
     return fn
 end
 
+-- What a hosted mod calls its own callback, where the mod's wrapper keeps that.
+--
+-- 2.5 registers nearly every callback through one of Helpers2's protected wrappers,
+-- one wrapper function per kind of event, so each of them named every callback of its
+-- kind alike: all of 2.5's PRE_LEVEL_DESTRUCTION callbacks are `helpers2.lua:533`,
+-- which is the whole of what room UVLQ's crash trace could say. Each wrapper closes
+-- over the name 2.5 logs that callback under (`callbackName`, else `debugName`) and the
+-- function it protects (`callback`, else `wrappedCallback`), so both can be read, once,
+-- at registration: `helpers2.lua:533 (<its name> @ <file>.lua:<line>)`. Reading an
+-- upvalue runs nothing of the mod's.
+local OWN_LABELS = { "callbackName", "debugName" }
+local OWN_CALLEES = { "callback", "wrappedCallback" }
+local OWN_MAX = 72 -- the trace line is 180 wide, and the clock comes after the name
+
+--- @param fn function
+--- @return table<string, any>
+local function upvaluesOf(fn)
+    local found = {}
+    local dbg = rawget(_G, "debug")
+    if type(dbg) ~= "table" or type(dbg.getupvalue) ~= "function" then
+        return found
+    end
+    for i = 1, 64 do
+        local ok, key, value = pcall(dbg.getupvalue, fn, i)
+        if not ok or key == nil then
+            break
+        end
+        if found[key] == nil then
+            found[key] = value
+        end
+    end
+    return found
+end
+
+--- @param fn function
+--- @return string?
+local function ownName(fn)
+    local label, callee, at = nil, nil, fn
+    -- A wrapper can wrap a wrapper (2.5's every-Nth-frame counter): a few steps in.
+    for _ = 1, 3 do
+        local up = upvaluesOf(at)
+        for _, key in ipairs(OWN_LABELS) do
+            if label == nil and type(up[key]) == "string" and up[key] ~= "" then
+                label = up[key]
+            end
+        end
+        local nextFn = nil
+        for _, key in ipairs(OWN_CALLEES) do
+            if nextFn == nil and type(up[key]) == "function" then
+                nextFn = up[key]
+            end
+        end
+        if nextFn == nil or nextFn == at then
+            break
+        end
+        callee, at = nextFn, nextFn
+    end
+    if label == nil and callee == nil then
+        return nil
+    end
+    local text = label or ""
+    if callee ~= nil then
+        text = (label ~= nil and (label .. " ") or "") .. "@ " .. describe(callee)
+    end
+    if #text > OWN_MAX then
+        text = text:sub(1, OWN_MAX - 3) .. "..."
+    end
+    return text
+end
+
+--- A hosted callback's name: the mod's own function, and what the mod calls it.
+--- @param fn function
+--- @return string
+local function hostedName(fn)
+    local inner = innermost(fn)
+    local where = describe(inner)
+    local ok, own = pcall(ownName, inner)
+    if ok and own ~= nil then
+        where = where .. " (" .. own .. ")"
+    end
+    return where
+end
+
 --- What a hosted callback handed back, for crash_notes.txt. Its own function so the
 --- wrapper does not build a closure per call, and called protected: the table is the
 --- mod's, and reading it runs the mod's metamethods.
@@ -364,8 +476,10 @@ end
 --- callback can be reached from inside one of ours -- our level-generation hooks
 --- call into the mod's world capture -- and the frames above it are still ours.
 --- @param fn function
+--- @param label string? # what it was registered for: the ON event or the API
+--- @param offThread boolean? # the engine calls it from another thread: no trace marks
 --- @return function
-function module.hosted(fn)
+function module.hosted(fn, label, offThread)
     -- Tracing needs the name as much as profiling does, and for a better reason.
     --
     -- The frame trace marks OUR callbacks only, so a crash inside the engine's
@@ -375,15 +489,24 @@ function module.hosted(fn)
     -- running. hdmod's journal alone registers and tears down eight callbacks in a
     -- nested storm, so "somewhere in the mod" is not a location.
     --
-    -- `describe` is one `debug.getinfo` per REGISTRATION (not per call), and only
-    -- when a diagnostic that wants it is armed. It describes the mod's own function,
-    -- not the determinism wrapper it may be registered inside.
+    -- `hostedName` is a `debug.getinfo` and a read of the function's upvalues per
+    -- REGISTRATION (not per call), and only when a diagnostic that wants it is armed.
+    -- It describes the mod's own function, not the determinism wrapper it may be
+    -- registered inside, and the name the mod's own wrapper gives it (ownName).
     local tracing = false
     pcall(function()
         tracing = DesyncLog ~= nil and DesyncLog.tracing ~= nil and DesyncLog.tracing()
     end)
-    local where = (profiling or tracing) and describe(innermost(fn)) or "?"
-    local mark = tracing and ("mod " .. where) or nil
+    local where = (profiling or tracing) and hostedName(fn) or "?"
+    -- ...and the trace names what the callback was registered FOR. Room UVLQ's crash
+    -- trace read `OUT mod helpers2.lua:533`: a function of 2.5's, with nothing to say
+    -- whether the engine had called it at PRE_LOAD_SCREEN, at the level's teardown or
+    -- on the frame before. Both are known here, at registration, for free.
+    local suffix = type(label) == "string" and label ~= "" and (" " .. label) or ""
+    -- ...except one the engine calls from another thread (a vanilla sound callback,
+    -- on FMOD's). The trace is a single line, and a sound playing while the main
+    -- thread is deep in native code would overwrite the one mark that says where.
+    local mark = (tracing and offThread ~= true) and ("mod " .. where .. suffix) or nil
     return function(...)
         local saved = depth
         depth = 0
@@ -415,10 +538,11 @@ function module.hosted(fn)
         if ok ~= true then
             if not takeNoted(value) then
                 if where == "?" then
-                    where = describe(innermost(fn)) -- named on its first error, not before
+                    where = hostedName(fn) -- named on its first error, not before
                 end
-                logHostedError(where, value, hostedErrTrace)
+                logHostedError(where .. suffix, value, hostedErrTrace)
             end
+            raisedByMod = value
             error(value, 0)
         end
         if value == nil then
