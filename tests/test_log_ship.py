@@ -183,9 +183,19 @@ def test_a_desync_is_announced_to_the_room_once_per_run():
 def test_another_players_report_marks_this_run_without_echoing():
     rt = runtime()
     payload = rt.eval("{ r = 'FLOOR DESYNC seq 15' }")
-    rt.eval("eventHandlers.desyncseen")(payload, 2)
-    assert "slot 2 reported FLOOR DESYNC seq 15" == str(status(rt)["runNote"])
+    rt.eval("eventHandlers.desyncseen")(payload, 1)
+    assert "slot 1 reported FLOOR DESYNC seq 15" == str(status(rt)["runNote"])
     assert list(rt.eval("events").values()) == []
+
+
+def test_our_own_report_coming_back_is_not_a_report():
+    """The server sends every event to everyone in the room, the sender too. Our own
+    report must not count as somebody else's: it would mark the run to be sent again
+    after the log already went at the popup."""
+    rt = runtime()
+    rt.eval("eventHandlers.desyncseen")(rt.eval("{ r = 'POSITION DESYNC at 23:3000', now = 1, s = 23 }"), 2)
+    assert status(rt)["runNote"] is None
+    assert status(rt)["deferred"] is False
 
 
 def test_a_report_that_arrives_after_the_run_does_not_mark_the_next():
@@ -389,3 +399,179 @@ def test_every_desync_kind_is_noted():
     assert "SafeCall(\"desyncLog:logShip\", LogShip.runEnded)" in DESYNC_LOG
     main = (PACK / "main.lua").read_text(encoding="utf-8")
     assert '"src.logShip"' in main
+
+
+# ------------------------------------------------- at the popup (dev78)
+#
+# The log goes the moment the "Desync detected" popup appears (inputSync calls
+# LogShip.desyncNow at the alarm), and the room is asked for theirs. Anything else
+# that desyncs a run still goes when the run ends.
+
+def popup(rt, text, reason="POSITION DESYNC at 23:3000", key=23):
+    rt.eval("function(t) runText = t end")(text)
+    rt.eval("LogShip.desyncNow")(reason, key)
+
+
+def drive_to_done(rt, max_frames=4000, ms=16):
+    """Play a well-behaved server until the upload in progress finishes. Returns the
+    `begin` message and the reassembled bytes."""
+    held, begin = {}, None
+    for _ in range(max_frames):
+        frame(rt, ms)
+        for msg in sent(rt):
+            op = str(msg["op"])
+            if op == "begin":
+                begin = msg
+                reply(rt, op="ready", u=msg["u"], upto=0)
+            elif op == "part":
+                held[int(msg["i"])] = str(msg["d"])
+                upto = 0
+                while upto + 1 in held:
+                    upto += 1
+                reply(rt, op="ack", u=msg["u"], upto=upto)
+                if upto == int(begin["n"]):
+                    reply(rt, op="done", u=msg["u"], ok=True, why="posted")
+        clear_sent(rt)
+        if begin is not None and status(rt)["uploading"] is None:
+            break
+    assert begin is not None, "never started"
+    joined = "".join(held[i] for i in range(1, int(begin["n"]) + 1))
+    return begin, base64.b64decode(joined)
+
+
+def test_the_popup_sends_the_log_right_away_without_waiting_for_the_run_to_end():
+    rt = runtime()
+    rt.eval("LogShip.runStarted")()
+    text = "=== Modded Online 2.0.0-test — run start ===\n*** POSITION DESYNC at 23:3000\n"
+    popup(rt, text)
+    begin, data = drive_to_done(rt)
+    assert data == text.encode("utf-8")
+    assert str(begin["meta"]["reason"]) == "POSITION DESYNC at 23:3000"
+    assert any("sent to Discord" in t for t in toasts(rt))
+
+
+def test_the_popup_asks_the_room_for_their_log_too():
+    rt = runtime()
+    popup(rt, "log")
+    asks = [dict(e) for e in rt.eval("events").values()]
+    now = [dict(e["payload"]) for e in asks if str(e["kind"]) == "desyncseen"
+           and e["payload"]["now"] is not None]
+    assert len(now) == 1 and int(now[0]["now"]) == 1 and int(now[0]["s"]) == 23
+
+
+def test_the_room_asking_sends_ours_after_a_moment():
+    """Our own popup usually follows within two seconds, and then our log holds our
+    own POSITION DESYNC block too -- so wait a little, then send."""
+    rt = runtime()
+    rt.execute("runText = 'the other machine'")
+    ask = rt.eval("{ r = 'POSITION DESYNC at 23:3000', now = 1, s = 23 }")
+    rt.eval("eventHandlers.desyncseen")(ask, 1)
+    assert status(rt)["deferred"] is True
+    frame(rt, 1000)
+    assert status(rt)["pending"] == 0 and status(rt)["uploading"] is None
+    frame(rt, 4500)
+    assert status(rt)["uploading"] is not None, "never sent ours after the room asked"
+
+
+def test_our_own_popup_in_the_meantime_sends_once_not_twice():
+    rt = runtime()
+    rt.execute("runText = 'ours'")
+    rt.eval("eventHandlers.desyncseen")(rt.eval("{ r = 'POSITION DESYNC at 23:3000', now = 1, s = 23 }"), 1)
+    frame(rt, 1000)
+    popup(rt, "ours, with our block", reason="POSITION DESYNC at 23:3120", key=23)
+    assert status(rt)["deferred"] is False
+    for _ in range(400):
+        frame(rt, 50)
+    begins = [m for m in sent(rt) if str(m["op"]) == "begin"]
+    uploads = {str(m["u"]) for m in begins}
+    assert len(uploads) == 1, "the same floor's log went twice"
+
+
+def test_a_popup_we_already_sent_is_not_asked_for_again():
+    rt = runtime()
+    popup(rt, "ours")
+    rt.eval("eventHandlers.desyncseen")(rt.eval("{ r = 'POSITION DESYNC at 23:3000', now = 1, s = 23 }"), 1)
+    assert status(rt)["deferred"] is False
+
+
+def test_another_floors_popup_is_sent_again():
+    rt = runtime()
+    popup(rt, "first", key=23)
+    popup(rt, "second", reason="POSITION DESYNC at 31:600", key=31)
+    assert status(rt)["pending"] + (1 if status(rt)["uploading"] else 0) == 2
+
+
+def test_after_the_popup_the_run_end_does_not_send_it_again():
+    rt = runtime()
+    rt.eval("LogShip.runStarted")()
+    popup(rt, "the desync")
+    # the resync warp that ends the incident, then the run ends
+    rt.eval("LogShip.noteDesync")("RESYNC WARP to 4-3", False, True)
+    rt.execute("runText = 'the whole run'")
+    rt.eval("LogShip.runEnded")()
+    assert status(rt)["pending"] == 1, "the run went a second time"
+
+
+def test_a_new_desync_after_the_popup_still_sends_the_run_at_its_end():
+    rt = runtime()
+    rt.eval("LogShip.runStarted")()
+    popup(rt, "the desync")
+    rt.eval("LogShip.noteDesync")("FLOOR DESYNC seq 33")
+    rt.execute("runText = 'the whole run'")
+    rt.eval("LogShip.runEnded")()
+    assert status(rt)["pending"] == 2
+    begin, _ = drive_to_done(rt)        # the popup's
+    begin2, data = drive_to_done(rt)    # the run's
+    assert "FLOOR DESYNC seq 33 (after POSITION DESYNC at 23:3000)" == str(begin2["meta"]["reason"])
+    assert data == b"the whole run"
+
+
+def test_a_resync_warp_with_no_popup_still_sends_the_run():
+    """The stall detector's resync, or a peer's FLOOR DESYNC: nothing went at a
+    popup, so the run goes at its end, as it always did."""
+    rt = runtime()
+    rt.eval("LogShip.runStarted")()
+    rt.eval("LogShip.noteDesync")("RESYNC WARP to 4-3", False, True)
+    rt.execute("runText = 'the run'")
+    rt.eval("LogShip.runEnded")()
+    assert status(rt)["pending"] == 1
+
+
+def test_the_popup_sends_nothing_without_the_setting_but_still_asks_the_room():
+    rt = runtime()
+    rt.execute("Network.config.autoSendLogs = false")
+    popup(rt, "log")
+    frame(rt)
+    assert sent(rt) == [] and status(rt)["pending"] == 0
+    assert any(str(e["kind"]) == "desyncseen" for e in rt.eval("events").values())
+
+
+def test_a_log_sent_mid_run_is_paced_while_the_run_lasts():
+    """It shares the connection with the lockstep inputs."""
+    rt = runtime()
+    popup(rt, "y" * (675 * 100))
+    frame(rt)  # begin
+    begin = [m for m in sent(rt) if str(m["op"]) == "begin"][0]
+    reply(rt, op="ready", u=begin["u"], upto=0)
+    clear_sent(rt)
+    frame(rt, 16)
+    frame(rt, 16)
+    parts = [int(m["i"]) for m in sent(rt) if str(m["op"]) == "part"]
+    assert len(parts) <= 1, "a mid-run log went out as fast as an after-run one"
+    for _ in range(40):
+        frame(rt, 40)
+    parts = [int(m["i"]) for m in sent(rt) if str(m["op"]) == "part"]
+    assert max(parts) <= 8, "more parts in flight than the mid-run window"
+    # the run ends: the rest goes at full speed
+    rt.execute("Network.inRun = false")
+    reply(rt, op="ack", u=begin["u"], upto=8)
+    clear_sent(rt)
+    frame(rt, 16)
+    parts = [int(m["i"]) for m in sent(rt) if str(m["op"]) == "part"]
+    assert len(parts) == 8
+
+
+def test_the_alarm_is_what_sends_it():
+    input_sync = (PACK / "src" / "inputSync.lua").read_text(encoding="utf-8")
+    at = input_sync.index('toast("Desync detected')
+    assert input_sync.index('pcall(LogShip.desyncNow, "POSITION DESYNC at " .. key, seq)', at) > at

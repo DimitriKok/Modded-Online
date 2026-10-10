@@ -991,6 +991,108 @@ local function readFile(path)
     return src, nil
 end
 
+-- ------------------------------------------------- what the lockstep needs here
+
+--- Is this a frame the lockstep gate held? Asked when a hosted callback runs, not
+--- captured: InputSync is a module of its own, and the tests host without it.
+--- @return boolean
+local function gateHeld()
+    local sync = rawget(_G, "InputSync")
+    return sync ~= nil and sync.heldFrame ~= nil and sync.heldFrame() == true
+end
+
+--- A hosted PRE_UPDATE callback reaches the gate's decision for this update before
+--- the mod's code runs (see "one decision per update" in inputSync.lua). Any other
+--- callback is handed back as it is.
+--- @param fn function
+--- @param event any
+--- @return function
+local function gateFirstFor(fn, event)
+    local on = rawget(_G, "ON")
+    local sync = rawget(_G, "InputSync")
+    if on == nil or on.PRE_UPDATE == nil or event ~= on.PRE_UPDATE
+        or sync == nil or type(sync.gateFirst) ~= "function" then
+        return fn
+    end
+    return sync.gateFirst(fn)
+end
+
+--- The engine counts these in its frame counter, so they are the ones a frame the
+--- gate holds can move (see heldProofTimer).
+local HELD_PROOF_TIMERS = {
+    set_global_interval = true,
+    set_global_timeout = true,
+}
+
+--- A hosted mod's global timer, counted in the frames the world moved.
+---
+--- set_global_interval and set_global_timeout count the engine's frame counter, and
+--- that counter moves on a frame the lockstep gate holds: room VOYY's profile counted
+--- ~40 more GAMEFRAMEs than POST_UPDATEs per ten seconds of 4-2 on the machine that
+--- stalled, and GAMEFRAME fires exactly when that counter moves. So a mod's global
+--- timer came due earlier, in simulated time, on the machine that stalled more.
+---
+--- Hosted, each one is the engine's own interval of one frame, run whenever the
+--- counter moves, counting only the frames the gate did not hold. With nothing held
+--- -- every frame in solo -- it fires where the engine's would: an interval at once
+--- and then every `frames`, a timeout once after `frames`. The mod's callback is
+--- only called when it is due, so its profile line and its trace mark mean what they
+--- did. Its return still ends an interval (false), as it would unhosted.
+--- @param fn function   # the mod's callback, already wrapped by Callbacks.hosted
+--- @param frames number
+--- @param once boolean  # a timeout
+--- @return function
+local function heldProofTimer(fn, frames, once)
+    local getFrame = rawget(_G, "get_frame")
+    local function engineFrame()
+        if type(getFrame) ~= "function" then
+            return nil
+        end
+        local ok, f = pcall(getFrame)
+        if ok and type(f) == "number" then
+            return math.floor(f)
+        end
+        return nil
+    end
+    local seen = engineFrame()
+    local counted = 0
+    local due = not once -- an interval runs on its first frame, as the engine's does
+    local spent = false  -- a timeout that has run, even if it threw
+    return function(...)
+        if spent then
+            -- An error out of the mod's timeout reaches the engine, which then keeps
+            -- the poll, as it keeps any interval whose callback failed. The engine's
+            -- own timeout is gone after one try whatever happens; so is this.
+            return false
+        end
+        local now = engineFrame()
+        local moved = 1
+        if now ~= nil and seen ~= nil then
+            moved = now - seen
+        end
+        if now ~= nil then
+            seen = now
+        end
+        if gateHeld() then
+            return -- a frame the world did not move: not counted, and still running
+        end
+        if moved > 0 then
+            counted = counted + moved
+        end
+        if not due and counted < frames then
+            return
+        end
+        due = false
+        counted = 0
+        if once then
+            spent = true
+            fn(...)
+            return false -- done: the engine drops the poll
+        end
+        return fn(...)
+    end
+end
+
 -- ------------------------------------------------------------------ the sandbox
 
 --- Build the environment a hosted mod runs in.
@@ -1073,6 +1175,13 @@ function module.newSandbox(report, opts)
     -- with nothing to say which registration it was. Named here, once per API.
     local nonCallableSaid = {}
 
+    -- What the lockstep needs of a hosted callback on its way to the engine (the
+    -- gate's decision first, timers counted in frames the world moved): only where
+    -- the determinism layer is in force, so mo_nodeterminism.on still runs the mod
+    -- on the raw engine.
+    local lockstepAware = opts.determinism ~= false and not module.determinismDisabled()
+    local rawGlobalInterval = rawget(_G, "set_global_interval")
+
     for _, name in ipairs(REGISTRATION_APIS) do
         if inert then
             env[name] = function(...)
@@ -1148,7 +1257,24 @@ function module.newSandbox(report, opts)
                     end
                     local id
                     if hostedWrap ~= nil and type(first) == "function" then
-                        id = real(hostedWrap(first), select(2, ...))
+                        local fn = hostedWrap(first)
+                        local event = select(2, ...)
+                        if lockstepAware and HELD_PROOF_TIMERS[name] and type(event) == "number"
+                            and type(rawGlobalInterval) == "function" then
+                            -- counted in the frames the world moved (heldProofTimer)
+                            -- polled each frame the counter moves; a timer of no
+                            -- frames at all on every update, as the engine runs one
+                            id = rawGlobalInterval(
+                                heldProofTimer(fn, event, name == "set_global_timeout"),
+                                event <= 0 and 0 or 1)
+                        else
+                            if lockstepAware and name == "set_callback" then
+                                fn = gateFirstFor(fn, event)
+                            end
+                            -- every argument after the callback, as before: the spawn
+                            -- hooks take a mask and any number of entity types
+                            id = real(fn, select(2, ...))
+                        end
                     elseif isOption then
                         id = real(withOptionStrings(...))
                     else

@@ -243,6 +243,7 @@ local desyncReported = false
 -- run-end resolves) — only a PERSISTENT mismatch means a mod is misbehaving.
 local DESYNC_STREAK_ALARM = 3
 local desyncStreak = 0
+local mismatchLines = 0 -- CHECKSUM MISMATCH lines this floor (see MISMATCH_LINES)
 -- Per-FLOOR world verification. The lockstep sim keeps players in sync, but the
 -- WORLD is generated locally on every machine from the shared seed — and a content
 -- mod that draws a machine-dependent number of PRNG values during generation (or a
@@ -304,6 +305,7 @@ function module.beginSession(slots, delay)
     checksums = {}
     desyncReported = false
     desyncStreak = 0
+    mismatchLines = 0
     menuSyncOn = false
     menuSyncAbandoned = false
     menuOffFrames = 0
@@ -513,6 +515,7 @@ function module.rebase(newSeq)
     checksums = {}
     desyncReported = false
     desyncStreak = 0
+    mismatchLines = 0
     lastInjected = nil
     myModValue = nil
     -- the floor we're resyncing away from is abandoned; its digests are stale
@@ -656,6 +659,17 @@ local function lateInputGuard()
     if not active or not engaged or not Network.isInRun() or lastInjected == nil then
         return
     end
+    -- Not on a frame the gate held. ON.GAMEFRAME fires on those too (dev78: room
+    -- VOYY's profile counted ~40 more GAMEFRAMEs than POST_UPDATEs per ten seconds on
+    -- the machine that stalled), and nothing is injected on them. The guard read the
+    -- agreed value it had itself put back on the last real frame, found no sentinel
+    -- on it and took it for a mod's write to our slot. The pad only writes slot 1, so
+    -- on a machine whose player is in another slot the first input recorded after
+    -- every stall was an older one of ours instead of the pad's: a press already let
+    -- go could come back for a frame.
+    if heldNow then
+        return
+    end
     -- Walked as a raw chain (state.player_inputs.player_slots) until now. Every
     -- link is engine memory, and a null one there is a native access violation,
     -- which SafeCall's pcall CANNOT catch -- it takes the process down with no Lua
@@ -733,6 +747,7 @@ local function engage()
     if engagedScreen == SCREEN.LEVEL then
         desyncReported = false
         desyncStreak = 0
+        mismatchLines = 0
         checksums = {}
     end
     seq = seq + 1
@@ -1842,12 +1857,134 @@ end
 
 -- -------------------------------------------------------------- desync check
 
+-- What a checksum stands for, sent along with it. On a mismatch both machines'
+-- values for the SAME simulated frame go into the log, side by side. Until dev78 all
+-- a desync left was a pair of hashes, and the player positions printed when the
+-- alarm went off -- 240 frames after the first mismatch, at a different frame on
+-- each machine (23:3000 on room VOYY's host, 23:3120 on the peer), so they could not
+-- be compared at all. Detection-only, like the hash: none of it feeds back.
+local MISMATCH_LINES = 3 -- per floor: the first mismatches are the ones that explain
+
+--- The engine's PRNG streams as ten numbers (each pair folded), for the mismatch
+--- line: a stream that differs says the simulations had already parted.
+--- @return integer[]
+local function prngFold()
+    local out = {}
+    pcall(function()
+        for class = 0, 9 do
+            local a, b = prng:get_pair(class)
+            out[#out + 1] = (math.floor(a) ~ math.floor(b or 0)) & 0xFFFFFFFF
+        end
+    end)
+    return out
+end
+
+--- @param players table[] # { coopIndex, x*100, y*100, hp, layer, mount }
+--- @return { t: integer?, p: table[], r: integer[] }
+local function checkDetail(players)
+    local t = nil
+    pcall(function() t = math.floor(get_local_state().time_level) end)
+    return { t = t, p = players, r = prngFold() }
+end
+
+--- One side of a mismatch, as text.
+--- @param d table?
+--- @return string players, table prng
+local function detailText(d)
+    if type(d) ~= "table" then
+        return "(not sent)", {}
+    end
+    local parts = {}
+    if type(d.p) == "table" then
+        for _, row in ipairs(d.p) do
+            if type(row) == "table" then
+                local i, x, y, hp, layer, mount = row[1], row[2], row[3], row[4], row[5], row[6]
+                parts[#parts + 1] = string.format("p%s %.2f,%.2f hp%s L%s%s",
+                    tostring(i), (tonumber(x) or 0) / 100, (tonumber(y) or 0) / 100,
+                    tostring(hp), tostring(layer),
+                    (tonumber(mount) or 0) ~= 0 and (" mount" .. tostring(mount)) or "")
+            end
+        end
+    end
+    if #parts == 0 then
+        parts[1] = "no players"
+    end
+    return string.format("t=%s %s", tostring(d.t), table.concat(parts, "; ")),
+        type(d.r) == "table" and d.r or {}
+end
+
+--- The mismatch line: both machines at the same frame, and which PRNG streams differ.
+--- @param key string
+--- @param entry table
+--- @return string
+local function describeMismatch(key, entry)
+    local mine, myStreams = detailText(entry.mineDetail)
+    local theirs, theirStreams = detailText(entry.theirsDetail)
+    local differ = {}
+    for class = 0, 9 do
+        local a, b = myStreams[class + 1], theirStreams[class + 1]
+        if a ~= nil and b ~= nil and math.floor(tonumber(a) or 0) ~= math.floor(tonumber(b) or 0) then
+            differ[#differ + 1] = "c" .. class
+        end
+    end
+    local streams
+    if #myStreams == 0 or #theirStreams == 0 then
+        streams = "prng not compared"
+    elseif #differ == 0 then
+        streams = "prng streams all match"
+    else
+        streams = "prng streams differ: " .. table.concat(differ, " ")
+    end
+    return string.format("CHECKSUM MISMATCH at %s (streak %d): here %s | there %s | %s",
+        key, desyncStreak, mine, theirs, streams)
+end
+
+--- Compare a checksum pair, whichever side arrived second, and raise the alarm on a
+--- persistent disagreement.
+--- @param key string
+--- @param entry table
+local function compareChecksums(key, entry)
+    checksums[key] = nil
+    if entry.mine == entry.theirs then
+        desyncStreak = 0 -- back in agreement
+        return
+    end
+    -- Count consecutive disagreements. A one-off mismatch is expected and
+    -- harmless when a player ends their adventure or leaves (their party
+    -- dies locally for a moment before the run-end / departure resolves) —
+    -- only a PERSISTENT disagreement means a mod is behaving
+    -- non-deterministically, so hold the alarm until the streak is met.
+    desyncStreak = desyncStreak + 1
+    if not desyncReported and mismatchLines < MISMATCH_LINES and DesyncLog ~= nil
+        and DesyncLog.event ~= nil then
+        mismatchLines = mismatchLines + 1
+        pcall(function()
+            DesyncLog.event("%s", describeMismatch(key, entry))
+        end)
+    end
+    if desyncStreak >= DESYNC_STREAK_ALARM and not desyncReported then
+        desyncReported = true
+        errorf("DESYNC detected at %s (local %d vs remote %d, streak %d)",
+            key, entry.mine, entry.theirs, desyncStreak)
+        toast("Desync detected — a mod is behaving non-deterministically")
+        if DesyncLog ~= nil then
+            DesyncLog.positionDesync(key, entry.mine, entry.theirs, desyncStreak)
+        end
+        -- The log goes to Discord now, at the popup, for a player who switched
+        -- AUTOMATICALLY SEND LOGS on -- and the room is asked for theirs (logShip).
+        if LogShip ~= nil and LogShip.desyncNow ~= nil then
+            pcall(LogShip.desyncNow, "POSITION DESYNC at " .. key, seq)
+        end
+    end
+end
+
 function module.sendChecksum()
     -- Iterate co-op indices in a FIXED order (1..4), not pairs(): the hash is
     -- an order-dependent polynomial, and pairs() order is not guaranteed
     -- identical across machines — folding in a different order produced a
     -- different hash from identical positions and raised a false "desync".
     local hash = 0
+    local players = {}
     for coopIndex = 1, 4 do
         local netSlot = coopSlots[coopIndex]
         if netSlot ~= nil then
@@ -1901,12 +2038,26 @@ function module.sendChecksum()
                     local layer = 0
                     pcall(function() layer = math.floor(player.layer) end)
                     hash = (hash * 31 + hp * 7 + mount * 13 + layer * 17) % 2147483647
+                    -- what went into the hash, readable: logged against the other
+                    -- machine's on a mismatch (see describeMismatch)
+                    players[#players + 1] = { coopIndex, math.floor(px * 100 + 0.5),
+                        math.floor(py * 100 + 0.5), hp, layer, mount }
                 end
             end
         end
     end
     local key = seq .. ":" .. offset
-    checksums[key] = { mine = hash }
+    local detail = checkDetail(players)
+    local entry = checksums[key] or {}
+    entry.mine = hash
+    entry.mineDetail = detail
+    checksums[key] = entry
+    if entry.theirs ~= nil then
+        -- theirs came first: this machine is the one behind, by more than the trip
+        -- the packet took. Until dev78 it threw theirs away right here and never
+        -- compared at all, so of two machines only the one ahead could see a desync.
+        compareChecksums(key, entry)
+    end
     -- Sent on the UNRELIABLE world channel, NOT the reliable event channel.
     -- Position checksums fire every CHECK_EVERY frames — by far the highest-rate
     -- traffic we produce — and the server refuses a client's events unless they
@@ -1919,7 +2070,8 @@ function module.sendChecksum()
     -- a wholesale-different floor 3). Checksums are detection-only and
     -- loss-tolerant: a lost sample just skips one comparison, so they belong on
     -- the unreliable channel where they can never block a critical event.
-    Network.sendWorld({ k = "chk", s = seq, f = offset, h = hash })
+    Network.sendWorld({ k = "chk", s = seq, f = offset, h = hash,
+        t = detail.t, p = detail.p, r = detail.r })
 end
 
 --- @param payload { s: integer, f: integer, h: integer }
@@ -1932,30 +2084,12 @@ local function onChecksum(payload, originSlot)
         return
     end
     local key = math.floor(tonumber(payload.s) or 0) .. ":" .. math.floor(tonumber(payload.f) or 0)
-    checksums[key] = checksums[key] or {}
-    checksums[key].theirs = math.floor(tonumber(payload.h) or 0)
-    local entry = checksums[key]
-    if entry.mine ~= nil and entry.theirs ~= nil then
-        if entry.mine ~= entry.theirs then
-            -- Count consecutive disagreements. A one-off mismatch is expected and
-            -- harmless when a player ends their adventure or leaves (their party
-            -- dies locally for a moment before the run-end / departure resolves) —
-            -- only a PERSISTENT disagreement means a mod is behaving
-            -- non-deterministically, so hold the alarm until the streak is met.
-            desyncStreak = desyncStreak + 1
-            if desyncStreak >= DESYNC_STREAK_ALARM and not desyncReported then
-                desyncReported = true
-                errorf("DESYNC detected at %s (local %d vs remote %d, streak %d)",
-                    key, entry.mine, entry.theirs, desyncStreak)
-                toast("Desync detected — a mod is behaving non-deterministically")
-                if DesyncLog ~= nil then
-                    DesyncLog.positionDesync(key, entry.mine, entry.theirs, desyncStreak)
-                end
-            end
-        else
-            desyncStreak = 0 -- back in agreement
-        end
-        checksums[key] = nil
+    local entry = checksums[key] or {}
+    checksums[key] = entry
+    entry.theirs = math.floor(tonumber(payload.h) or 0)
+    entry.theirsDetail = { t = payload.t, p = payload.p, r = payload.r }
+    if entry.mine ~= nil then
+        compareChecksums(key, entry)
     end
 end
 
@@ -2303,6 +2437,83 @@ Network.onWorld(onWorldMsg)
 Network.onEvent("worldchk", onWorldChk)
 Network.onEvent("menu", onMenuEvent)
 
+-- -------------------------------------------------- one decision per update
+--
+-- The engine runs a script's PRE_UPDATE callbacks in its own hash order, and a
+-- hosted mod's are in that order with the gate. Until dev78 one that came BEFORE the
+-- gate read `heldNow` as the last update left it: it ran on the first frame of every
+-- stall and skipped the frame the world moved again, and it read the input slots
+-- before the gate had put the agreed inputs in them -- this machine's own pad in
+-- slot 1. Which of the mod's callbacks come first depends on their ids, and the ids
+-- are not the same on two machines: room VOYY's host registered one more callback
+-- than the peer while the first floor loaded, and every id after it was shifted.
+--
+-- So the gate now runs once per update, for whichever caller reaches it first: its
+-- own callback, or one of a hosted mod's PRE_UPDATE callbacks (modHost wraps them in
+-- module.gateFirst). Everyone in the update then sees the same decision, with the
+-- agreed inputs already in the slots -- which is how the mod's PRE_UPDATE code sees
+-- them when it runs alone, after the engine has read the pad.
+--
+-- An update ends at POST_UPDATE, or BLOCKED_UPDATE when the gate held it. Should
+-- neither come, a caller that already ran in this update starts the next one: each
+-- callback runs once per update, so meeting one again means a new update began.
+local gatePass = { n = 0, open = false, hold = false }
+local gateToken = {}
+
+--- The gate itself, once: this update's decision. Sets heldNow.
+--- @return boolean held
+local function runGate()
+    if DesyncLog ~= nil then
+        DesyncLog.frameMark("preUpdate")
+    end
+    -- Normalise to EXACTLY `true` or no value at all. This hook takes an
+    -- optional boolean (true = skip the sim tick), and forwarding SafeCall's
+    -- result raw meant whatever preUpdate happened to return -- or an explicit
+    -- nil from SafeCall's failure path -- went straight into that conversion.
+    -- Playlunky logged `Mod: fyi.modded-online / Error: Unexpected return type
+    -- from function...` with no accompanying Lua error of ours, i.e. it rejected
+    -- a value we RETURNED rather than anything that threw. This is the only
+    -- callback we forward a return through, so it is the only candidate.
+    local hold = SafeCall("inputSync:preUpdate", preUpdate)
+    -- every frame, held or not, before anything else can ask (see heldFrame)
+    heldNow = hold == true
+    if DesyncLog ~= nil then
+        DesyncLog.frameDone("preUpdate")
+    end
+    return heldNow
+end
+
+--- This update's gate decision, running the gate if nobody has yet.
+--- @param token table # one per caller: { n = the update it last asked in }
+--- @return boolean held
+local function decidePass(token)
+    if not gatePass.open or token.n == gatePass.n then
+        gatePass.n = gatePass.n + 1
+        gatePass.open = true
+        gatePass.hold = false -- should the gate throw, the tick proceeds, as it always has
+        gatePass.hold = runGate()
+    end
+    token.n = gatePass.n
+    return gatePass.hold
+end
+
+--- Wrap a hosted mod's PRE_UPDATE callback so the gate has decided this update
+--- before the mod's code runs (see "one decision per update" above). The callback's
+--- own return is forwarded untouched: a mod that blocks the update still does.
+--- @param fn function
+--- @return function
+function module.gateFirst(fn)
+    local token = {}
+    return function(...)
+        decidePass(token)
+        return fn(...)
+    end
+end
+
+local function closeGatePass()
+    gatePass.open = false
+end
+
 -- Global infrastructure callbacks: no-ops unless a networked run is active.
 set_callback(function()
     -- The resend keepalive, which normally lives in guiTick (ON.GUIFRAME).
@@ -2321,28 +2532,20 @@ set_callback(function()
             SafeCall("inputSync:resendFromPreUpdate", sendRecentInputs)
         end
     end
-    if DesyncLog ~= nil then
-        DesyncLog.frameMark("preUpdate")
-    end
-    -- Normalise to EXACTLY `true` or no value at all. This hook takes an
-    -- optional boolean (true = skip the sim tick), and forwarding SafeCall's
-    -- result raw meant whatever preUpdate happened to return -- or an explicit
-    -- nil from SafeCall's failure path -- went straight into that conversion.
-    -- Playlunky logged `Mod: fyi.modded-online / Error: Unexpected return type
-    -- from function...` with no accompanying Lua error of ours, i.e. it rejected
-    -- a value we RETURNED rather than anything that threw. This is the only
-    -- callback we forward a return through, so it is the only candidate.
-    local hold = SafeCall("inputSync:preUpdate", preUpdate)
-    -- every frame, held or not, before anything else can ask (see heldFrame)
-    heldNow = hold == true
-    if DesyncLog ~= nil then
-        DesyncLog.frameDone("preUpdate")
-    end
-    if hold == true then
+    -- the gate, unless a hosted PRE_UPDATE callback the engine reached first has
+    -- already run it for this update (see "one decision per update")
+    if decidePass(gateToken) then
         return true
     end
     -- anything else: return NOTHING (not nil) and let the tick proceed
 end, ON.PRE_UPDATE)
+-- ...and where an update ends: after the sim ticked, or instead of it
+if ON.POST_UPDATE ~= nil then
+    set_callback(closeGatePass, ON.POST_UPDATE)
+end
+if ON.BLOCKED_UPDATE ~= nil then
+    set_callback(closeGatePass, ON.BLOCKED_UPDATE)
+end
 set_callback(function()
     if DesyncLog ~= nil then
         DesyncLog.frameMark("gameframe:camera+hideGone")

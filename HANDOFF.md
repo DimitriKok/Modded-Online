@@ -6,7 +6,7 @@ them.
 
 ## Start here
 
-**Build: `2.0.0-dev55` → `dev77`. The server must be redeployed at `1.0.13`.**
+**Build: `2.0.0-dev55` → `dev78`. The server must be redeployed at `1.0.13`.**
 Section 3's fix is half a server fix and does nothing without it (1.0.11 or later).
 Section 6 has a server half too, but its client half works on its own. A client on a
 server other than the one it expects says so in a toast and in the log. Check with
@@ -24,7 +24,7 @@ server other than the one it expects says so in a toast and in the log. Check wi
 | 8 | The tutorial came back after the first real run | **FIXED** in dev64; the dev64 session "seemed to work" — section 8 |
 | 9 | Udjat key and chest on two floors, sometimes two keys | **FIXED** in dev64; the dev64 session "seemed to work" — section 9 |
 | 10 | Jungle floors desynced (2-4: one extra frog on a lily pad) | **FIXED** in dev65, not yet confirmed in game — section 10 |
-| 11 | Desync logs sent to a Discord channel automatically (opt-in) | **NEW** in dev65 / server 1.0.13. The server side starts configured; no log posted yet — section 11 |
+| 11 | Desync logs sent to a Discord channel automatically (opt-in) | **NEW** in dev65 / server 1.0.13. The server side starts configured; no log posted yet. Since dev78 a log goes the moment the "Desync detected" popup appears (section 19) — section 11 |
 | 12 | A SETTINGS page, with AUTOMATICALLY SEND LOGS and AUTOMATICALLY SYNC DATA | **NEW** in dev66, reported working in game — section 12 |
 | 13 | Popups the first time Modded Online starts | **NEW** in dev66, reported working in game; a fourth added in dev67 — section 13 |
 | 14 | ENABLE DEBUG MESSAGES, and a RESTART REQUIRED popup | **NEW** in dev67, not yet tried in game — section 14 |
@@ -32,8 +32,9 @@ server other than the one it expects says so in a toast and in the log. Check wi
 | 16 | The other players shown in the camp lobby (climbing down the rope, walking about) | **NEW** in dev73. In its first two-player test nobody saw anybody: not one packet was sent. **FIXED** in dev74, not yet tried in game — section 16 |
 | 17 | 2.5's swamp desynced on 2-1: one machine built 2.5's new Wheel of Fortune, the other kept the dice shop | **FIXED** in dev75; dev76's capture (FVJF) ran 1-1 to 4-2 with every floor matching. dev76 **measured** the water: identical on both machines. The real cause was the ON.LEVEL callback ORDER (Overlunky's unordered_map). dev77 brings the lily pads back and runs a hosted mod's ON.LEVEL callbacks in registration order; not yet tried in game — section 17 |
 | 18 | The peer got a Lua error on 4-1 (`attempt to call a number value`) and crashed 2 s into 4-2 | **NOT FIXED: cause not known.** The crash was in the engine, after a hosted update callback returned. dev77 makes the next one name itself — section 18 |
+| 19 | 4-2 desynced 45 s in (room VOYY), and the resync that followed got stuck on the transition for 20 s | **FIXED** in dev78, not yet tried in game. The desync: GAMEFRAME (and every hosted ON.FRAME moved to it) and the mod's global timers ran on frames the lockstep gate held, and a hosted PRE_UPDATE before the gate read the last frame's decision. The stall: the transition barrier held our own resync warp. Also in dev78: the pet on a quick restart, and the logs to Discord at the popup — section 19 |
 
-**Git state:** the work is on `main`; dev77 was pushed to
+**Git state:** the work is on `main`; dev77 and dev78 were pushed to
 `claude/vigilant-cori-chwlul` for review. `git log --oneline origin/main..HEAD` shows
 what a branch adds.
 
@@ -956,8 +957,8 @@ registered first" never meant "ours run first" — the comments that said so in
 determinism.lua, LOADER.md and main.lua are corrected. Things that relied on it: the
 probe's generation look, `snapshotLiquid`, main.lua's `engineUpdate` trace marker, the
 run-reset window's closing callbacks, and simulatedOnly's PRE_UPDATE skip (a hosted
-PRE_UPDATE run before the gate's reads the previous frame's held state). None is known
-to have caused a desync yet.
+PRE_UPDATE run before the gate's reads the previous frame's held state -- fixed in
+dev78, section 19). None is known to have caused a desync yet.
 
 ## 18. The peer's Lua error on 4-1 and crash on 4-2 (room FVJF) — CAUSE NOT KNOWN; dev77 makes the next one name itself
 
@@ -996,6 +997,91 @@ each floor block lists what the hosted mods registered since the last floor.
 **Next time it happens:** before relaunching, copy `crash_frame.txt`, `crash_notes.txt`
 (and their `.prev` copies if a relaunch already happened), `desync_log.txt` and
 spelunky.log from the crashing machine, and spelunky.log from the other one too.
+
+## 19. Room VOYY: 4-2 desynced, then the resync got stuck — FIXED in dev78, NOT YET TRIED IN GAME
+
+**The capture** (dev77, host VOYY's slot 1, peer slot 2; 2.5 hosted):
+
+- 1-1 to 4-1 matched on every floor, the swamp included; the dev77 ON.LEVEL order held.
+- **A quick restart's 1-1 desynced on the pet** (`FLOOR DESYNC seq=1`, entities differ,
+  seed ok): the peer's `gen[pre]` read `pet=0`, the host's `pet=2`. The peer had put its
+  own pet back at the run's end (15:23:31) and the next floor was built at 15:23:32, before
+  the host's two-second broadcast. Fixed: the host's value is kept for as long as the peer
+  stays in that room (`pet` table in eventSync; `module.restorePetStyle` only forgets it
+  out of the room; pollPetStyle forgets it when the room goes).
+- **4-2: `POSITION DESYNC` at 23:3000 (host) / 23:3120 (peer).** Divergence between
+  23:2640 and 23:2760. Player 2 (dead on 4-1, a ghost at the start of 4-2, a coffin on
+  the floor, a leprechaun and a pot of gold too) had a body on both machines at the alarm:
+  hp 3 on the host, hp 0 on the peer. No event in either log at the moment they parted.
+- **The profile is what explains it.** In the host's window ending 23:1224 its POST_UPDATE
+  callback (`eventSync.lua:4582`) ran 563 times, exactly the lockstep advance, and its
+  GAMEFRAME profiler 600. The engine's frame counter (`get_frame`, `HeapBase::frame_count`)
+  moves on a frame the gate holds, and Overlunky fires GAMEFRAME whenever it moved
+  (`!pause && frame_count != last`). PRE_UPDATE's count equals GAMEFRAME's; POST_UPDATE's
+  equals the lockstep advance (BLOCKED_UPDATE fires instead on a held frame). 2.5's
+  `custom_entities.lua:599` ran at the GAMEFRAME rate (600 in that window), as did
+  `brokenAnkh.lua:753`, `bumblebee.lua:406`, `qilinQuest.lua:943`, `helpers2.lua:483`,
+  `intro.lua:518`, and N-per-frame `helpers2.lua:270/448`. The host held ~40 frames per
+  ten seconds on 4-2, the peer ~25 (the peer's machine was the slower one, ~58 fps).
+  Which of them moved player 2 cannot be read from the log.
+- Also in the profile: `madtadpole.lua:695`, `armour.lua:273`, `tonicEffects.lua:249`,
+  `monkeyFlight.lua:332`, `tonicShopTrade.lua:298`, `giantFrog.lua:79` and
+  `plungerPrompt.lua:127` all make the same number of calls, ~50 per RENDERED frame, and
+  that count differs between the machines from 1-4 on: draw-depth render callbacks. Only
+  a desync if one of them changes the world.
+- **The stall.** The host was on the transition after 4-2 (seq 24) and the peer still on
+  4-2. The stall detector warped both to 4-3 (`RESYNC WARP ... rebase seq=32`). The
+  host's barrier logged `transition hold: finished transition 12, waiting...` right
+  after: it took the warp's screen change for the door, and waited 20 s for a `tready`
+  from a peer that never stood on that transition. The peer, on 4-3 at seq 33, waited on
+  the host's inputs. They left the run.
+
+**dev78:**
+
+- `determinism.lua`: hosted GAMEFRAME callbacks, and ON.FRAME ones (still moved to
+  GAMEFRAME), go through `simulatedOnly`.
+- `modHost.lua` (`heldProofTimer`): a hosted `set_global_interval` /
+  `set_global_timeout` becomes the engine's own interval of one frame (zero for a
+  zero-frame timer), counting frames only when `InputSync.heldFrame()` is false. In solo
+  it fires exactly where the engine's would. A timeout that throws still runs once.
+- `inputSync.lua` ("one decision per update"): `decidePass` runs the gate once per update
+  for whichever caller comes first: the gate's own PRE_UPDATE, or a hosted PRE_UPDATE that
+  modHost wrapped in `InputSync.gateFirst`. POST_UPDATE / BLOCKED_UPDATE close the update;
+  a caller seen twice also starts a new one. The gate's side effects (recording, injection,
+  the transition hold) can therefore run inside the engine's call to a hosted PRE_UPDATE.
+  They run before `Callbacks.hosted`, so the trace marks are not nested.
+- `inputSync.lua`: the late input guard skips held frames (on them it recorded a stale
+  agreed value as a mod's write to a non-slot-1 player's input).
+- `eventSync.lua` (holdTransitionExit): while `suppressWarpUntil` is open, release
+  without restoring `tbar.wantNext`, set `gaveUp`, send no `tready`.
+- Checksums (`inputSync.lua`): compared on whichever side arrives second (the machine
+  behind used to overwrite and never compare); each carries `t` (time_level), `p`
+  (per-player x*100, y*100, hp, layer, mount) and `r` (the ten PRNG streams folded); the
+  first three mismatches a floor log `CHECKSUM MISMATCH ... here ... | there ... | prng
+  streams differ: ...`.
+- `logShip.lua`: `desyncNow` at the alarm queues this run's log at once and sends
+  `desyncseen` with `now = 1, s = seq`; another machine waits up to 5 s for its own popup,
+  then snapshots. Once per floor (`snapKey`). Paced while the run lasts (one part each
+  33 ms, 8 in flight). The run end sends only if something was noted since (`unsent`); a
+  resync warp after a popup is a follow-up and does not count. Own-event echoes ignored.
+
+**To confirm dev78 in game (two machines, 2.5, both opted in to AUTOMATICALLY SEND LOGS
+on a server that forwards logs):**
+
+1. Play to world 4 and on. A floor with a lot of stalling on one machine (the slower
+   machine's partner) is where dev77 parted; dev78 should not.
+2. If a `POSITION DESYNC` happens anyway: the popup should be followed within seconds by
+   a Discord post from each machine, and each log should have `CHECKSUM MISMATCH` lines
+   naming the player and PRNG streams that differ, at the same frame on both. That line
+   is the next lead.
+3. Restart a run quickly from 1-1 a few times: the peer's `gen[pre]` must read the host's
+   `pet=` every time.
+4. A resync warp taken while one machine stands on a transition must not hold: look for
+   `transition hold: released after N ms -- our own warp is leaving transition K`.
+
+**Still open (see Known, not fixed in the CHANGELOG):** callbacks of one kind still run
+in the engine's hash order, with ids that differ between machines; dev77's ordered
+dispatch covers ON.LEVEL only. A mod that changes the world from a render callback.
 
 ## Diagnostic tooling (flags and the files they write)
 
@@ -1077,7 +1163,7 @@ On a machine whose Python has no pytest or lupa, uv supplies both for the run:
 uv run --no-project --with pytest --with lupa python -m pytest tests/ -q
 ```
 
-983 passing, none failing, 1 skipped (it needs hdmod next to this pack) (dev77). The 16 long-standing failures went in dev67, with the two
+1045 passing, none failing, 1 skipped (it needs hdmod next to this pack) (dev78), under Lua 5.4 and 5.5. The 16 long-standing failures went in dev67, with the two
 stale test files they came from: `tests/test_world_mailbox.py` (the world mailbox
 deleted in dev44) and `tests/test_seeded_run.py` (the seeded-run flag removed in
 dev46). A failure here now means something broke.

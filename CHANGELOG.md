@@ -1,5 +1,157 @@
 # Changelog
 
+## 2.0.0-dev78
+
+The run that desynced on 4-2 and then got stuck, and the Discord logs now go the
+moment the "Desync detected" popup appears. No server change: the server stays at
+**1.0.13**. Both players must be on dev78, because when a hosted mod's callbacks run,
+and what a checksum packet carries, change.
+
+### What dev77's capture showed (room VOYY, 1-1 to 4-2)
+
+- **The lily pads and the ON.LEVEL order held.** Every floor from 1-1 to 4-1 matched on
+  both machines, the swamp included, and the two `level order` lines agreed on every
+  floor.
+- **The first 1-1 after a restart desynced on its pet.** The first run ended at
+  15:23:31 and the next 1-1 was built at 15:23:32. The peer had put its own pet setting
+  back when the run ended, and the host's next broadcast (every two seconds) had not
+  arrived: `gen[pre] ... pet=0` on the peer, `pet=2` on the host, a dog against a
+  hamster, `FLOOR DESYNC seq=1`. The run after that matched.
+- **4-2 desynced 45 seconds in** (`POSITION DESYNC` at 23:3000 on the host, 23:3120 on
+  the peer). Player 2 had died on 4-1 and started 4-2 as a ghost, with a coffin on the
+  floor. By the alarm player 2 had a body again on both machines: alive with 3 HP on the
+  host, dead on the peer. The log has no event at the moment the two parted. What it
+  does have is the profile:
+  - the host's own POST_UPDATE callback ran 563 times in one ten-second window, once per
+    simulated frame (the lockstep clock moved 563), and its GAMEFRAME profiler ran 600
+    times in the same window. **GAMEFRAME fires on frames the lockstep gate holds.**
+    The engine's frame counter moves on those frames, and GAMEFRAME fires on any frame
+    it moved. Until now the code assumed it did not.
+  - the mod's GAMEFRAME callbacks ran at that rate as well: 2.5's
+    `custom_entities.lua:599` made 600 calls in that window. That is about forty calls
+    more than the world moved on the host, and twenty-five more on the peer. The peer's
+    machine was the slower one, so the host waited on it more.
+  - hosted ON.FRAME callbacks have always been moved to GAMEFRAME. Unhosted, ON.FRAME
+    fires only when `time_level` moves, which a held frame never does. Moved, they got
+    the held frames too.
+  - so anything 2.5 changes from a GAMEFRAME or ON.FRAME callback, or from a global
+    timer (which counts the same frame counter; 2.5 registers one per floor), changed a
+    different number of times on each machine. The log cannot say which callback it
+    was. All of them are fixed below.
+- **Then the stall.** The host had reached the transition after 4-2; the peer was still
+  on 4-2. The stall detector resync-warped both to 4-3. The transition barrier on the
+  host took its own warp's screen change for the host walking out of the door, and held
+  it, waiting for a "ready" from the peer, which had never reached the transition. The
+  peer built 4-3 and waited on the host's inputs; the host stood on the transition for
+  the barrier's full 20 seconds, and the players left the run.
+
+### Fixed: the mod's per-frame code no longer runs on frames where the world is paused
+
+All of this applies in a room only. Playing alone there are no held frames, and
+nothing changes.
+
+- **A hosted mod's GAMEFRAME callbacks are skipped on a frame the gate held**, like its
+  PRE_UPDATE and POST_UPDATE since dev75. ON.FRAME callbacks are still moved to
+  GAMEFRAME, as they always were, and skip those frames too.
+- **A hosted mod's global timers count only the frames the world moved.** Each
+  `set_global_interval` and `set_global_timeout` is the engine's own interval, polled
+  each frame the counter moves. Held frames do not count. With nothing held it fires
+  where the engine's would: an interval at once and then every `frames`, a timeout
+  once after `frames`. Clearing it by id, returning false to end an interval, and the
+  floor block's count of what the mod registered work as before.
+- **The lockstep gate decides each update before any of a hosted mod's PRE_UPDATE code
+  runs.** The engine runs PRE_UPDATE callbacks in its hash order, and the ids that order
+  comes from differ between machines. VOYY's host registered one more callback than the
+  peer while the first floor loaded, and every id after it shifted. A mod's PRE_UPDATE
+  callback that came before the gate's read the last update's decision: it ran on the
+  first frame of every stall and was skipped on the frame the world moved again. It
+  also read the input slots before the gate had written the agreed inputs, so slot 1
+  held this machine's own pad. Now whichever comes first, the gate's callback or one of
+  the mod's, runs the gate; the rest of the update reuses that decision. modHost wraps
+  each hosted PRE_UPDATE callback in `InputSync.gateFirst`. An update ends at
+  POST_UPDATE, or at BLOCKED_UPDATE when it was held. If neither arrives, a callback
+  that runs a second time marks the next update. A mod that blocks the update from
+  PRE_UPDATE still blocks it.
+
+### Fixed: stuck on the transition after a resync
+
+The transition barrier lets our own warps go. A resync, a run start or the trip back
+to camp sets `suppressWarpUntil` before it calls `warp()`. While that window is open,
+leaving the transition is not a door anyone took. The hold is released and the warp's
+screen change stands. The barrier used to put back the door's screen change, which
+would cancel the warp. No "ready" is sent either: a machine still holding on that
+transition leaves when its own warp arrives, not through its door ahead of it, which
+would build the floor twice.
+
+### Fixed: a quick restart built 1-1 with the wrong pet
+
+A peer keeps the room host's pet style from one run to the next while it stays in that
+room, and adopts it again before each floor is built. Leaving the room puts the
+player's own back, by whichever way they left.
+
+### Fixed: the first input after a stall could be an old one
+
+The late input guard, which folds a mod's write to our input slot into the shared
+stream, runs on GAMEFRAME, so it ran on held frames too. Nothing is injected on those
+frames. The guard found its own leftover in the slot, without the injection's marker,
+and took it for a mod's write. On a machine whose player is not in slot 1, the first
+input recorded after every stall was then an older one of ours instead of the pad's. It
+now skips held frames.
+
+### Desync logs go to Discord at the popup
+
+- **When the "Desync detected" popup appears, this run's log goes at once**, for a
+  player who switched on AUTOMATICALLY SEND LOGS. The room is asked for theirs too.
+  Another machine waits up to five seconds for its own popup, so its log has its own
+  `POSITION DESYNC` block, then sends. Each floor's desync is sent once per machine.
+- While the run goes on, the upload is paced, about thirty parts a second (some
+  30 KB/s), so it does not crowd out the lockstep inputs. After the run it goes at full
+  speed.
+- A FLOOR DESYNC, which only the peers see and which has no popup, still sends the run
+  when it ends. So does a report from the room that never became a popup here. The
+  resync warp after a popup does not send the run a second time; a new desync after it
+  does.
+- Our own `desyncseen` report coming back from the server (it sends every event to
+  everyone, the sender too) is no longer counted as another player's.
+
+### The checksum, compared on both machines and explained
+
+- **The machine that was behind never compared.** `sendChecksum` stored its own hash
+  over an entry where the other machine's had already arrived, and threw that away. So
+  only the machine ahead could see a desync. Now whichever side arrives second compares.
+- **A checksum carries what went into it**: each player's position, health, layer and
+  mount, the level's frame, and the ten engine PRNG streams. The first three mismatches
+  of a floor are logged with both machines' values for the SAME simulated frame:
+  `CHECKSUM MISMATCH at 23:2760 (streak 1): here t=... p1 ...; p2 ... | there ... |
+  prng streams differ: c3`. Until now a desync left a pair of hashes and the positions
+  printed at the alarm, 240 frames later and at a different frame on each machine.
+
+### Known, not fixed
+
+- **Callbacks of the same kind still run in the engine's hash order**, and the ids it
+  hashes differ between machines. Where two of a mod's callbacks on the same event
+  depend on each other (both drawing from one stream, or one reading what the other
+  moved), the two machines can still disagree. dev77 fixed this for ON.LEVEL only.
+- **A hosted mod's render callbacks** (GUIFRAME, the draw-depth callbacks, entity render
+  hooks) run once per rendered frame, a different number of times on each machine. If a
+  mod changes the world from one of them, nothing here can make that deterministic.
+
+### Tests
+
+New: `tests/test_lockstep_hosting.py` (gateFirst on hosted PRE_UPDATE only, spawn hooks
+keep every argument, global timers in solo and with stalls, timeouts once even when
+they throw, clearing by id, the floor block's count, nothing added with the
+determinism layer off), `tests/test_checksum_detail.py` (both sides compare, both
+machines' values on a mismatch, three lines a floor, the alarm sends the log),
+`tests/test_pet_style.py` (the host's pet kept across runs in a room, dropped on
+leaving or in another room). Added to: `tests/test_held_frames.py` (GAMEFRAME and
+ON.FRAME as the capture shows them, the gate decided once per update whoever asks, the
+late guard on held frames), `tests/test_transition_barrier.py` (our own warp is never
+held, a hold in place lets it through and keeps its screen change),
+`tests/test_log_ship.py` (the popup's log goes at once, the room's follows, once per
+floor, paced mid-run, the run end only for something new). 1045 passing, 1 skipped,
+under Lua 5.4 and 5.5; the server suite passes unchanged.
+
 ## 2.0.0-dev77
 
 The swamp's lily pads are back online, and the next crash will say where it was. No

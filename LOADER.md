@@ -223,16 +223,19 @@ in the logs behind it. Carry these into the sandbox, do not reinvent them:
   dev76 measured the water on both machines and found it identical, so dev77 shows
   them again: what moved 2.5's streams on BGNY's 2-1 was the callback order below,
   not the water (HANDOFF section 17).
-- A hosted mod's PRE_UPDATE and POST_UPDATE are skipped on frames the lockstep gate
-  held. They fire per rendered frame, so anything a mod counts in them counts the
-  network.
+- A hosted mod's PRE_UPDATE, POST_UPDATE and GAMEFRAME (and ON.FRAME, which is moved
+  to GAMEFRAME) are skipped on frames the lockstep gate held, and its global timers
+  count only frames the world moved (dev78). The engine's frame counter moves on a
+  held frame, so anything a mod counts in those counts the network. The gate decides
+  each update before any of the mod's PRE_UPDATE code runs (`InputSync.gateFirst`).
 - Callback ordering. In the shim this was fragile because the payload was a guest.
   Hosting does NOT make it ours, though this file used to say so: Overlunky keeps a
   script's callbacks in a `std::unordered_map` keyed by id and fires them in hash
   order, and the ids differ between machines. Registering first does not mean
   running first, for our callbacks or the mod's. dev77 runs a hosted mod's ON.LEVEL
   callbacks in registration order itself; every other kind still runs in the
-  engine's order (HANDOFF section 17).
+  engine's order (HANDOFF section 17). dev78 makes the lockstep gate's decision come
+  first for a hosted PRE_UPDATE whatever the order (HANDOFF section 19).
 
 ## Open questions
 

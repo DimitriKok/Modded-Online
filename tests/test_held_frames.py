@@ -199,13 +199,20 @@ function SafeCall(_, f, ...)
     return nil
 end
 gateSays = nil
+gateRuns = 0
 function preUpdate()
+    gateRuns = gateRuns + 1
     if gateSays == 'throw' then error('broken gate') end
     return gateSays
 end
-ON = { PRE_UPDATE = 9 }
+ON = { PRE_UPDATE = 9, POST_UPDATE = 10, BLOCKED_UPDATE = 12 }
 registered = nil
-function set_callback(fn) registered = fn; return 1 end
+byEvent = {}
+function set_callback(fn, id)
+    if id == ON.PRE_UPDATE then registered = fn end
+    byEvent[id] = fn
+    return 1
+end
 """
 
 
@@ -213,11 +220,27 @@ def gate():
     rt = lupa.LuaRuntime(unpack_returned_tuples=True)
     rt.execute(GATE_ENV)
     assert "local heldNow = false" in INPUT_SYNC
-    registration = _slice("set_callback(function()\n    -- The resend keepalive",
-                          "end, ON.PRE_UPDATE)")
+    # the gate's own callback, the per-update decision it shares with the mod's
+    # PRE_UPDATE callbacks, and the two events that end an update
+    machinery = _slice("local gatePass = ", "    set_callback(closeGatePass, ON.BLOCKED_UPDATE)\nend")
     rt.execute("local heldNow = false" + NL + extract("function module.heldFrame()")
-               + registration + NL)
+               + machinery + NL)
     return rt
+
+
+def update(rt, *callers):
+    """One engine update: the PRE_UPDATE callbacks in the engine's order (names:
+    'gate' for ours, anything else for a hosted one wrapped by gateFirst), then
+    POST_UPDATE or BLOCKED_UPDATE. Returns what the gate's callback returned."""
+    gate_said = None
+    for who in callers:
+        if who == "gate":
+            gate_said = rt.eval("registered()")
+        else:
+            rt.execute(f"hosted_{who}()")
+    held = gate_said is True
+    rt.execute(f"byEvent[{'ON.BLOCKED_UPDATE' if held else 'ON.POST_UPDATE'}]()")
+    return gate_said
 
 
 def test_the_gate_reports_the_frame_it_held_and_only_that_frame():
@@ -234,9 +257,71 @@ def test_a_gate_tick_that_failed_is_not_a_held_frame():
     """The tick proceeds when the gate throws, so the mod must run on it too."""
     rt = gate()
     rt.execute("gateSays = true; registered()")
+    rt.execute("byEvent[ON.BLOCKED_UPDATE]()")
     rt.execute("gateSays = 'throw'")
     assert rt.eval("registered()") is None
     assert rt.eval("module.heldFrame()") is False
+
+
+HOSTED = """
+seen = {}
+function hostedWith(name)
+    return module.gateFirst(function()
+        seen[#seen + 1] = { name = name, held = module.heldFrame() }
+    end)
+end
+hosted_early = hostedWith('early')
+hosted_late = hostedWith('late')
+"""
+
+
+def test_a_hosted_pre_update_the_engine_reaches_first_sees_this_updates_decision():
+    """dev78. The engine runs PRE_UPDATE callbacks in its hash order, and one of the
+    mod's that came before the gate used to read the LAST update's decision: it ran
+    on the first frame of a stall and skipped the frame the world moved again. Now
+    whichever caller comes first runs the gate, and every caller agrees."""
+    rt = gate()
+    rt.execute(HOSTED)
+    rt.execute("gateSays = nil")
+    update(rt, "early", "gate", "late")
+    rt.execute("gateSays = true")  # this update the gate holds
+    assert update(rt, "early", "gate", "late") is True
+    rt.execute("gateSays = nil")   # and this one it lets go
+    assert update(rt, "early", "gate", "late") is None
+    seen = [(str(e["name"]), bool(e["held"])) for e in rt.eval("seen").values()]
+    assert seen == [("early", False), ("late", False),
+                    ("early", True), ("late", True),
+                    ("early", False), ("late", False)], seen
+
+
+def test_the_gate_runs_once_per_update_whoever_asks():
+    rt = gate()
+    rt.execute(HOSTED)
+    rt.execute("gateSays = nil")
+    for _ in range(5):
+        update(rt, "early", "late", "gate")
+    assert int(rt.eval("gateRuns")) == 5, "the gate ran more than once in an update"
+
+
+def test_without_the_end_of_update_events_a_caller_met_again_starts_the_next():
+    """No POST_UPDATE / BLOCKED_UPDATE: an older Playlunky, or ours cleared. Every
+    callback runs once per update, so meeting one again means a new update."""
+    rt = gate()
+    rt.execute(HOSTED)
+    rt.execute("gateSays = nil")
+    for _ in range(4):
+        rt.execute("hosted_early()")
+        rt.eval("registered()")
+        rt.execute("hosted_late()")
+    assert int(rt.eval("gateRuns")) == 4
+
+
+def test_a_hosted_pre_update_keeps_its_own_return():
+    """A mod that blocks the update from PRE_UPDATE still blocks it."""
+    rt = gate()
+    rt.execute("hosted_block = module.gateFirst(function() return true end)")
+    rt.execute("gateSays = nil")
+    assert rt.eval("hosted_block()") is True
 
 
 PRE_UPDATE_ENV = """
@@ -293,3 +378,128 @@ def test_a_run_screen_outside_the_gate_keeps_its_menu_pause():
 
 def test_a_gated_frame_still_clears_it_as_before():
     assert pause_after(pause=1) == 0
+
+
+# -------------------------------------------------- GAMEFRAME, as it is (dev78)
+#
+# GAMEFRAME was believed to pause with the simulation. Room VOYY's profile says it
+# does not: over one ten-second window of 4-2 the host's own POST_UPDATE callback
+# ran 563 times -- once per simulated frame, the lockstep clock advanced 563 -- and
+# its GAMEFRAME profiler 600. The engine's frame counter moves on a frame the gate
+# holds, and GAMEFRAME fires whenever it moved. So did the mod's (2.5's
+# custom_entities.lua:599: 600 calls in that window). The engine below fires it the
+# way the capture shows.
+
+OBSERVED = """
+function observedFrame(isHeld)
+    held = isHeld
+    fire(ON.PRE_UPDATE)
+    if not isHeld then fire(ON.POST_UPDATE) end
+    fire(ON.GAMEFRAME) -- held or not: the frame counter moved
+    fire(ON.GUIFRAME)
+end
+"""
+
+
+def play_observed(rt, pattern):
+    for c in pattern:
+        rt.execute(f"observedFrame({'true' if c == 'h' else 'false'})")
+
+
+def test_the_mods_gameframe_callbacks_count_only_frames_the_world_moved():
+    rt, _ = runtime()
+    rt.execute(OBSERVED)
+    rt.execute("""
+        ticks = 0
+        env.set_callback(function() ticks = ticks + 1 end, ON.GAMEFRAME)
+    """)
+    play_observed(rt, "rhhrhrrh")
+    assert int(rt.eval("ticks")) == 4, "a GAMEFRAME callback ran on frames the gate held"
+
+
+def test_an_on_frame_callback_moved_to_gameframe_counts_the_same():
+    """ON.FRAME has always been moved to GAMEFRAME; natively it fires only when
+    time_level changes, which a held frame never does. Moved, it must not gain the
+    held frames GAMEFRAME has."""
+    rt, _ = runtime()
+    rt.execute(OBSERVED)
+    rt.execute("""
+        ticks = 0
+        env.set_callback(function() ticks = ticks + 1 end, ON.FRAME)
+    """)
+    play_observed(rt, "hrhhr")
+    assert int(rt.eval("ticks")) == 2
+
+
+def test_two_machines_with_different_stalls_see_the_same_gameframes():
+    calm, _ = runtime()
+    stalled, control = runtime()
+    for rt in (calm, stalled):
+        rt.execute(OBSERVED)
+        rt.execute("""
+            countdown, firedOn, sim = 5, nil, 0
+            env.set_callback(function() sim = sim + 1 end, ON.POST_UPDATE)
+            env.set_callback(function()
+                countdown = countdown - 1
+                if countdown == 0 then firedOn = sim end
+            end, ON.GAMEFRAME)
+        """)
+    play_observed(calm, "rrrrrr")
+    play_observed(stalled, "rhrhhrhrrh")
+    assert calm.eval("firedOn") == stalled.eval("firedOn") == 5
+    assert int(control["stats"]()["heldSkips"]) >= 4
+
+
+def test_outside_a_room_gameframe_is_untouched():
+    """Nothing is ever held in solo; the callback sees every engine frame."""
+    rt, _ = runtime("{ heldFrame = function() return false end }")
+    rt.execute(OBSERVED)
+    rt.execute("""
+        ticks = 0
+        env.set_callback(function() ticks = ticks + 1 end, ON.GAMEFRAME)
+    """)
+    play_observed(rt, "rhhr")
+    assert int(rt.eval("ticks")) == 4
+
+
+# ------------------------------------------------- the late input guard (dev78)
+
+GUARD_ENV = """
+active, engaged = true, true
+Network = { isInRun = function() return true end }
+SENTINEL = 1 << 15
+sentinelSupported = true
+myCoopIndex = 2
+coopSlots = { [1] = 1, [2] = 2 }
+lastInjected = { [1] = 0, [2] = 4 }   -- our player held a button on the last real frame
+myModValue = nil
+heldNow = false
+slots = { { buttons_gameplay = 0 }, { buttons_gameplay = 4 } }
+function get_local_state() return { player_inputs = { player_slots = slots } } end
+"""
+
+
+def guard():
+    rt = lupa.LuaRuntime(unpack_returned_tuples=True)
+    rt.execute(GUARD_ENV)
+    rt.execute(extract("local function lateInputGuard()") + "guardG = lateInputGuard" + NL)
+    return rt
+
+
+def test_the_late_guard_does_nothing_on_a_frame_the_gate_held():
+    """GAMEFRAME fires on held frames. Nothing was injected on one, so the slot holds
+    the agreed value the guard itself put back -- no sentinel -- and the guard took
+    that for a mod writing our input: the first input recorded after every stall was
+    an older one of ours instead of the pad's."""
+    rt = guard()
+    rt.execute("heldNow = true; guardG()")
+    assert rt.eval("myModValue") is None, "a held frame's leftover was folded in as a mod's write"
+
+
+def test_the_late_guard_still_folds_a_real_mod_write_on_a_real_frame():
+    rt = guard()
+    # a real frame: the gate injected with the sentinel, then a mod zeroed our slot
+    rt.execute("slots[1].buttons_gameplay = 0 | SENTINEL; slots[2].buttons_gameplay = 0")
+    rt.execute("heldNow = false; guardG()")
+    assert int(rt.eval("myModValue")) == 0
+    assert int(rt.eval("slots[2].buttons_gameplay")) == 4, "the agreed value was not put back"

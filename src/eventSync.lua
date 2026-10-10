@@ -508,10 +508,16 @@ end
 -- the duration of a networked run. `set_setting` is documented as TEMPORARY and
 -- NOT saved, so a player's real preference is never rewritten (and the options
 -- menu that could reset it is already blocked mid-run by suppressMenuScreens).
-local PET_BROADCAST_MS = 2000
-local petBroadcastMs = 0
-local petStyleLocal = nil -- our own real setting, captured once
-local petStyleHost = nil  -- the host's value, once known
+-- Everything below lives on ONE table: eventSync's main chunk sits a couple of
+-- locals under Lua's limit of 200, and these used to be four of them.
+local pet = {
+    BROADCAST_MS = 2000,
+    broadcastMs = 0,
+    mine = nil, -- our own real setting, captured once
+    host = nil, -- the room host's value, once known -- kept for as long as we stay
+                -- in the room it came from (see module.restorePetStyle)
+    room = nil, -- ...and that room
+}
 
 local function petStyleSetting()
     local v = nil
@@ -519,24 +525,38 @@ local function petStyleSetting()
     return v
 end
 
+--- Put our own preference back and forget the host's: we are out of its room.
+local function forgetPetStyle()
+    if pet.host == nil then
+        return
+    end
+    pet.host = nil
+    pet.room = nil
+    if pet.mine ~= nil then
+        pcall(function() set_setting(GAME_SETTING.PET_STYLE, pet.mine) end)
+    end
+end
+
 --- Host: publish our pet style on a slow cadence. Runs in the LOBBY too, so peers
 --- already hold the value well before the first floor is generated (a run can only
 --- start from the lobby), which is what keeps floor 1-1 in sync.
 local function pollPetStyle()
     if not Network.isActive() then
+        -- out of the room, by whichever way we left it: our own pet again
+        forgetPetStyle()
         return
     end
-    if petStyleLocal == nil then
-        petStyleLocal = petStyleSetting()
+    if pet.mine == nil then
+        pet.mine = petStyleSetting()
     end
     if not Network.isHost() then
         return
     end
     local now = get_ms()
-    if now - petBroadcastMs < PET_BROADCAST_MS then
+    if now - pet.broadcastMs < pet.BROADCAST_MS then
         return
     end
-    petBroadcastMs = now
+    pet.broadcastMs = now
     local v = petStyleSetting()
     if v ~= nil then
         Network.sendEvent("petstyle", { p = math.floor(v) })
@@ -572,10 +592,11 @@ local function onPetStyle(payload, originSlot)
     if v < 0 then
         return
     end
-    if petStyleLocal == nil then
-        petStyleLocal = petStyleSetting()
+    if pet.mine == nil then
+        pet.mine = petStyleSetting()
     end
-    petStyleHost = v
+    pet.host = v
+    pet.room = Network.room
     pcall(function() set_setting(GAME_SETTING.PET_STYLE, v) end)
 end
 
@@ -583,24 +604,33 @@ end
 --- setting is temporary, so anything that resets it — or a value that arrived after
 --- we had already adopted one — can't leave us spawning the wrong pet.
 local function enforcePetStyle()
-    if petStyleHost == nil or Network.isHost() then
+    if pet.host == nil or Network.isHost() then
         return
     end
-    if petStyleSetting() ~= petStyleHost then
-        pcall(function() set_setting(GAME_SETTING.PET_STYLE, petStyleHost) end)
+    if pet.room ~= Network.room then
+        forgetPetStyle() -- another room's host: not ours to follow
+        return
+    end
+    if petStyleSetting() ~= pet.host then
+        pcall(function() set_setting(GAME_SETTING.PET_STYLE, pet.host) end)
     end
 end
 
---- Put our own pet preference back when the run/room ends. `set_setting` never
---- persists, but restoring keeps the rest of the session honest. Exposed on the
---- module because clearRunState is defined earlier in the file than this.
+--- A run ended (clearRunState). Exposed on the module because clearRunState is
+--- defined earlier in the file than this.
+---
+--- The host's value is NOT forgotten while we are still in its room. Until dev78 it
+--- was, and the next run in the same room started without it: the host broadcasts
+--- every two seconds, and a restart builds its first floor sooner than that. Room
+--- VOYY's second 1-1 was generated a second after the first run ended -- the peer
+--- spawned its own dog against the host's hamster, a FLOOR DESYNC on the very first
+--- floor. Leaving the room still puts our own preference back (pollPetStyle).
 function module.restorePetStyle()
-    if petStyleHost == nil then
+    if pet.host == nil then
         return
     end
-    petStyleHost = nil
-    if petStyleLocal ~= nil then
-        pcall(function() set_setting(GAME_SETTING.PET_STYLE, petStyleLocal) end)
+    if not Network.isActive() or pet.room ~= Network.room then
+        forgetPetStyle()
     end
 end
 
@@ -3006,7 +3036,9 @@ local function applyPendingWarp()
     end
     -- a party that needed resyncing had desynced: this run's log is one to send
     if LogShip ~= nil and LogShip.noteDesync ~= nil then
-        pcall(LogShip.noteDesync, string.format("RESYNC WARP to %s-%s", tostring(p.w), tostring(p.l)))
+        -- a follow-up: after a popup's log, the warp alone does not send the run again
+        pcall(LogShip.noteDesync, string.format("RESYNC WARP to %s-%s", tostring(p.w), tostring(p.l)),
+            false, true)
     end
     toast(string.format("Players desynced — resyncing to floor %s-%s!",
         tostring(p.w), tostring(p.l)))
@@ -3337,6 +3369,29 @@ function module.holdTransitionExit()
     -- neither ever releasing, with `next cseq out 3` proving the resend never ran.
     if state.screen_next == SCREEN.TRANSITION and not tbar.holding then
         return -- still on it and not trying to leave: nothing to decide yet
+    end
+    -- Leaving, but not through the door: one of our own synchronized warps (a floor
+    -- resync, a run start, the trip back to camp) is taking this machine off the
+    -- transition, and every other machine is being warped too, from wherever it
+    -- stood. Holding it waits for a "ready" that cannot come. In room VOYY the
+    -- stall detector resync-warped the party from 4-2 while the host stood on this
+    -- transition and the peer was still on the level: the peer never reached the
+    -- transition, the host's warp was held here for the full twenty seconds, and the
+    -- peer sat on the warped floor waiting for the host's inputs until they gave up
+    -- on the run. So the warp goes. Its own screen change stands, too: putting back
+    -- the door's (tbar.wantNext) would cancel it. No "ready" is sent: a machine
+    -- still holding here leaves when ITS warp arrives, not through its door ahead of
+    -- it, which would build the floor twice.
+    if get_ms() < suppressWarpUntil then
+        if tbar.holding then
+            tbar.holding = false
+            if DesyncLog ~= nil then
+                DesyncLog.event("transition hold: released after %d ms -- our own warp"
+                    .. " is leaving transition %d", get_ms() - tbar.heldMs, key)
+            end
+        end
+        tbar.gaveUp = true -- this transition is over; never hold it again
+        return
     end
 
     -- We are trying to leave, so we are done with this transition. Say so, and

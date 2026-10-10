@@ -6,8 +6,16 @@
 --- (server.py `on_logup`, DISCORD.md). A run counts as desynced when this machine
 --- saw a FLOOR DESYNC, a POSITION DESYNC or a resync warp, or another player in the
 --- room reported one -- the host never sees a FLOOR DESYNC, only the peers do, and
---- the reason a pair of logs is worth anything is that it is a PAIR. The log is
---- sent once the run ends, from this run's own section of desync_log.txt.
+--- the reason a pair of logs is worth anything is that it is a PAIR.
+---
+--- WHEN it goes: the moment the "Desync detected" popup appears (a POSITION DESYNC),
+--- this run's log so far goes at once, and the room is asked for theirs, which follow
+--- within a few seconds (desyncNow). Anything else that desyncs a run -- a FLOOR
+--- DESYNC, which only the peers see and which has no popup, or a report from the
+--- room that never became one here -- goes when the run ends, as it always did. A
+--- resync warp after a popup does not send the run a second time: it is how the
+--- incident already sent ends. Either way it is this run's own section of
+--- desync_log.txt.
 ---
 --- Nothing is sent unless the player switched on AUTOMATICALLY SEND LOGS (Modded
 --- Online's SETTINGS page, `Network.config.autoSendLogs`), and nothing is sent to a
@@ -32,10 +40,23 @@ local MAX_PENDING = 2
 -- and its tail (where the trouble is), and says what it cut.
 local MAX_BYTES = 4 * 1024 * 1024 - 4096
 local KEEP_HEAD = 64 * 1024
+-- A log sent at the popup goes while the run carries on, over the same connection
+-- as the lockstep inputs. So while the run lasts it is paced -- one part at a time,
+-- about thirty a second (some 30 KB/s), few in flight -- where a log sent after the
+-- run goes as fast as the window allows.
+local RUN_PART_GAP_MS = 33
+local RUN_WINDOW = 8
+-- How long a machine asked for its log by another's popup waits for its OWN popup,
+-- which usually follows within a couple of seconds: its log then holds its own
+-- POSITION DESYNC block too. Room VOYY's two alarms were 2 s apart.
+local ROOM_ASK_WAIT_MS = 5000
 
 local runNote = nil      -- why this run counts as desynced: the first reason seen
+local unsent = nil       -- a desync noted since the last log was queued, if any
+local snapKey = nil      -- the lockstep seq whose popup log is already queued
+local deferred = nil     -- { atMs, reason, key }: the room asked for our log
 local announced = false  -- told the room already, this run
-local pending = {}       -- { text, info, queuedMs } waiting for a server
+local pending = {}       -- { text, info, queuedMs, midRun } waiting for a server
 local current = nil      -- the upload in progress
 local noForwardNoticeShown = false
 
@@ -97,6 +118,9 @@ end
 --- A new run: nothing has desynced in it yet.
 function module.runStarted()
     runNote = nil
+    unsent = nil
+    snapKey = nil
+    deferred = nil
     announced = false
 end
 
@@ -104,9 +128,14 @@ end
 --- to the room once, so every player who opted in sends their side of it.
 --- @param reason string
 --- @param fromRoom boolean? # another player reported it: do not echo it back
-function module.noteDesync(reason, fromRoom)
+--- @param followUp boolean? # what follows an incident already sent (a resync warp):
+---                          # no reason to send the run again by itself
+function module.noteDesync(reason, fromRoom, followUp)
     if runNote == nil then
         runNote = tostring(reason)
+    end
+    if unsent == nil and not (followUp and snapKey ~= nil) then
+        unsent = tostring(reason)
     end
     if fromRoom or announced then
         return
@@ -117,14 +146,83 @@ function module.noteDesync(reason, fromRoom)
     end
 end
 
---- @param payload { r: string? }
+--- @param text string
+--- @param reason string
+--- @param midRun boolean
+local function queue(text, reason, midRun)
+    if #pending >= MAX_PENDING then
+        table.remove(pending, 1)
+    end
+    pending[#pending + 1] = {
+        text = module.fit(text), info = module.describeRun(reason), queuedMs = get_ms(),
+        midRun = midRun,
+    }
+    say("queued %s log (%s, %d bytes)", midRun and "this desync's" or "this run's",
+        reason, #text)
+    if Network ~= nil and Network.serverForwardsLogs ~= true and not noForwardNoticeShown then
+        noForwardNoticeShown = true
+        notify("This server isn't set up to post desync logs — yours will go when you're on one that is")
+    end
+end
+
+--- This run's log so far, queued now, once per desynced floor.
+--- @param reason string
+--- @param key integer? # the lockstep seq of the floor that desynced
+local function snapshot(reason, key)
+    deferred = nil
+    if key ~= nil and key == snapKey then
+        return -- this floor's is already on its way
+    end
+    if not module.enabled() then
+        return
+    end
+    local text = nil
+    if DesyncLog ~= nil and DesyncLog.currentRunText ~= nil then
+        text = DesyncLog.currentRunText()
+    end
+    if type(text) ~= "string" or text == "" then
+        say("desync (%s) but its log could not be read", tostring(reason))
+        return
+    end
+    snapKey = key
+    unsent = nil
+    queue(text, reason, true)
+end
+
+--- The "Desync detected" popup, on this machine: the log goes NOW, and the room is
+--- asked for theirs (ROOM_ASK_WAIT_MS).
+--- @param reason string
+--- @param key integer? # the lockstep seq of the floor
+function module.desyncNow(reason, key)
+    reason = tostring(reason)
+    module.noteDesync(reason, true)
+    if Network ~= nil and Network.isInRun ~= nil and Network.isInRun() then
+        announced = true
+        Network.sendEvent("desyncseen", { r = reason:sub(1, 120), now = 1, s = key })
+    end
+    snapshot(reason, key)
+end
+
+--- @param payload { r: string?, now: integer?, s: integer? }
 --- @param originSlot integer
 local function onDesyncSeen(payload, originSlot)
     if Network == nil or not Network.isInRun() then
         return -- a report that outlived its run must not mark the next one
     end
+    if originSlot == Network.slot then
+        return -- our own report: the server sends every event to everyone, us too
+    end
     local why = type(payload) == "table" and tostring(payload.r or "desync") or "desync"
-    module.noteDesync(string.format("slot %s reported %s", tostring(originSlot), why), true)
+    local reason = string.format("slot %s reported %s", tostring(originSlot), why)
+    module.noteDesync(reason, true)
+    if type(payload) == "table" and tonumber(payload.now) == 1 then
+        -- their popup: ours goes too, once our own has had a moment to come up
+        local key = tonumber(payload.s)
+        key = key ~= nil and math.floor(key) or nil
+        if (key == nil or key ~= snapKey) and deferred == nil then
+            deferred = { atMs = get_ms() + ROOM_ASK_WAIT_MS, reason = reason, key = key }
+        end
+    end
 end
 
 --- This run's log, trimmed to what the server accepts.
@@ -143,7 +241,7 @@ end
 
 --- @param reason string
 --- @return table
-local function describeRun(reason)
+function module.describeRun(reason)
     local seed = "?"
     pcall(function()
         local a, b = get_adventure_seed(false)
@@ -163,11 +261,14 @@ end
 --- The run is over (DesyncLog.close, which every way a run ends goes through).
 --- If it desynced and the player opted in, this run's log is queued to go.
 function module.runEnded()
-    local note = runNote
+    local note, fresh, sentOne = runNote, unsent, snapKey ~= nil
     runNote = nil
+    unsent = nil
+    snapKey = nil
+    deferred = nil -- the room asked and the run ended first: the run's log covers it
     announced = false
-    if note == nil or not module.enabled() then
-        return
+    if note == nil or fresh == nil or not module.enabled() then
+        return -- clean, or nothing since the log already sent at the popup
     end
     local text = nil
     if DesyncLog ~= nil and DesyncLog.currentRunText ~= nil then
@@ -177,15 +278,11 @@ function module.runEnded()
         say("run desynced (%s) but its log could not be read", note)
         return
     end
-    if #pending >= MAX_PENDING then
-        table.remove(pending, 1)
+    local reason = note
+    if sentOne and fresh ~= note then
+        reason = fresh .. " (after " .. note .. ")"
     end
-    pending[#pending + 1] = { text = module.fit(text), info = describeRun(note), queuedMs = get_ms() }
-    say("queued this run's log (%s, %d bytes)", note, #text)
-    if Network ~= nil and Network.serverForwardsLogs ~= true and not noForwardNoticeShown then
-        noForwardNoticeShown = true
-        notify("This server isn't set up to post desync logs — yours will go when you're on one that is")
-    end
+    queue(text, reason, false)
 end
 
 -- -------------------------------------------------------------- the upload
@@ -202,6 +299,7 @@ end
 
 local function sendPart(upload, index, now)
     upload.sentAt[index] = now
+    upload.lastPartMs = now
     Network.sendServer({ t = "logup", op = "part", u = upload.id, i = index,
         d = partData(upload, index) })
 end
@@ -232,6 +330,8 @@ local function start(entry, now)
         text = entry.text,
         info = entry.info,
         queuedMs = entry.queuedMs,
+        midRun = entry.midRun == true,
+        lastPartMs = 0,
         parts = math.max(1, math.ceil(#entry.text / PART_BYTES)),
         phase = "begin",
         acked = 0,
@@ -244,8 +344,18 @@ local function start(entry, now)
 end
 
 local function sendParts(upload, now)
+    -- a log sent at the popup, while the run it came from is still going: paced
+    local paced = upload.midRun and Network.isInRun ~= nil and Network.isInRun()
     local budget = PER_FRAME
-    local last = math.min(upload.parts, upload.acked + WINDOW)
+    local window = WINDOW
+    if paced then
+        if now - upload.lastPartMs < RUN_PART_GAP_MS then
+            return
+        end
+        budget = 1
+        window = RUN_WINDOW
+    end
+    local last = math.min(upload.parts, upload.acked + window)
     for index = upload.acked + 1, last do
         if budget == 0 then
             return
@@ -292,6 +402,13 @@ end
 --- move the one in progress along.
 function module.poll()
     local now = get_ms()
+    if deferred ~= nil and now >= deferred.atMs then
+        local ask = deferred
+        deferred = nil
+        if Network ~= nil and Network.isInRun ~= nil and Network.isInRun() then
+            snapshot(ask.reason, ask.key)
+        end
+    end
     if current ~= nil and not module.enabled() then
         current = nil -- the player changed their mind: stop, send nothing more
         pending = {}
@@ -310,7 +427,8 @@ function module.poll()
     if not Network.isActive() then
         -- The room is gone, and the server only takes logs from a room's members.
         -- Keep it and send it from the start next time.
-        table.insert(pending, 1, { text = current.text, info = current.info, queuedMs = current.queuedMs })
+        table.insert(pending, 1, { text = current.text, info = current.info,
+            queuedMs = current.queuedMs, midRun = current.midRun })
         current = nil
         return
     end
@@ -349,6 +467,10 @@ function module.status()
         acked = current ~= nil and current.acked or 0,
         parts = current ~= nil and current.parts or 0,
         runNote = runNote,
+        unsent = unsent,
+        snapKey = snapKey,
+        deferred = deferred ~= nil,
+        midRun = current ~= nil and current.midRun or false,
     }
 end
 

@@ -37,6 +37,7 @@ runActive = true
 SCREEN = {TRANSITION = 13, LEVEL = 12}
 FADE = {NONE = 0}
 nowValue = 0
+suppressWarpUntil = 0 -- an upvalue of the whole file: when our own warp is in flight
 sent = {}
 logLines = {}
 stateTable = {screen = 13, screen_next = 12, level_count = 4, loading = 2}
@@ -219,3 +220,74 @@ def test_the_player_is_told_they_are_waiting():
     menu = (PACK / "src" / "menuUI.lua").read_text(encoding="utf-8")
     assert "EventSync.transitionHolding()" in menu
     assert "InputSync.isStalled() or holding" in menu
+
+
+# ------------------------------------------------------- our own warp (dev78)
+#
+# Room VOYY: the stall detector resync-warped the party from 4-2 while the host
+# stood on the transition after it and the peer was still on the level. The barrier
+# took the warp's screen change for the host walking out, and held it -- for a
+# "ready" from a peer that never reached the transition. Twenty seconds, while the
+# peer sat on the warped 4-3 waiting for the host's inputs; they left the run.
+
+def our_warp(rt, at_ms=0):
+    """pollMoWarp: suppressWarpUntil = get_ms() + 3000, then warp() sets its own
+    screen change."""
+    rt.execute(f"nowValue = {at_ms}; suppressWarpUntil = {at_ms} + 3000")
+    rt.execute("stateTable.screen = SCREEN.TRANSITION")
+    rt.execute("stateTable.screen_next = SCREEN.LEVEL")
+    rt.execute("stateTable.loading = 1")
+
+
+def test_our_own_warp_off_a_transition_is_not_held():
+    rt = runtime()
+    our_warp(rt)
+    frame(rt)
+    assert not held(rt), "our own resync warp was held, waiting for a ready that cannot come"
+    assert int(rt.eval("stateTable.loading")) == 1, "the warp's load was cancelled"
+    assert rt.eval("module.transitionHolding()") is False
+    assert int(rt.eval("#sent")) == 0, (
+        "announced ready: a machine still holding would leave through its door ahead "
+        "of its own warp, and build the floor twice")
+
+
+def test_a_hold_already_in_place_lets_our_warp_through_and_keeps_its_screen_change():
+    """Holding for the door, then the resync lands: release, and do NOT put the
+    door's screen change back -- that would cancel the warp."""
+    rt = runtime()
+    leaving(rt)
+    assert held(rt)
+    our_warp(rt, at_ms=500)
+    rt.execute("stateTable.screen_next = 7")  # whatever the warp asked for
+    frame(rt)
+    assert int(rt.eval("stateTable.screen_next")) == 7, "the door's screen change overwrote the warp's"
+    assert int(rt.eval("stateTable.loading")) == 1
+    assert rt.eval("module.transitionHolding()") is False
+    lines = [str(l) for l in rt.eval("logLines").values()]
+    assert any("our own warp" in l for l in lines), lines
+
+
+def test_after_our_warp_this_transition_is_never_held_again():
+    rt = runtime()
+    our_warp(rt)
+    frame(rt)
+    rt.execute("nowValue = 5000")  # the warp window is over, still the same transition
+    leaving(rt)
+    assert not held(rt)
+
+
+def test_the_next_transition_is_held_as_usual():
+    rt = runtime()
+    our_warp(rt)
+    frame(rt)
+    rt.execute("nowValue = 60000; stateTable.level_count = 5")
+    leaving(rt)
+    assert held(rt), "the barrier stopped working after one warp"
+
+
+def test_the_warp_window_is_the_one_our_warps_open():
+    event_sync = (PACK / "src" / "eventSync.lua").read_text(encoding="utf-8")
+    at = event_sync.index("local function pollMoWarp()")
+    body = event_sync[at:event_sync.index("\nend\n", at)]
+    assert "suppressWarpUntil = get_ms() + 3000" in body
+    assert body.index("suppressWarpUntil = get_ms() + 3000") < body.index("warp(dest.w, dest.l, dest.t)")

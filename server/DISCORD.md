@@ -15,7 +15,7 @@ Nothing is posted unless **both** of these are true:
 
 ## What a post contains
 
-* **The file.** This is the desync log of that one run, from the player's own game.
+* **The file.** This is the desync log of that one run (up to the moment it was sent), from the player's own game.
   It holds the players' names in the room, the mod list, seeds, and per-floor and
   per-frame sync data.
   * The server replaces every IPv4 address in it with `x.x.x.x`.
@@ -30,6 +30,19 @@ Nothing is posted unless **both** of these are true:
 When one player's game sees a desync, it tells the rest of the room. Every player who
 opted in then sends their side of the run. The two logs land next to each other,
 with the same room code and seed, which is what you diff.
+
+## When a log is sent
+
+* **The moment the "Desync detected" popup appears** (a position desync), that
+  player's log of the run so far is sent, and the rest of the room is asked for
+  theirs. Each of the others waits up to five seconds for its own popup, which usually
+  follows, so its log has its own side of the desync too, then sends. Each floor's
+  desync is sent once per player. While the run goes on, the upload is paced (about
+  30 KB/s) so it doesn't lag the game.
+* **When the run ends**, for a run that desynced in a way no popup covered: a
+  `FLOOR DESYNC` (only the other players see those, at the start of a floor), or a
+  report from another player that never became a popup here. The resync warp that
+  follows a popup doesn't send the run a second time; a new desync after it does.
 
 ## Set up a bot (recommended)
 

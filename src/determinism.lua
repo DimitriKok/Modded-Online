@@ -1426,9 +1426,23 @@ function module.install(env, opts)
     --- shape is in its swamp water-poison count, in the push its monkey propeller
     --- adds before physics, and in every everyNthFrame wrapper it has.
     ---
-    --- So on a held frame the mod's update callbacks are not called at all, for the
-    --- reason ON.FRAME is moved to ON.GAMEFRAME. Every other frame is untouched,
-    --- including the engine's own pauses, which the mod sees and handles itself.
+    --- So on a held frame the mod's update callbacks are not called at all. Every
+    --- other frame is untouched, including the engine's own pauses, which the mod
+    --- sees and handles itself.
+    ---
+    --- ON.GAMEFRAME too, since dev78, and with it every ON.FRAME callback, which is
+    --- moved to GAMEFRAME below. GAMEFRAME was thought to pause with the simulation;
+    --- room VOYY's profile says otherwise. Over ten seconds of 4-2 the host's own
+    --- POST_UPDATE callback ran 563 times -- once per simulated frame, the lockstep
+    --- clock advanced 563 -- and its GAMEFRAME profiler 600: the engine's frame
+    --- counter moves on a frame the gate holds, and GAMEFRAME fires on any frame it
+    --- moved. The mod's GAMEFRAME callbacks ran at that rate as well (2.5's
+    --- custom_entities.lua:599, 600 calls in the same window), about forty times
+    --- more than the world moved on the host and twenty-five on the slower peer,
+    --- which stalled less. Whatever they changed, they changed a different number
+    --- of times on each machine. Its PRE_UPDATE wrapper is reached after the gate
+    --- has decided the frame (InputSync.gateFirst, through modHost), so it reads
+    --- THIS frame's decision rather than the last one's.
     --- @param cb function
     --- @return function
     local function simulatedOnly(cb)
@@ -1464,8 +1478,13 @@ function module.install(env, opts)
             return hostSetCallback(cb, id)
         end
         if id == ON.FRAME then
-            -- engine-frame rate is machine-dependent; the gameplay rate is not
+            -- moved to GAMEFRAME, as it always has been; once per SIMULATED frame
+            -- there too (see simulatedOnly)
             id = ON.GAMEFRAME
+            cb = simulatedOnly(cb)
+        elseif ON.GAMEFRAME ~= nil and id == ON.GAMEFRAME then
+            -- fires on the frames the gate holds as well (see simulatedOnly)
+            cb = simulatedOnly(cb)
         elseif id == ON.POST_LEVEL_GENERATION then
             -- Re-anchor to the SAME per-floor base before EVERY post-gen hook, so a
             -- hook's rolls depend only on the floor — never on how many values
@@ -1504,7 +1523,7 @@ function module.install(env, opts)
             return registerLevel(levelAnchored(liquidWindowed(cb)), cb, id)
         elseif (ON.PRE_UPDATE ~= nil and id == ON.PRE_UPDATE)
             or (ON.POST_UPDATE ~= nil and id == ON.POST_UPDATE) then
-            -- once per SIMULATED frame, like ON.FRAME above (see simulatedOnly)
+            -- once per SIMULATED frame, like GAMEFRAME above (see simulatedOnly)
             cb = simulatedOnly(cb)
         end
         return hostSetCallback(cb, id)
