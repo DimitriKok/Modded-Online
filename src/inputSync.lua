@@ -1744,10 +1744,11 @@ function module.checkFloorDigest(s)
     end
 end
 
---- Non-host only, MEASUREMENT ONLY (dev76): compare this floor's water probe with
---- the world host's and log one verdict line (Determinism.waterVerdict). Nothing
---- acts on the result. Like checkFloorDigest it needs both reports for the same
---- floor, so it is tried from both ends, and says it once per floor.
+--- Non-host only, MEASUREMENT ONLY: compare this floor's water probe with the world
+--- host's and log one verdict line (Determinism.waterVerdict), plus a line if the
+--- hosted mods' ON.LEVEL callbacks ran in a different order (levelOrderVerdict).
+--- Nothing acts on the result. Like checkFloorDigest it needs both reports for the
+--- same floor, so it is tried from both ends, and says it once per floor.
 --- @param s integer
 function module.checkWaterProbe(s)
     if Network.isWorldHost() then
@@ -1765,6 +1766,12 @@ function module.checkWaterProbe(s)
     local ok, line = pcall(Determinism.waterVerdict, mine.water, host.water, s)
     if ok and type(line) == "string" then
         DesyncLog.event("%s", line)
+    end
+    if Determinism.levelOrderVerdict ~= nil then
+        local okOrder, orderLine = pcall(Determinism.levelOrderVerdict, mine.water, host.water, s)
+        if okOrder and type(orderLine) == "string" then
+            DesyncLog.event("%s", orderLine)
+        end
     end
 end
 
@@ -1794,9 +1801,18 @@ function module.sendWorldDigest()
         water = water ~= nil and water.wire or nil }
     Network.sendEvent("worldchk", { s = seq, sd = seedHash, e = entHash,
         w = water ~= nil and water.wire or nil })
+    local extra = water ~= nil and water.lines or nil
+    -- what the hosted mods registered since the last floor, by kind (dev77): a timer
+    -- counted in engine frames fires at a different moment on each machine
+    if ModHost ~= nil and ModHost.registrationsSinceLastFloor ~= nil then
+        local okTally, since = pcall(ModHost.registrationsSinceLastFloor)
+        if okTally and type(since) == "string" then
+            extra = extra or {}
+            extra[#extra + 1] = "hosted registrations since the last floor: " .. since
+        end
+    end
     if DesyncLog ~= nil then
-        DesyncLog.floorSnapshot(seq, seedHash, entHash, counts,
-            water ~= nil and water.lines or nil)
+        DesyncLog.floorSnapshot(seq, seedHash, entHash, counts, extra)
         DesyncLog.leave("floorDigest+dump")
     end
     module.checkFloorDigest(seq)

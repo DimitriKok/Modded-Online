@@ -6,7 +6,7 @@ them.
 
 ## Start here
 
-**Build: `2.0.0-dev55` → `dev76`. The server must be redeployed at `1.0.13`.**
+**Build: `2.0.0-dev55` → `dev77`. The server must be redeployed at `1.0.13`.**
 Section 3's fix is half a server fix and does nothing without it (1.0.11 or later).
 Section 6 has a server half too, but its client half works on its own. A client on a
 server other than the one it expects says so in a toast and in the log. Check with
@@ -30,11 +30,12 @@ server other than the one it expects says so in a toast and in the log. Check wi
 | 14 | ENABLE DEBUG MESSAGES, and a RESTART REQUIRED popup | **NEW** in dev67, not yet tried in game — section 14 |
 | 15 | MODDED ONLINE as the main menu's ONLINE row, controller input, and the menu probe | **NEW** in dev68. In dev68's game test the takeover switched itself off on the first press; **FIXED** in dev69 and **confirmed in game** (the row opens our menu and stays put). The game-styled look is **NEW** in dev70 and drew correctly in game, with every line of text 1.7 times too big; **sized** in dev71; dev72 puts the menu in the main menu's own font (italic, Title Case); not yet tried in game — section 15 |
 | 16 | The other players shown in the camp lobby (climbing down the rope, walking about) | **NEW** in dev73. In its first two-player test nobody saw anybody: not one packet was sent. **FIXED** in dev74, not yet tried in game — section 16 |
-| 17 | 2.5's swamp desynced on 2-1: one machine built 2.5's new Wheel of Fortune, the other kept the dice shop | **FIXED** in dev75, not yet confirmed in game. The fix hides the swamp's lily pads online; dev76 **measures** whether they can come back — section 17 |
+| 17 | 2.5's swamp desynced on 2-1: one machine built 2.5's new Wheel of Fortune, the other kept the dice shop | **FIXED** in dev75; dev76's capture (FVJF) ran 1-1 to 4-2 with every floor matching. dev76 **measured** the water: identical on both machines. The real cause was the ON.LEVEL callback ORDER (Overlunky's unordered_map). dev77 brings the lily pads back and runs a hosted mod's ON.LEVEL callbacks in registration order; not yet tried in game — section 17 |
+| 18 | The peer got a Lua error on 4-1 (`attempt to call a number value`) and crashed 2 s into 4-2 | **NOT FIXED: cause not known.** The crash was in the engine, after a hosted update callback returned. dev77 makes the next one name itself — section 18 |
 
-**Git state:** everything is on `origin/fix/peer-save-restore`; the patch-delivered
-commits from the no-push-access session have landed. `git log --oneline
-origin/fix/peer-save-restore..HEAD` should be empty before you start.
+**Git state:** the work is on `main`; dev77 was pushed to
+`claude/vigilant-cori-chwlul` for review. `git log --oneline origin/main..HEAD` shows
+what a branch adds.
 
 **Before trusting any log in the pack folder**, read "why two captures came back
 empty" in section 2. A stale `desync_log.txt` used to ship *inside the repo* and cost
@@ -812,7 +813,7 @@ armed. If puppets still don't show, those lines say how far it got on each machi
 - The body only: no held item, whip or back item.
 - Test players (`fake_player.py`) send no puppet packets, so they don't show.
 
-## 17. 2.5's swamp desynced on 2-1 (the Wheel of Fortune) — FIXED in dev75, NOT YET CONFIRMED IN GAME
+## 17. 2.5's swamp desynced on 2-1 (the Wheel of Fortune) — FIXED in dev75, held in dev76's run; dev77 brings the lily pads back, NOT YET TRIED IN GAME
 
 **The capture (room BGNY, dev73, 2026-10-05):** 1-1 to 1-4 matched. 2-1 generated
 identically, with all ten streams equal at `gen[pre]` and `gen[post]`. At the first
@@ -877,16 +878,9 @@ The `WATER PROBE` lines are in the joining player's log. Decide only on floors w
 the mod asked (no "the mod did not ask" in the line); one `DIFFERENT` outweighs any
 number of `MATCH`es.
 
-**To confirm in game (two machines, 2.5):**
-
-1. Play into the swamp, over several floors with a dice shop or a Wheel House. No
-   `FLOOR DESYNC` on 2-x, and each floor's `entities:` line matches between the two
-   logs.
-2. The `prng:` lines match between the two logs on every floor.
-3. On a floor with water, each log has `hid N water-surface effect(s) from the hosted
-   mod's ON.LEVEL`. The two counts may differ; that difference is the reason for it.
-4. Spin the wheel while the other player's connection is stalling (`STALL` lines):
-   both screens show the same result, and both players have the same money after.
+**To confirm dev75 in game (two machines, 2.5):** superseded — dev76's FVJF run did
+items 1 and 2 (every floor matched), the `hid N water-surface effect(s)` line is gone
+in dev77, and the wheel test is in dev77's list below.
 
 **If 2-x still differs:**
 
@@ -908,6 +902,100 @@ number of `MATCH`es.
 - **A hosted PRE_UPDATE that runs before the gate's** reads the previous frame's
   answer. That only happens after the gate's callback has been revived and
   re-registered behind the mod's.
+
+### dev76's answer (room FVJF, 2026-10-10) and what dev77 does with it
+
+**The run:** 1-1 to 4-2, two machines, 2.5. All 11 floor digests matched; no desync of
+any kind. The peer crashed 2 s into 4-2 (section 18).
+
+**The water was identical on every wet floor** (2-1, 2-2, 2-3, 3-1, 4-2): liquid and
+surfaces, to 1/100 tile and in the same order, at generation, at ON.LEVEL and at engage.
+The two logs' surface lists are identical. The verdicts: 2-2, 2-3 `MATCH`; 3-1, 4-2
+`MATCH (the mod did not ask)`; 2-4 and 4-1 dry; **2-1 `SETTLING`, wrongly**. On 2-1 the
+mod asked twice: the host's first query got all 117 and its second none, the peer's the
+other way round (host `mo` #42B999F1 = peer's #78523482 × 1000003 mod 2³¹−1, i.e. one
+full answer then an empty one). Same answers, swapped queries.
+
+**Why they swapped:** Overlunky's `LuaBackend` keeps a script's callbacks in
+`std::unordered_map<int, ScreenCallback> callbacks` and runs them with a range-for over
+the map (lua_backend.hpp/.cpp, checked against current source). The order is the hash
+order of the ids, the ids come from one per-script counter that our own registrations
+also draw from, and 2.5 re-registers its hooks every floor. The host had been through
+the camp twice, so its ids were different, so its order was different. BGNY's 2-1 (the
+original desync) is most likely this too, before dev75 anchored ON.LEVEL.
+
+**dev77 (`src/determinism.lua`, "the order of ON.LEVEL"):**
+
+- the surfaces are no longer hidden (`watchQuery`/`watched` only observe now, for the
+  probe); 2.5's swamp lily pads and the HD mod's lily pads and frogs are back online;
+- in a room, a hosted mod's ON.LEVEL callbacks run in **registration order**: the first
+  wrapper the engine reaches runs them all (`levelDispatch`), the rest return at their
+  own turn. Solo play is the engine's order. Edge rules: cleared mid-pass → skipped;
+  registered mid-pass → next floor; a bare `clear_callback()` is translated to the
+  running callback's own id (`clearIsEntrysOwn` walks the stack to `levelBoundary`, and
+  leaves a clear made inside a nested engine callback — any C frame that is not a
+  pcall — to the engine); errors re-raised at the thrower's own turn; returns handed
+  back at each one's own turn. Needs `debug.getinfo`; without it, no batch;
+- the probe gains `QUERY ORDER` and `QUERIES` verdicts, the `any` fingerprint (`mx`),
+  and the `level order` line / `ON.LEVEL ORDER` verdict (`oc`, `oh` on the wire).
+
+**To confirm dev77 in game (two machines, 2.5):**
+
+1. The swamp has lily pads on both screens, in the same places.
+2. No `FLOOR DESYNC` on 2-x; each floor's `entities:` line matches between the logs
+   (with the pads, `ITEM_LEAF` counts should now be the same, and higher than before).
+3. `WATER PROBE` lines read `MATCH` with `ON.LEVEL order: MATCH`. A `QUERY ORDER`
+   verdict, or an `ON.LEVEL ORDER ... DIFFERENT` line, means the mods registered their
+   callbacks in a different order on the two machines: compare the two logs'
+   `level order:` lines and note the first name that differs.
+4. Spin a Wheel of Fortune while the connection stalls: same result, same money.
+
+**Still open from this section:** every OTHER callback kind still runs in hash order
+(POST_LEVEL_GENERATION, PRE/POST_UPDATE, GAMEFRAME, ours included), so "ours are
+registered first" never meant "ours run first" — the comments that said so in
+determinism.lua, LOADER.md and main.lua are corrected. Things that relied on it: the
+probe's generation look, `snapshotLiquid`, main.lua's `engineUpdate` trace marker, the
+run-reset window's closing callbacks, and simulatedOnly's PRE_UPDATE skip (a hosted
+PRE_UPDATE run before the gate's reads the previous frame's held state). None is known
+to have caused a desync yet.
+
+## 18. The peer's Lua error on 4-1 and crash on 4-2 (room FVJF) — CAUSE NOT KNOWN; dev77 makes the next one name itself
+
+**The evidence** (peer = slot 2, not the world host; it had `mo_trace.on`):
+
+- spelunky.log, **14:15:45**, 5 s into 4-1: `Playlunky :: Lua Error: Mod:
+  fyi.modded-online-loader / Error: attempt to call a number value`, `stack traceback:`
+  and nothing under it. A hosted mod's errors carry our name. An empty stack means the
+  engine called a stored value that was not a function: no Lua frame was on the stack,
+  so it was not raised through any wrapper of ours (those leave frames). It happened
+  once.
+- crash_frame.txt: **`OUT mod determinism.lua:1042 | sim 21:115 | 14:16:36`**. The last
+  traced callback was a hosted PRE_UPDATE or POST_UPDATE (1042 is `simulatedOnly`), and
+  it returned. The process then died with no other traced callback starting: in the
+  engine's own update or render, or in an untraced hook (entity methods, and before
+  dev77 the mod's timers and spawn hooks). Not in Modded Online's code.
+- The host's log: the peer's inputs stop at `21:121`; the host stalls, the peer is
+  dropped, and with the host's spelunker already dead the run ends at `21:272`.
+- Peer-only factors: tracing on, borrowing the host's save, the slower machine (the host
+  waited on it), its own pack folder. The previous session on that machine also ended
+  without a clean run end, at seq 21 (`21:1752 << preLoadScreen`).
+- Also in the peer's spelunky.log: 2.5's own `Unknown texture definition key:
+  swamp-king` on every swamp floor, and `Entity virtual callback tonicChests.N.48.true
+  has no owner or id, bug in the code!` on most floors. Whether the host's log has the
+  same lines is not known.
+
+**What dev77 adds for the next capture:** the trace names the mod's own function behind
+our wrappers (`Determinism.innerOf`), and also covers the mod's timers, spawn and
+tile-code hooks; every hosted error is in the desync log with its stack (`*** HOSTED MOD
+ERROR in file.lua:line`); a callback registered as a non-function is named at
+registration (`errorf`, now logged as `*** ERROR:`); the hosting summary, with every
+texture not found, is in the log; the previous session's `crash_frame.txt` is reported
+in the header correctly and kept as `crash_frame.prev.txt` / `crash_notes.prev.txt`;
+each floor block lists what the hosted mods registered since the last floor.
+
+**Next time it happens:** before relaunching, copy `crash_frame.txt`, `crash_notes.txt`
+(and their `.prev` copies if a relaunch already happened), `desync_log.txt` and
+spelunky.log from the crashing machine, and spelunky.log from the other one too.
 
 ## Diagnostic tooling (flags and the files they write)
 
@@ -938,6 +1026,7 @@ desync-log header.
 | `mo_menuprobe.txt` | `mo_menuprobe.on` | yes: opened and closed per line. Started fresh at each launch, bounded at 400 lines. |
 | `mo_vanillaui.txt` | always: `drawing` before the first vanilla draw of a session, `ok` after it | yes: a `drawing` left behind means that draw killed the game, and the old look is used until the file is deleted (section 15) |
 | `desync_log.txt` / `.prev.txt` | **only once a networked RUN starts** | n/a — cannot hold a camp or menu crash at all. See section 2. |
+| `crash_frame.prev.txt` / `crash_notes.prev.txt` | at load, when `mo_trace.on` is present: the two files as the previous session left them | yes — they are the crash a player relaunched after (dev77) |
 
 Genuine fixes to the tooling itself, worth keeping:
 
@@ -988,7 +1077,7 @@ On a machine whose Python has no pytest or lupa, uv supplies both for the run:
 uv run --no-project --with pytest --with lupa python -m pytest tests/ -q
 ```
 
-939 passing, none failing (dev76). The 16 long-standing failures went in dev67, with the two
+983 passing, none failing, 1 skipped (it needs hdmod next to this pack) (dev77). The 16 long-standing failures went in dev67, with the two
 stale test files they came from: `tests/test_world_mailbox.py` (the world mailbox
 deleted in dev44) and `tests/test_seeded_run.py` (the seeded-run flag removed in
 dev46). A failure here now means something broke.

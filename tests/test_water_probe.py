@@ -9,8 +9,12 @@ come back depends on what actually differs when the mods look:
   * SETTLING  -- different at ON.LEVEL, the same by the first frame: wait;
   * DIFFERENT -- still different then: only the world host's waterline will do.
 
-dev76 measures it and changes nothing else. These tests hold it to both halves:
-the four verdicts come out right, and the probe itself only reads.
+dev76 measured it and changed nothing else. Its first capture (room FVJF) found the
+water identical on every wet floor; the one floor that did not read MATCH, 2-1, was
+the mod's two queries answered the other way round, because its ON.LEVEL callbacks
+ran in another order. dev77 shows the surfaces again, runs those callbacks in
+registration order, and gives that case its own verdict, QUERY ORDER. These tests
+hold the probe to both halves: the verdicts come out right, and it only reads.
 
 Run:  python -m pytest tests/test_water_probe.py -q
 """
@@ -215,12 +219,107 @@ def test_a_floor_the_mod_never_asked_about_is_judged_on_the_engines_list():
     assert "what the mod saw: n/a" in line
 
 
-def test_a_dry_floor_says_nothing():
+def test_a_dry_floor_says_nothing_about_water():
     host, peer = machine(), machine()
     host_report = floor(host, at_level=(), pool=())
     peer_report = floor(peer, at_level=(), pool=())
     assert verdict(host, peer, host_report, peer_report) is None
-    assert host_report["lines"] is None
+    lines = list(host_report["lines"].values())
+    assert not any(line.startswith("water") for line in lines), lines
+
+
+def test_a_dry_floor_with_no_hosted_on_level_callback_has_no_lines_at_all():
+    rt = machine(mod=False)
+    assert floor(rt, at_level=(), pool=())["lines"] is None
+
+
+# The 2-1 floor of room FVJF exactly as dev76 put it on the wire (no `mx`, no `oc`
+# yet): the same 117 surfaces on both machines, in the same order, and the mod's two
+# queries answered the other way round -- the host's first got all 117.
+FVJF_2_1 = dict(gn=1180, gh=0x0BEAC7A9, ln=1180, lh=0x0BEAC7A9, fn=117, fo=0x78523482,
+                fs=0x63B2E33B, ft=0x1F936561, mv=0, mq=2, mn=117, en=1180, eh=0x1BC61F5D,
+                ef=117, es=0x12B4AFBC)
+
+
+def test_fvjf_2_1_was_the_query_order_not_the_water():
+    """dev76 called this floor SETTLING. The water was the same; the queries swapped."""
+    rt = machine()
+    host = rt.table_from(dict(FVJF_2_1, mo=0x42B999F1, ms=0x06E79104))
+    peer = rt.table_from(dict(FVJF_2_1, mo=0x78523482, ms=0x63B2E33B))
+    line = rt.eval("Determinism.waterVerdict")(peer, host, 9)
+    assert line.startswith("WATER PROBE seq=9: QUERY ORDER"), line
+    assert "surfaces MATCH (117 here, 117 on the host: same order)" in line
+    assert "at engage: MATCH" in line
+
+
+def two_queries(rt, order):
+    """A mod with two ON.LEVEL callbacks, front layer and back, registered in `order`."""
+    rt.execute("""
+        asked = {}
+        askers = {
+            front = function() asked[#asked + 1] = #env.get_entities_by(ENT_TYPE.FX_WATER_SURFACE, MASK.FX, LAYER.FRONT) end,
+            back = function() asked[#asked + 1] = #env.get_entities_by(ENT_TYPE.FX_WATER_SURFACE, MASK.FX, LAYER.BACK) end,
+        }
+    """)
+    for name in order:
+        # each defined in a file of its own, as a mod's are: the order is told by name
+        rt.execute(f'env.set_callback(load("return function() askers.{name}() end",'
+                   f' "@hooks/{name}.lua")(), ON.LEVEL)')
+
+
+def test_the_same_answers_to_queries_registered_in_another_order_is_query_order():
+    """What dev77 cannot fix itself: a mod that REGISTERS its callbacks in another
+    order on each machine. The water verdict names it, and so does the order line."""
+    host, peer = machine(mod=False), machine(mod=False)
+    two_queries(host, ("front", "back"))
+    two_queries(peer, ("back", "front"))
+    host_report = floor(host, at_level=SURFACES)
+    peer_report = floor(peer, at_level=SURFACES)
+    line = verdict(host, peer, host_report, peer_report)
+    assert line.startswith("WATER PROBE seq=9: QUERY ORDER"), line
+    assert "what the mod saw: same answers, other query order" in line
+    assert line.endswith("ON.LEVEL order: DIFFER"), line
+    host_wire = peer.table_from({k: v for k, v in host_report["wire"].items()})
+    order = peer.eval("Determinism.levelOrderVerdict")(peer_report["wire"], host_wire, 9)
+    assert order is not None and order.startswith("ON.LEVEL ORDER seq=9: DIFFERENT"), order
+
+
+def test_registered_in_the_same_order_they_match_whatever_the_engine_does():
+    """The engine runs callbacks in its own hash order. In a room the mod's run in the
+    order it registered them, so the answers line up query by query."""
+    host, peer = machine(mod=False), machine(mod=False)
+    two_queries(host, ("front", "back"))
+    two_queries(peer, ("front", "back"))
+    # the peer's engine reaches the callbacks the other way round
+    peer.execute("""
+        local reversed = {}
+        for i = #registered, 1, -1 do reversed[#reversed + 1] = registered[i] end
+        registered = reversed
+    """)
+    host_report = floor(host, at_level=SURFACES)
+    peer_report = floor(peer, at_level=SURFACES)
+    line = verdict(host, peer, host_report, peer_report)
+    assert line.startswith("WATER PROBE seq=9: MATCH"), line
+    assert line.endswith("ON.LEVEL order: MATCH"), line
+    assert list(host.eval("asked").values()) == list(peer.eval("asked").values()) == [3, 0]
+    host_wire = peer.table_from({k: v for k, v in host_report["wire"].items()})
+    assert peer.eval("Determinism.levelOrderVerdict")(peer_report["wire"], host_wire, 9) is None
+
+
+def test_the_same_water_and_different_questions_is_queries():
+    host, peer = machine(mod=False), machine(mod=False)
+    two_queries(host, ("front",))
+    two_queries(peer, ("back",))
+    line = verdict(host, peer, floor(host, at_level=SURFACES), floor(peer, at_level=SURFACES))
+    assert line.startswith("WATER PROBE seq=9: QUERIES"), line
+
+
+def test_an_older_build_without_an_order_says_nothing_about_it():
+    rt = machine()
+    mine = rt.table_from(dict(FVJF_2_1, mo=1, ms=1, oc=3, oh=7))
+    host = rt.table_from(dict(FVJF_2_1, mo=1, ms=1))
+    assert rt.eval("Determinism.levelOrderVerdict")(mine, host, 9) is None
+    assert rt.eval("Determinism.waterVerdict")(mine, host, 9).endswith("ON.LEVEL order: n/a")
 
 
 # ------------------------------------------------------------- what it records
@@ -231,19 +330,21 @@ def test_every_point_of_the_floor_is_recorded():
     wire = report["wire"]
     assert int(wire["gn"]) == 3, "the generated pool"
     assert int(wire["fn"]) == 3, "the surfaces at ON.LEVEL"
-    assert int(wire["mq"]) == 1 and int(wire["mn"]) == 3, "what the mod's query would have got"
+    assert int(wire["mq"]) == 1 and int(wire["mn"]) == 3, "what the mod's query got"
     assert int(wire["ef"]) == 4, "the surfaces at engage"
+    assert int(wire["oc"]) == 1, "the mod's one ON.LEVEL callback"
     lines = list(report["lines"].values())
     assert lines[0].startswith("water: generated liquid 3 ")
-    assert "+1 frames" in lines[0] and "the mod asked 1 time(s): 3 hidden" in lines[0]
+    assert "+1 frames" in lines[0] and "the mod asked 1 time(s): 3 seen" in lines[0]
     assert lines[1].endswith("2.00,3.60,0 3.00,3.60,0 4.00,3.60,0")
+    assert lines[2].startswith("level order: 1 hosted ON.LEVEL callback(s) #")
 
 
-def test_the_mod_still_sees_nothing():
-    """Measurement only: dev75's hiding is exactly as it was."""
+def test_the_mod_sees_the_surfaces_again():
+    """dev75 hid them; dev77 hands the mod the engine's own answer."""
     rt = machine()
     floor(rt, at_level=SURFACES)
-    assert int(rt.eval("seenByMod")) == 0
+    assert int(rt.eval("seenByMod")) == 3
 
 
 def test_it_looks_before_the_mod_does():
@@ -438,3 +539,25 @@ def test_a_host_report_without_water_is_not_judged():
     rt.execute("module.sendWorldDigest()")
     rt.execute("onWorldChkG({ s = 9, sd = 111, e = 222 }, 1)")
     assert probe_lines(rt) == []
+
+
+def test_the_floor_block_also_says_what_the_hosted_mods_registered():
+    rt = gate()
+    rt.execute("ModHost = { registrationsSinceLastFloor = function() return 'set_callback +48' end }")
+    rt.execute("module.sendWorldDigest()")
+    assert list(rt.eval("snapshotExtra").values()) == [
+        "water: here", "hosted registrations since the last floor: set_callback +48"]
+
+
+def test_a_peer_says_when_the_on_level_order_differs():
+    rt = gate()
+    rt.execute("""
+        Determinism.levelOrderVerdict = function(mine, host, s)
+            if mine.x == host.x then return nil end
+            return "ON.LEVEL ORDER seq=" .. s .. ": DIFFERENT"
+        end
+    """)
+    rt.execute("module.sendWorldDigest()")
+    rt.execute("onWorldChkG({ s = 9, sd = 111, e = 222, w = { x = 2 } }, 1)")
+    said = [str(v) for v in rt.eval("events").values()]
+    assert said == ["WATER PROBE seq=9: DIFFERENT", "ON.LEVEL ORDER seq=9: DIFFERENT"], said

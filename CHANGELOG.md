@@ -1,5 +1,159 @@
 # Changelog
 
+## 2.0.0-dev77
+
+The swamp's lily pads are back online, and the next crash will say where it was. No
+server change: the server stays at **1.0.13**. Both players must be on dev77, because
+what a hosted mod sees at ON.LEVEL, and the order it sees it in, changes.
+
+### What dev76's capture showed (room FVJF, 1-1 to 4-2)
+
+- **Every floor matched.** All 11 floor digests were the same on both machines: no
+  `FLOOR DESYNC`, no `POSITION DESYNC`, no resync.
+- **The water was the same on every wet floor** (2-1, 2-2, 2-3, 3-1 and 4-2): the
+  liquid and the water-surface effects, to a hundredth of a tile and in the same order,
+  at generation, at ON.LEVEL and at the first frame. The two logs' surface lists are
+  identical, line for line.
+- **2-1 read `SETTLING`, and it was not the water.** 2.5 asked twice for surfaces at
+  ON.LEVEL. The host's first query got all 117 and its second none; the peer's first
+  got none and its second all 117. The host's fingerprint is exactly the peer's times
+  1000003, which is one full answer followed by an empty one instead of the other way
+  round. dev76's verdict had no word for that, and fell through to `SETTLING`.
+- **Why the order differed.** Overlunky keeps a script's callbacks in a
+  `std::unordered_map` keyed by callback id, and fires them in the map's hash order,
+  not the order they were registered in. The ids come from one counter, shared by
+  Modded Online's own callbacks and the mod's, and 2.5 registers its hooks again every
+  floor. Two machines that registered different things on the way to a floor (the
+  host sat in the camp twice) give the same mod's callbacks different ids, and the map
+  runs them in a different order.
+- This is very probably what BGNY's 2-1 (dev75) was too: the pads drew from
+  `PROCEDURAL_SPAWNS` after a different set of callbacks on each machine. dev75's
+  ON.LEVEL anchor already closed that off, so hiding the surfaces was never needed.
+
+### Fixed: the lily pads
+
+Both changes apply in a room only; playing alone is unchanged.
+
+- **A hosted mod's ON.LEVEL gets the engine's own water surfaces again**, so 2.5's swamp
+  lily pads, and the HD mod's lily pads and the frogs on them, are back online. The
+  probe still watches what each ON.LEVEL query returns.
+- **A hosted mod's ON.LEVEL callbacks run in the order the mod registered them, on every
+  machine.** Whichever the engine reaches first runs them all, in that order, and the
+  rest return when the engine reaches them. The anchor keeps one callback's random draws
+  from moving another's; the order keeps what one spawns (the pads) from being seen by
+  another on one machine only. Where the engine's own behaviour depends on the map, the
+  batch gives one answer on every machine:
+  - a callback cleared during the pass, by one that ran before it, does not run;
+  - a callback registered during the pass first runs on the next floor;
+  - a bare `clear_callback()` clears the callback that made it, not the one the engine
+    is running the pass from. One made inside an engine callback nested in it, such as
+    an entity hook a spawn set off, is left to the engine, as before;
+  - an error in one callback does not stop the others. It is raised when the engine
+    reaches the callback that threw, so Playlunky still shows it;
+  - each callback's return value is handed to the engine at its own turn.
+- **The probe's ON.LEVEL look is taken inside that batch**, before the first of the
+  mod's callbacks, because the engine can reach the probe's own callback after them.
+- **A value that cannot be called is passed to the engine as it came.** It used to be
+  wrapped in a function, which hid the mistake until the event fired and then raised
+  the error from inside our wrapper.
+
+### The probe
+
+- **Two new verdicts.** `QUERY ORDER`: the same answers, but the mod's queries came in
+  a different order, so its ON.LEVEL callbacks ran in a different order. `QUERIES`: the
+  same water, and the mod asked for different things. FVJF's 2-1 now reads `QUERY ORDER`.
+- The `water:` line says `seen` where it said `hidden`, and adds `any`, a fingerprint of
+  the mod's answers that does not depend on the order of its queries.
+- **A `level order:` line in each floor block** names the hosted ON.LEVEL callbacks in
+  the order they ran. A non-host logs `ON.LEVEL ORDER seq=N: DIFFERENT` when its order
+  is not the host's. In dev77 that can only happen if the mods registered them
+  differently, and the two `level order` lines then show where.
+
+### The friend's error on 4-1 and crash on 4-2
+
+What the peer's files say:
+
+- **4-1, 14:15:45** (spelunky.log): `Lua Error: Mod: fyi.modded-online-loader / Error:
+  attempt to call a number value`, with an empty stack traceback. A hosted mod runs in
+  our script, so its errors carry our name. An empty stack means the engine called the
+  value itself: no Lua function was on the stack, so none of ours was. Something had
+  registered a number where the engine expected a callback.
+- **4-2, 14:16:36** (crash_frame.txt): `OUT mod determinism.lua:1042 | sim 21:115`. The
+  last traced callback was one of the hosted mod's update callbacks, and it returned.
+  The process died after it, in the engine's own update or rendering, outside any of
+  Modded Online's code and outside every traced callback. `determinism.lua:1042` is the
+  held-frame wrapper, so the trace could not say which of 2.5's ~200 update callbacks
+  it was.
+
+Neither is something this build can fix directly; the trace shows the crash was in the
+engine, not here. What it changes is that the next one names itself:
+
+- **The crash trace and the profile name the mod's own function**, not the
+  `determinism.lua` wrapper around it. The ON.LEVEL batch marks each callback as it
+  runs it.
+- **The hosted mod's timers, spawn hooks and tile-code hooks go through the same
+  wrapper** as its `set_callback` callbacks, so the trace and the profile see them too.
+  Inside them our callback depth is now zero: a spawn hook set off by a spawn of ours
+  used to run at our depth, where the mod's own bare `clear_callback()` was refused.
+- **A hosted callback's error goes in the desync log**, the first from each callback in
+  full with its stack, then one line every few seconds: `*** HOSTED MOD ERROR in
+  file.lua:line: ...`. Playlunky still gets the same error.
+- **`errorf` lines go in the desync log** as `*** ERROR: ...`, held until a run opens
+  the log. A refused teardown, a skipped texture and the rest were printed only with
+  ENABLE DEBUG MESSAGES on, and never logged.
+- **A callback the engine cannot call is named when it is registered**: the API, the
+  value, and the event, once per API.
+- **The previous session's `crash_frame.txt` is reported correctly.** It used to be read
+  after this session's first mark had overwritten it, so every header named the new
+  session's first GUI frame. The FVJF peer's header says exactly that,
+  `IN  guiframe:netCore | sim 0:0 | 14:05:36`, at 14:05:36. A session that traces now
+  also keeps `crash_frame.prev.txt` and `crash_notes.prev.txt`, so a relaunch no longer
+  destroys the evidence.
+- **The hosting summary reaches the log**, including every texture the mod asked for
+  and did not get. The peer's spelunky.log has 2.5 saying `Unknown texture definition
+  key: swamp-king` on every swamp floor, and nothing of ours could say whether we had
+  refused it.
+- **Each floor block lists what the hosted mods registered since the last floor**, by
+  kind (`set_callback +48, set_timeout +2`).
+
+### Fixed: a mod could not clear its own global timeout
+
+`set_global_timeout` was missing from the registration APIs the sandbox counts as the
+mod's, so a hosted mod clearing one of its own was refused as though it had reached for
+one of ours, and the timeout fired anyway.
+
+### Known, not fixed
+
+- **Every other callback kind still runs in the engine's hash order**: PRE_UPDATE,
+  POST_UPDATE, GAMEFRAME, POST_LEVEL_GENERATION and the rest, ours and the mod's alike.
+  Registering first never meant running first. One consequence: a hosted PRE_UPDATE
+  can run before the lockstep gate's, and read the previous frame's held state.
+- **`set_global_timeout` and `set_global_interval` count engine frames**, which advance
+  during stalls and loading, so a hosted mod's global timer fires at a different
+  simulated moment on each machine. The new per-floor registration line shows whether
+  2.5 uses them.
+
+### Tests
+
+`tests/test_level_order.py` (new): two engines that reach the callbacks in different
+hash orders run them in one; each runs once a floor; solo play keeps the engine's
+order; the probe looks first; a bare clear lands on the callback that made it, through
+the real host and registry too, but not when it is made inside a nested engine
+callback; clears and registrations during the pass; errors and return values; the trace
+names each callback.
+
+`tests/test_error_lines.py` (new): `errorf` and SafeCall in the log, once each; hosted
+errors logged under the mod's own name and still raised unchanged; the previous
+session's trace survives this session's first mark; global timeouts can be cleared;
+a non-callable callback is named once.
+
+`tests/test_water_probe.py` and `tests/test_swamp_wheel_desync.py` are rewritten for the
+surfaces coming back: the mod sees them, two machines with the same water grow the same
+pads and keep the same coin, and FVJF's own 2-1 numbers read `QUERY ORDER`. Breaking the
+new code on purpose (no batch, the wrong bare-clear answer, swallowed errors, the probe
+looking late, the surfaces hidden again, an order-dependent fingerprint, the global
+timeout unregistered, the previous mark read late) is caught every time.
+
 ## 2.0.0-dev76
 
 A measurement build, so the lily pads can come back. Gameplay is exactly dev75's: in

@@ -18,8 +18,15 @@ water its worker threads are already moving. One more surface effect is one more
 shuffle draw and one more chance roll on PROCEDURAL_SPAWNS -- one more pad, and a
 moved stream for the coin.
 
-The model here is that, on a PRNG that really has state: two machines that agree on
-everything but the waterline.
+dev75 answered that by hiding the surface effects from a hosted mod's ON.LEVEL, at
+the price of the pads. dev76 measured the water (room FVJF, 2-1 to 4-2): the surfaces
+were identical on both machines on every wet floor. What differed on 2-1 was the
+ORDER the mod's ON.LEVEL callbacks ran in (Overlunky keeps them in an unordered_map),
+which is the other way BGNY's stream could have moved. dev77 shows the surfaces
+again: the ON.LEVEL anchor keeps one callback's draws out of the next one's, and the
+registration order (tests/test_level_order.py) keeps what they spawn in step.
+
+The model here is that, on a PRNG that really has state.
 
 Run:  python -m pytest tests/test_swamp_wheel_desync.py -q
 """
@@ -220,15 +227,31 @@ def first_frame(rt):
 
 # ------------------------------------------------------------- the 2-1 capture
 
-def test_two_machines_whose_waterlines_differ_build_the_same_shop():
-    """Every seed: the coin lands the same way on both, and so do the lily pads."""
+def test_two_machines_with_the_same_water_build_the_same_floor_lily_pads_and_all():
+    """What dev76 measured: the same surfaces on both machines. Every seed: the same
+    lily pads, the same coin, and the pads are really there."""
+    grew = 0
+    for seed in range(1, 121):
+        host, _ = floor_2_1(water_surfaces=4, level_seed=seed)
+        peer, _ = floor_2_1(water_surfaces=4, level_seed=seed)
+        first_frame(host)
+        first_frame(peer)
+        assert host.eval("coin") == peer.eval("coin"), f"seed {seed}: dice house vs Wheel House"
+        assert host.eval("lilyPads") == peer.eval("lilyPads"), f"seed {seed}"
+        assert host.eval("afterLevel") == peer.eval("afterLevel"), f"seed {seed}"
+        grew += int(host.eval("lilyPads"))
+    assert grew > 0, "no lily pads grew online -- they are still being hidden"
+
+
+def test_even_a_different_waterline_could_not_move_the_coin():
+    """BGNY's mechanism, which the anchor alone shuts: whatever the pads draw is put
+    back, so the coin is flipped from the stream generation left on every machine."""
     for seed in range(1, 121):
         host, _ = floor_2_1(water_surfaces=3, level_seed=seed)
         peer, _ = floor_2_1(water_surfaces=4, level_seed=seed)
         first_frame(host)
         first_frame(peer)
         assert host.eval("coin") == peer.eval("coin"), f"seed {seed}: dice house vs Wheel House"
-        assert host.eval("lilyPads") == peer.eval("lilyPads") == 0, f"seed {seed}"
         assert host.eval("afterLevel") == peer.eval("afterLevel"), f"seed {seed}"
 
 
@@ -258,10 +281,10 @@ def test_after_on_level_the_streams_are_exactly_what_generation_left():
 
 # ------------------------------------------------------ the water surface effects
 
-def test_in_a_room_the_mods_on_level_sees_no_water_surface_effects():
+def test_in_a_room_the_mods_on_level_sees_the_water_surface_effects_again():
     rt, control = floor_2_1(water_surfaces=4)
-    assert int(rt.eval("candidatesSeen")) == 0
-    assert int(control["stats"]()["waterFxHidden"]) == 4
+    assert int(rt.eval("candidatesSeen")) == 4
+    assert int(control["stats"]()["waterFxSeen"]) == 4, "the probe stopped watching"
 
 
 def test_outside_on_level_the_mod_sees_them_all():
@@ -276,45 +299,45 @@ def test_alone_the_lily_pads_grow_as_they_always_did():
     for seed in range(1, 41):
         rt, control = floor_2_1(water_surfaces=4, level_seed=seed, active=False)
         assert int(rt.eval("candidatesSeen")) == 4
-        assert int(control["stats"]()["waterFxHidden"]) == 0
+        assert int(control["stats"]()["waterFxSeen"]) == 0, "watched in solo play"
         grew += int(rt.eval("lilyPads"))
     assert grew > 0
 
 
 # three surface effects (FX), one water drop (FX), one leaf (ITEM): what each way of
-# asking returns inside the mod's ON.LEVEL, and outside it
-@pytest.mark.parametrize("call, inside, outside", [
-    ("env.get_entities_by(ENT_TYPE.FX_WATER_SURFACE, MASK.FX, LAYER.FRONT)", 0, 3),
-    ("env.get_entities_by({ ENT_TYPE.FX_WATER_SURFACE, ENT_TYPE.ITEM_LEAF }, MASK.ANY, LAYER.BOTH)", 1, 4),
-    ("env.get_entities_by(0, MASK.FX, LAYER.FRONT)", 1, 4),
-    ("env.get_entities_by(0, MASK.ANY, LAYER.BOTH)", 2, 5),
-    ("env.get_entities_by({}, 0, LAYER.BOTH)", 2, 5),
-    ("env.get_entities_by_type(ENT_TYPE.FX_WATER_SURFACE)", 0, 3),
-    ("env.get_entities_by_type(ENT_TYPE.ITEM_LEAF, ENT_TYPE.FX_WATER_SURFACE)", 1, 4),
-    ("env.get_entities_by_type({ ENT_TYPE.FX_WATER_SURFACE, ENT_TYPE.FX_WATER_DROP })", 1, 4),
-    ("env.get_entities_at(ENT_TYPE.FX_WATER_SURFACE, MASK.FX, 2, 5, LAYER.FRONT, 10)", 0, 3),
+# asking returns inside the mod's ON.LEVEL is what it returns outside it
+@pytest.mark.parametrize("call, count", [
+    ("env.get_entities_by(ENT_TYPE.FX_WATER_SURFACE, MASK.FX, LAYER.FRONT)", 3),
+    ("env.get_entities_by({ ENT_TYPE.FX_WATER_SURFACE, ENT_TYPE.ITEM_LEAF }, MASK.ANY, LAYER.BOTH)", 4),
+    ("env.get_entities_by(0, MASK.FX, LAYER.FRONT)", 4),
+    ("env.get_entities_by(0, MASK.ANY, LAYER.BOTH)", 5),
+    ("env.get_entities_by({}, 0, LAYER.BOTH)", 5),
+    ("env.get_entities_by_type(ENT_TYPE.FX_WATER_SURFACE)", 3),
+    ("env.get_entities_by_type(ENT_TYPE.ITEM_LEAF, ENT_TYPE.FX_WATER_SURFACE)", 4),
+    ("env.get_entities_by_type({ ENT_TYPE.FX_WATER_SURFACE, ENT_TYPE.FX_WATER_DROP })", 4),
+    ("env.get_entities_at(ENT_TYPE.FX_WATER_SURFACE, MASK.FX, 2, 5, LAYER.FRONT, 10)", 3),
     ("env.get_entities_overlapping_hitbox(ENT_TYPE.FX_WATER_SURFACE, MASK.FX,"
-     " { left = 0, right = 9, top = 9, bottom = 0 }, LAYER.FRONT)", 0, 3),
+     " { left = 0, right = 9, top = 9, bottom = 0 }, LAYER.FRONT)", 3),
 ])
-def test_every_way_of_asking_leaves_them_out(call, inside, outside):
-    rt, _ = install()
+def test_every_way_of_asking_gets_the_engines_whole_answer_and_is_watched(call, count):
+    rt, control = install()
     rt.execute("""
         for i = 1, 3 do spawnEntity(ENT_TYPE.FX_WATER_SURFACE, MASK.FX, LAYER.FRONT, i, 5) end
         spawnEntity(ENT_TYPE.FX_WATER_DROP, MASK.FX, LAYER.FRONT, 2, 5)
         spawnEntity(ENT_TYPE.ITEM_LEAF, MASK.ITEM, LAYER.FRONT, 2, 5)
     """)
     rt.execute("found = nil; env.set_callback(function() found = " + call + " end, ON.LEVEL)")
-    rt.execute("fire(ON.LEVEL)")
-    found = list(rt.eval("found").values())
-    assert len(found) == inside
-    assert all(int(rt.eval(f"entities[{uid}].type")) != 1050 for uid in found)
-    assert int(rt.eval("#(" + call + ")")) == outside  # the same call outside ON.LEVEL
+    rt.execute("fire(ON.POST_LEVEL_GENERATION); fire(ON.LEVEL)")
+    assert len(list(rt.eval("found").values())) == count
+    assert int(rt.eval("#(" + call + ")")) == count  # the same call outside ON.LEVEL
+    assert int(control["stats"]()["waterFxSeen"]) == 3, "the probe did not see the surfaces"
 
 
 def test_a_query_that_cannot_hold_them_is_not_touched():
-    """Only queries that could return them pay for the filter: an ITEM sweep or
+    """Only queries that could return them pay for the watching: an ITEM sweep or
     another type entirely is answered straight from the engine."""
     rt, _ = install()
+    rt.execute("fire(ON.POST_LEVEL_GENERATION)")  # a floor, so the probe is watching
     rt.execute("""
         for i = 1, 3 do spawnEntity(ENT_TYPE.FX_WATER_SURFACE, MASK.FX, LAYER.FRONT, i, 5) end
         for i = 1, 5 do spawnEntity(ENT_TYPE.ITEM_LEAF, MASK.ITEM, LAYER.FRONT, i, 5) end
@@ -334,10 +357,10 @@ def test_a_query_that_cannot_hold_them_is_not_touched():
     assert int(rt.eval("typeLookups")) == 0, "filtered a query that could never hold them"
 
 
-def test_an_answer_that_is_a_container_not_a_table_is_still_filtered():
+def test_an_answer_that_is_a_container_not_a_table_is_still_watched_and_untouched():
     """These come back as plain tables (2.5 table.sort()s one). A binding that
     returned a sol2-style container -- userdata with a length and an index -- must
-    be filtered all the same, not waved through for failing a type test."""
+    still be read for the probe, and handed to the mod exactly as it came."""
     rt, _ = install()
     rt.execute("""
         for i = 1, 3 do spawnEntity(ENT_TYPE.FX_WATER_SURFACE, MASK.FX, LAYER.FRONT, i, 5) end
@@ -356,17 +379,16 @@ def test_an_answer_that_is_a_container_not_a_table_is_still_filtered():
     """)
     # install again, now that the engine's query hands back containers
     rt.execute("env = setmetatable({}, {__index = _G})")
-    rt.eval("Determinism.install")(rt.eval("env"), rt.eval("{ active = function() return true end }"))
+    control = rt.eval("Determinism.install")(
+        rt.eval("env"), rt.eval("{ active = function() return true end }"))
     rt.execute("""
         found = nil
         env.set_callback(function() found = env.get_entities_by(0, MASK.FX, LAYER.FRONT) end, ON.LEVEL)
-        fire(ON.LEVEL)
+        fire(ON.POST_LEVEL_GENERATION); fire(ON.LEVEL)
     """)
-    assert rt.eval("type(found)") == "table"
-    found = list(rt.eval("found").values())
-    assert [int(rt.eval(f"entities[{uid}].type")) for uid in found] == [1049]
-    outside = rt.eval("env.get_entities_by(0, MASK.FX, LAYER.FRONT)")
-    assert rt.eval("type")(outside) == "userdata", "outside ON.LEVEL the engine's answer, untouched"
+    assert rt.eval("type(found)") == "userdata", "the mod was not given the engine's own answer"
+    assert int(rt.eval("#found")) == 4
+    assert int(control["stats"]()["waterFxSeen"]) == 3
 
 
 def test_an_answer_that_cannot_be_read_is_returned_as_given():
@@ -380,7 +402,7 @@ def test_an_answer_that_cannot_be_read_is_returned_as_given():
     rt.execute("""
         same = nil
         env.set_callback(function() same = env.get_entities_by(0, MASK.FX, LAYER.FRONT) == weird end, ON.LEVEL)
-        fire(ON.LEVEL)
+        fire(ON.POST_LEVEL_GENERATION); fire(ON.LEVEL)
     """)
     assert rt.eval("same") is True
 
@@ -408,15 +430,12 @@ def test_probing_for_the_queries_is_not_the_mod_asking_for_them():
     assert rt.eval("type(rawget(env, 'get_entities_by'))") == "function"
 
 
-def test_each_floor_says_once_how_many_it_hid():
+def test_nothing_is_hidden_and_nothing_says_it_was():
+    """dev75's once-a-floor `hid N water-surface effect(s)` line is gone with the
+    hiding: a capture that still prints it is running an old build."""
     rt, _ = floor_2_1(water_surfaces=4)
-    rt.execute("env.set_callback(function() env.get_entities_by_type(ENT_TYPE.FX_WATER_SURFACE) end, ON.LEVEL)")
-    rt.execute("fire(ON.LEVEL)")  # a second pass on the same floor: counted, not repeated
     lines = [str(v) for v in rt.eval("events").values() if "water-surface" in str(v)]
-    assert len(lines) == 1 and "hid 4 water-surface" in lines[0], lines
-    rt.execute("fire(ON.POST_LEVEL_GENERATION); fire(ON.LEVEL)")  # the next floor
-    lines = [str(v) for v in rt.eval("events").values() if "water-surface" in str(v)]
-    assert len(lines) == 2, lines
+    assert lines == [], lines
 
 
 def test_a_throwing_on_level_callback_closes_the_window_and_restores_the_streams():

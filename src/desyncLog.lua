@@ -285,6 +285,55 @@ do
         traceFileOn = present("mo_trace.on")
     end
 end
+
+--- The last line the PREVIOUS session left in crash_frame.txt, read here, at load.
+---
+--- It used to be read when the first run's log opened, which is long after this
+--- session's own first mark: tracing arms at load, the first per-frame callback
+--- opens the file with "w+", and the previous session's last words were gone before
+--- anything read them. So every header said the previous session had died in a GUI
+--- frame at the very second this run started -- room FVJF's peer log has exactly
+--- that, `IN  guiframe:netCore | sim 0:0 | 14:05:36` at 14:05:36 -- and the line was
+--- never once the previous session's.
+---
+--- And because a relaunch is what destroys the evidence, a session that is about to
+--- trace keeps a copy of both files as it found them: crash_frame.prev.txt and
+--- crash_notes.prev.txt are the crash a player relaunched after.
+local previousMarkAtLoad = nil
+pcall(function()
+    local handle = io.open(TRACE_PATH, "r")
+    if handle == nil then
+        return
+    end
+    local body = handle:read("*a") or ""
+    handle:close()
+    for raw in body:gmatch("[^\r\n]+") do
+        local trimmed = raw:gsub("%s+$", "") -- records are space-padded
+        if trimmed ~= "" then
+            previousMarkAtLoad = trimmed
+        end
+    end
+end)
+if traceFileOn then
+    for _, name in ipairs({ "crash_frame", "crash_notes" }) do
+        pcall(function()
+            local src = io.open(PackPath(name .. ".txt"), "rb")
+            if src == nil then
+                return
+            end
+            local data = src:read("*a")
+            src:close()
+            if data == nil or data:match("%S") == nil then
+                return
+            end
+            local dst = io.open(PackPath(name .. ".prev.txt"), "wb")
+            if dst ~= nil then
+                dst:write(data)
+                dst:close()
+            end
+        end)
+    end
+end
 -- The trace file is opened ONCE and kept open for the session. The first version
 -- did a full io.open(mode="w")/write/close on EVERY mark and done — ~20 file
 -- CREATIONS per frame (mode "w" truncates, a filesystem metadata write each
@@ -412,26 +461,6 @@ function module.frameDone(name)
         return
     end
     traceWrite("OUT", name)
-end
-
---- What `crash_frame.txt` was left holding by the previous session, or nil when
---- tracing was off / the file is absent. Read once at init, then cleared so a
---- stale marker cannot be misread as this session's.
---- @return string?
-local function previousFrameMark()
-    local line = nil
-    pcall(function()
-        for l in io.lines(TRACE_PATH) do
-            local trimmed = l:gsub("%s+$", "") -- records are space-padded
-            if trimmed ~= "" then
-                line = trimmed
-            end
-        end
-    end)
-    -- Not truncated here: traceOpen re-opens with "w+" which truncates anyway,
-    -- and if tracing is OFF this session, leaving the marker lets it still be
-    -- reported next launch rather than being silently erased.
-    return line
 end
 
 --- Periodic "Modded Online is loaded and idle" mark. Cheap enough at one line
@@ -598,10 +627,11 @@ function module.init()
     local frameMark = nil
     if not everInit then
         verdict = previousSessionVerdict()
-        frameMark = previousFrameMark()
+        -- read at load, before this session's own marks could overwrite it
+        frameMark = previousMarkAtLoad
     end
-    -- Open the trace handle now (after the previous marker was read, so "w+"
-    -- doesn't truncate it first). Idempotent: a no-op on later runs.
+    -- Open the trace handle now. Idempotent: a no-op on later runs, and on any run
+    -- after the first per-frame callback, which already opened it.
     if traceActive() then
         traceOpen()
     end
@@ -772,8 +802,9 @@ function module.init()
                     f:write(verdict .. "\n")
                 end
                 if frameMark ~= nil then
-                    -- MO_TRACE was on last session: this names the per-frame
-                    -- callback that was executing when it ended (see frameMark)
+                    -- what crash_frame.txt said when this session started: the
+                    -- callback the last session that TRACED was running when it
+                    -- ended (the time at the end of the line says which session)
                     f:write("*** PREVIOUS SESSION's last per-frame callback: "
                         .. frameMark .. "\n")
                 end

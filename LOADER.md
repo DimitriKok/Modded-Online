@@ -219,15 +219,20 @@ in the logs behind it. Carry these into the sandbox, do not reinvent them:
   mod's music faded for minutes one way and overlapped the other.
 - The per-hook PRNG save / anchor / restore around generation callbacks, and since
   dev75 around ON.LEVEL too.
-- In a room, a hosted mod's ON.LEVEL sees no `FX_WATER_SURFACE` effects. The liquid
-  makes them after generation, differently on each machine, and 2.5's swamp lily pads
-  drew the shared stream once per effect (HANDOFF section 17).
+- dev75 to dev76 hid `FX_WATER_SURFACE` effects from a hosted mod's ON.LEVEL in a room.
+  dev76 measured the water on both machines and found it identical, so dev77 shows
+  them again: what moved 2.5's streams on BGNY's 2-1 was the callback order below,
+  not the water (HANDOFF section 17).
 - A hosted mod's PRE_UPDATE and POST_UPDATE are skipped on frames the lockstep gate
   held. They fire per rendered frame, so anything a mod counts in them counts the
   network.
 - Callback ordering. In the shim this was fragile because the payload was a guest.
-  Inside our own state we own registration order outright — that whole hazard class
-  goes away, and it should not be recreated.
+  Hosting does NOT make it ours, though this file used to say so: Overlunky keeps a
+  script's callbacks in a `std::unordered_map` keyed by id and fires them in hash
+  order, and the ids differ between machines. Registering first does not mean
+  running first, for our callbacks or the mod's. dev77 runs a hosted mod's ON.LEVEL
+  callbacks in registration order itself; every other kind still runs in the
+  engine's order (HANDOFF section 17).
 
 ## Open questions
 

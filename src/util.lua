@@ -37,10 +37,29 @@ function SafePlayer(coopIndex, orGhost)
     return p
 end
 
---- Always prints, for real problems the player should see in the console.
+--- @param msg string
+local function printError(msg)
+    print("[ModdedOnline ERROR] " .. msg)
+end
+
+--- For real problems: printed for the player, and written to the desync log.
+---
+--- The print alone was not enough. Screen messages only show with ENABLE DEBUG
+--- MESSAGES on, and none of these ever reached the log -- a refused teardown, a
+--- texture the mod asked for and did not get, a callback that could not be called --
+--- so a capture could not say whether any of them had happened. In the lobby, with no
+--- log open yet, the line is held for the next run's (DesyncLog.earlyEvent).
 --- @param fmt string
 function errorf(fmt, ...)
-    print("[ModdedOnline ERROR] " .. string.format(fmt, ...))
+    local ok, msg = pcall(string.format, fmt, ...)
+    if not ok then
+        msg = tostring(fmt)
+    end
+    printError(msg)
+    local log = rawget(_G, "DesyncLog")
+    if log ~= nil and type(log.earlyEvent) == "function" then
+        pcall(log.earlyEvent, "*** ERROR: %s", msg)
+    end
 end
 
 -- One entry per failing call site: the FIRST failure gets the full traceback
@@ -112,7 +131,9 @@ function SafeCall(callerName, fn, ...)
     if not errSeen[callerName] then
         errSeen[callerName] = true
         errLastMs[callerName] = get_ms()
-        errorf("%s failed: %s", callerName, detail)
+        -- printed here, logged just below in its own form: through errorf it would
+        -- be in the log twice
+        printError(string.format("%s failed: %s", callerName, detail))
         -- into the log too, so the next report is a file rather than a screenshot
         if DesyncLog ~= nil and DesyncLog.line ~= nil then
             pcall(DesyncLog.line, "*** LUA ERROR in %s: %s", callerName, detail)
@@ -122,7 +143,8 @@ function SafeCall(callerName, fn, ...)
         if now - (errLastMs[callerName] or 0) >= ERR_REPEAT_MS then
             errLastMs[callerName] = now
             -- first line only: the full stack is already above, in the log
-            errorf("%s failed again: %s", callerName, detail:match("^[^\n]*") or detail)
+            printError(string.format("%s failed again: %s", callerName,
+                detail:match("^[^\n]*") or detail))
         end
     end
     return nil

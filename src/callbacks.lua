@@ -219,6 +219,143 @@ local function record(entry, fn)
     end
 end
 
+-- --------------------------------------------------- a hosted callback's errors
+--
+-- A hosted mod runs in OUR script, so Playlunky reports its Lua errors under our
+-- name ("Mod: fyi.modded-online-loader / Error: ...") -- and until dev77 nothing put
+-- them in the desync log. Room FVJF's peer saw one on 4-1, `attempt to call a number
+-- value`, and the only record of it was spelunky.log, with an empty traceback.
+--
+-- Every error a hosted callback raises now goes to the desync log too, under the
+-- name of the mod's own function: the first from each one in full, with its stack,
+-- and after that one line every few seconds. The error itself still goes on to the
+-- engine unchanged, so what Playlunky shows is what it showed before.
+
+local HOSTED_ERR_REPEAT_MS = 5000
+local hostedErrSeen = {}   -- where -> true once its first error is in the log
+local hostedErrLast = {}   -- where -> when it was last repeated
+local hostedErrTrace = nil -- the stack of the error being raised right now
+
+--- Errors their own source has already logged (the ordered ON.LEVEL batch, which
+--- knows which of the mod's callbacks threw), waiting to be raised again through a
+--- wrapper here. Raising one is not a second error.
+local noted = {}
+local notedCount = 0
+
+--- @param v any
+--- @return string
+local function safeText(v)
+    local ok, text = pcall(tostring, v)
+    return ok and text or "?"
+end
+
+--- The message handler for a hosted callback: keeps the stack for the log, hands the
+--- error value back exactly as it was raised. It must not raise itself -- an error in
+--- a message handler replaces the original one -- so every step is protected.
+--- @param err any
+--- @return any err
+local function hostedTraceback(err)
+    hostedErrTrace = nil
+    local dbg = rawget(_G, "debug")
+    if type(dbg) == "table" and type(dbg.traceback) == "function" then
+        local ok, tb = pcall(dbg.traceback, safeText(err), 2)
+        if ok and type(tb) == "string" then
+            hostedErrTrace = tb
+        end
+    end
+    return err
+end
+
+--- @param where string
+--- @param value any
+--- @param trace string?
+local function logHostedError(where, value, trace)
+    local log = rawget(_G, "DesyncLog")
+    if log == nil then
+        return
+    end
+    local now = nowMs()
+    if not hostedErrSeen[where] then
+        hostedErrSeen[where] = true
+        hostedErrLast[where] = now
+        -- the first, in full, even from the lobby: held until a run opens the log
+        if type(log.earlyEvent) == "function" then
+            pcall(log.earlyEvent, "*** HOSTED MOD ERROR in %s: %s", where,
+                trace or safeText(value))
+        end
+        return
+    end
+    if now - (hostedErrLast[where] or 0) >= HOSTED_ERR_REPEAT_MS then
+        hostedErrLast[where] = now
+        if type(log.event) == "function" then
+            local text = safeText(value)
+            pcall(log.event, "*** HOSTED MOD ERROR again in %s: %s", where,
+                text:match("^[^\n]*") or text)
+        end
+    end
+end
+
+--- For a hosted callback's error caught somewhere other than the wrapper below: log
+--- it under `where`, and let the wrapper know it is already logged when it is raised
+--- through it.
+--- @param where string
+--- @param value any
+--- @param trace string?
+function module.noteHostedError(where, value, trace)
+    logHostedError(where, value, trace)
+    if type(value) == "string" and noted[value] == nil then
+        if notedCount >= 32 then
+            noted, notedCount = {}, 0 -- raised nowhere after all; do not keep them
+        end
+        noted[value] = true
+        notedCount = notedCount + 1
+    end
+end
+
+--- @param value any
+--- @return boolean # it was noted, and is now forgotten
+local function takeNoted(value)
+    if type(value) == "string" and noted[value] then
+        noted[value] = nil
+        notedCount = notedCount - 1
+        return true
+    end
+    return false
+end
+
+--- The mod's own function behind one of determinism's wrappers, if `fn` is one: an
+--- anchored, held-frame-skipping or ON.LEVEL-ordered callback otherwise names itself
+--- `determinism.lua:<line>`, which is what a real crash trace said.
+--- @param fn function
+--- @return function
+local function innermost(fn)
+    local det = rawget(_G, "Determinism")
+    if type(det) == "table" and type(det.innerOf) == "table" then
+        local inner = det.innerOf[fn]
+        if type(inner) == "function" then
+            return inner
+        end
+    end
+    return fn
+end
+
+--- What a hosted callback handed back, for crash_notes.txt. Its own function so the
+--- wrapper does not build a closure per call, and called protected: the table is the
+--- mod's, and reading it runs the mod's metamethods.
+--- @param where string
+--- @param firstArg any
+--- @param value table
+local function noteTableReturn(where, firstArg, value)
+    local n = #value
+    local head = {}
+    for i = 1, (n < 8 and n or 8) do
+        head[#head + 1] = safeText(value[i])
+    end
+    DesyncLog.traceNote("%s(%s) -> table #%d { %s%s }", where,
+        safeText(firstArg), n, table.concat(head, ", "),
+        n > 8 and ", ..." or "")
+end
+
 --- Wrap a HOSTED mod's callback: while it runs, our depth is zero.
 ---
 --- So a bare `clear_callback()` from inside the mod's own callback still reaches the
@@ -239,12 +376,13 @@ function module.hosted(fn)
     -- nested storm, so "somewhere in the mod" is not a location.
     --
     -- `describe` is one `debug.getinfo` per REGISTRATION (not per call), and only
-    -- when a diagnostic that wants it is armed.
+    -- when a diagnostic that wants it is armed. It describes the mod's own function,
+    -- not the determinism wrapper it may be registered inside.
     local tracing = false
     pcall(function()
         tracing = DesyncLog ~= nil and DesyncLog.tracing ~= nil and DesyncLog.tracing()
     end)
-    local where = (profiling or tracing) and describe(fn) or "?"
+    local where = (profiling or tracing) and describe(innermost(fn)) or "?"
     local mark = tracing and ("mod " .. where) or nil
     return function(...)
         local saved = depth
@@ -254,7 +392,7 @@ function module.hosted(fn)
             DesyncLog.frameMark(mark)
         end
         local firstArg = mark ~= nil and (...) or nil
-        local ok, value = pcall(fn, ...)
+        local ok, value = xpcall(fn, hostedTraceback, ...)
         if mark ~= nil then
             DesyncLog.frameDone(mark)
             -- A hosted callback returning a TABLE is handing the engine a structure
@@ -266,15 +404,8 @@ function module.hosted(fn)
             --
             -- Tables are rare as callback returns (most are nil or a boolean), so
             -- this is not the per-frame firehose it looks like.
-            if type(value) == "table" and DesyncLog.traceNote ~= nil then
-                local n = #value
-                local head = {}
-                for i = 1, (n < 8 and n or 8) do
-                    head[#head + 1] = tostring(value[i])
-                end
-                DesyncLog.traceNote("%s(%s) -> table #%d { %s%s }", where,
-                    tostring(firstArg), n, table.concat(head, ", "),
-                    n > 8 and ", ..." or "")
+            if ok and type(value) == "table" and DesyncLog.traceNote ~= nil then
+                pcall(noteTableReturn, where, firstArg, value)
             end
         end
         depth = saved
@@ -282,6 +413,12 @@ function module.hosted(fn)
             chargeTo("mod  " .. where, startedAt)
         end
         if ok ~= true then
+            if not takeNoted(value) then
+                if where == "?" then
+                    where = describe(innermost(fn)) -- named on its first error, not before
+                end
+                logHostedError(where, value, hostedErrTrace)
+            end
             error(value, 0)
         end
         if value == nil then

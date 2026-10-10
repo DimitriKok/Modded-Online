@@ -237,6 +237,33 @@ local function seedFromBase(base)
     seed_prng(base())
 end
 
+-- ------------------------------------------------------ what a wrapper stands for
+
+--- Each of our wrappers, mapped to the mod's own function inside it.
+---
+--- Every hosted callback we wrap (an anchor, the held-frame skip, the ON.LEVEL
+--- order) reaches the engine as a closure defined in THIS file, and the crash trace
+--- and the profile name a callback by where its function was defined. So they named
+--- all of them `determinism.lua:<line>`. A real crash trace (room FVJF, 4-2) ended
+--- `OUT mod determinism.lua:1042`: one of the hosted mod's update callbacks, with no
+--- way to say which. Callbacks.hosted looks through this table instead.
+---
+--- Weak keys, so a wrapper the engine has let go of can still be collected.
+--- @type table<function, function>
+module.innerOf = setmetatable({}, { __mode = "k" })
+
+--- Record what `wrapper` wraps: the innermost mod function, however many of our
+--- layers are already around it.
+--- @param wrapper function
+--- @param cb any
+--- @return function wrapper
+local function wraps(wrapper, cb)
+    if type(cb) == "function" then
+        module.innerOf[wrapper] = module.innerOf[cb] or cb
+    end
+    return wrapper
+end
+
 --- Run a callback from a lockstep-identical PRNG base, then put the engine's own
 --- streams back exactly as they were.
 ---
@@ -254,7 +281,7 @@ end
 --- @param base fun(): integer
 --- @return function
 function module.anchor(cb, base)
-    return function(...)
+    return wraps(function(...)
         local saved = module.savePrng()
         pcall(seedFromBase, base)
         local ok, ret = pcall(cb, ...)
@@ -263,7 +290,7 @@ function module.anchor(cb, base)
             error(ret, 0)
         end
         return ret
-    end
+    end, cb)
 end
 
 -- ------------------------------------------------------------------- the clock
@@ -327,25 +354,24 @@ end
 
 -- ------------------------------------------------------------- the water probe
 --
--- MEASUREMENT ONLY (dev76): nothing here changes what any mod sees or does.
+-- MEASUREMENT ONLY: nothing here changes what any mod sees or does.
 --
--- dev75 hides FX_WATER_SURFACE from a hosted mod's ON.LEVEL in a room. That keeps
--- the machines in sync, at the price of 2.5's swamp lily pads and the HD mod's lily
--- pads and frogs. Whether they can come back depends on WHAT differs between the
--- machines' water when the mods look, and no log so far records the water at all:
+-- dev75 hid FX_WATER_SURFACE from a hosted mod's ON.LEVEL in a room, at the price
+-- of 2.5's swamp lily pads and the HD mod's lily pads and frogs. dev76 added this
+-- probe to find out WHAT differs between the machines' water when the mods look.
+-- Its first capture (room FVJF, 2-1 to 4-2) answered: nothing. On every wet floor
+-- the liquid and the surfaces were identical on both machines, to a hundredth of a
+-- tile and in the same order, at generation, at ON.LEVEL and at the first frame.
+-- The one difference was on 2-1, and it was not the water: the mod asked twice, and
+-- the two machines' answers came the other way round, because its ON.LEVEL
+-- callbacks ran in a different order (see "the order of ON.LEVEL" below).
 --
---   * nothing: the 2-1 difference came from the streams the dev75 anchor sealed;
---   * the same surfaces, listed in another order: a sort brings the pads back;
---   * surfaces that differ at ON.LEVEL and agree a frame or two later: the water is
---     still settling, and waiting for it brings them back;
---   * water that stays different: only the world host's waterline can fix it.
---
--- So in a room every machine fingerprints the liquid and the surface effects: at
--- generation; as ON.LEVEL begins, twice a few ms apart to see whether anything
--- moves while Lua holds the main thread; as the mod's own queries see them; and as
--- the gate engages. inputSync sends the result with the floor digest, and a
--- non-host logs one verdict line per floor against the world host's. Reads only: no
--- PRNG draw, no spawn, no write to any entity.
+-- So dev77 shows the surfaces again, and keeps the probe: it still fingerprints the
+-- liquid and the surface effects at generation; as ON.LEVEL begins, twice a few ms
+-- apart to see whether anything moves while Lua holds the main thread; as the mod's
+-- own queries see them; and as the gate engages. inputSync sends the result with
+-- the floor digest, and a non-host logs one verdict line per floor against the world
+-- host's. Reads only: no PRNG draw, no spawn, no write to any entity.
 
 local PROBE_SPIN_MS = 4
 local PROBE_SPIN_CAP = 1000000 -- a timer that does not advance must not hang the load
@@ -485,7 +511,7 @@ local function probeGeneration(active)
         gen = probeSample(0, liquidMask),
         genFx = probeSample(fxType, fxMask).n,
         genFrame = frame, genSim = sim,
-        mod = { queries = 0, hidden = 0, ord = 0, set = 0 },
+        mod = { queries = 0, seen = 0, ord = 0, set = 0, any = 0 },
     }
 end
 
@@ -508,9 +534,12 @@ local function probeLevel(active)
     probe.level = { liquid = liquid, fx = fx, moving = moving, frame = frame, sim = sim }
 end
 
---- The surface effects one of the mod's ON.LEVEL queries was about to be given, in
---- the order the engine gave them. Queries run in the same order on every machine,
---- so the running hashes compare query by query.
+--- The surface effects one of the mod's ON.LEVEL queries was given, in the order
+--- the engine gave them. Three running fingerprints: `ord` and `set` compare query
+--- by query (the order the engine listed each answer in, and not), and `any` sums
+--- the answers, so it matches whatever order the queries came in. On FVJF's 2-1 the
+--- first two differed and the third would have matched: the same two answers, the
+--- other way round, which is what callbacks running in another order look like.
 --- @param uids integer[]
 local function probeModView(uids)
     if probe == nil then
@@ -518,10 +547,12 @@ local function probeModView(uids)
     end
     local keys = positionKeys(uids)
     local mod = probe.mod
+    local h = hashKeys(keys)
     mod.queries = mod.queries + 1
-    mod.hidden = mod.hidden + #keys
-    mod.ord = (mod.ord * 1000003 + hashKeys(keys)) % PROBE_HASH_MOD
+    mod.seen = mod.seen + #keys
+    mod.ord = (mod.ord * 1000003 + h) % PROBE_HASH_MOD
     mod.set = (mod.set * 1000003 + hashSorted(keys)) % PROBE_HASH_MOD
+    mod.any = (mod.any + h + 1) % PROBE_HASH_MOD
 end
 
 --- @param keys integer[]
@@ -538,6 +569,319 @@ local function probeList(keys)
         parts[#parts + 1] = string.format("(+%d more)", #keys - PROBE_LIST_MAX)
     end
     return table.concat(parts, " ")
+end
+
+-- ------------------------------------------------------- the order of ON.LEVEL
+--
+-- Overlunky keeps a script's callbacks in a std::unordered_map keyed by callback id
+-- (lua_backend.hpp) and fires them in the order that map iterates. That is not the
+-- order they were registered in, and it depends on the ids, which come from one
+-- counter per script: hosted, the mod's and ours. Two machines never reach a floor
+-- having registered exactly the same things (one sat in the camp twice, one joined
+-- fresh, and the mod re-registers its hooks every floor), so the same mod's ON.LEVEL
+-- callbacks run in a different order on each.
+--
+-- The FVJF capture shows it. On 2-1, 2.5 asked twice for water surfaces at ON.LEVEL.
+-- The surfaces were identical on both machines and so were the answers, the other
+-- way round: the host's first query got all 117 and its second none, the peer's
+-- first got none and its second all 117. Two of the mod's callbacks had swapped.
+--
+-- The ON.LEVEL anchor (levelAnchored) already keeps one callback's rolls out of
+-- another's. It cannot keep one callback from seeing what another one SPAWNED, and
+-- with the lily pads back the pads are exactly such a spawn. So in a room the hosted
+-- mods' ON.LEVEL callbacks run in the order they were registered, on every machine:
+-- whichever of them the engine reaches first runs them all, in that order, and the
+-- rest return when the engine reaches them. Alone, each runs at the engine's own
+-- turn, as it always did.
+--
+-- Where the engine's own behaviour depends on the map, the batch picks one answer
+-- and gives it on every machine:
+--   * a callback cleared during the pass, by one that ran before it, does not run;
+--   * a callback registered during the pass first runs on the next floor (the engine
+--     reaches one inserted mid-iteration or not, depending on where its id hashes);
+--   * a bare clear_callback() made by a callback itself clears that callback, not
+--     the one the engine happens to be running the pass from. One made inside an
+--     engine callback nested in it (an entity hook a spawn set off) is left alone,
+--     and the engine clears the callback it is running, as it always did;
+--   * an error in one callback does not stop the rest. It is raised when the engine
+--     reaches the callback that threw, so Playlunky still reports it.
+
+local LEVEL_NAMES_MAX = 64 -- names in a floor block's `level order` line
+
+local level = {
+    entries = {},    -- every live hosted ON.LEVEL callback, in registration order
+    byId = {},       -- engine callback id -> its entry
+    seq = 0,         -- registrations so far: the order itself
+    pass = nil,      -- the ON.LEVEL pass the last batch ran in
+    top = 0,         -- the newest registration that pass's batch took
+    running = nil,   -- the entry being run right now
+    batching = false,
+    floors = 0,      -- floors generated, one ON.LEVEL pass each
+    dirty = false,   -- entries cleared but still in `entries`
+}
+
+--- What the batch ran on this floor, for the probe: how many, a running hash of
+--- where each one was defined, in order, and the names.
+local levelRan = { n = 0, hash = 0, names = {} }
+
+--- Where a function was defined, as `file.lua:line`: the form Callbacks uses to name
+--- a hosted callback in the crash trace and the profile.
+--- @param fn any
+--- @return string
+local function whereDefined(fn)
+    local dbg = rawget(_G, "debug")
+    if type(dbg) ~= "table" or type(dbg.getinfo) ~= "function" then
+        return "?"
+    end
+    local ok, info = pcall(dbg.getinfo, fn, "S")
+    if not ok or type(info) ~= "table" then
+        return "?"
+    end
+    local src = tostring(info.short_src or info.source or "?")
+    local leaf = src:match("([^/\\]+)$")
+    return (leaf or src) .. ":" .. tostring(info.linedefined or "?")
+end
+
+--- @param text string
+--- @return integer
+local function textHash(text)
+    local h = #text
+    for i = 1, #text do
+        h = (h * 31 + text:byte(i)) % PROBE_HASH_MOD
+    end
+    return h
+end
+
+--- Which ON.LEVEL pass this is. ON.LEVEL fires once per floor, so a new floor is a
+--- new pass; the engine frame is there in case anything ever fires it twice on one.
+--- @return integer
+local function levelPassNow()
+    local frame = -1
+    local getFrame = rawget(_G, "get_frame") -- the engine's: the mod's is our clock
+    if type(getFrame) == "function" then
+        local ok, f = pcall(getFrame)
+        if ok and type(f) == "number" then
+            frame = math.floor(f)
+        end
+    end
+    return (level.floors << 32) | (frame & 0xFFFFFFFF)
+end
+
+--- Can the batch tell a callback's own bare clear from one made inside an engine
+--- callback nested in it? It needs `debug.getinfo` to look. Without it there is no
+--- batch, and every callback runs at the engine's turn.
+--- @return boolean
+local function canBatch()
+    local dbg = rawget(_G, "debug")
+    return type(dbg) == "table" and type(dbg.getinfo) == "function"
+end
+
+--- Drop cleared entries. Never during a batch, which is walking the list.
+local function compactLevel()
+    if not level.dirty or level.batching then
+        return
+    end
+    local kept = {}
+    for i = 1, #level.entries do
+        local e = level.entries[i]
+        if not e.cleared then
+            kept[#kept + 1] = e
+        end
+    end
+    level.entries = kept
+    level.dirty = false
+end
+
+--- @param entry table
+local function forgetLevel(entry)
+    if entry.cleared then
+        return
+    end
+    entry.cleared = true
+    if entry.engineId ~= nil and level.byId[entry.engineId] == entry then
+        level.byId[entry.engineId] = nil
+    end
+    level.dirty = true
+    compactLevel()
+end
+
+--- The bottom of one entry's run, as a frame of its own. Never a tail call: the
+--- wrappers inside it tail-call each other away, and this frame is what a bare
+--- clear_callback() looks for on the stack (clearIsEntrysOwn).
+--- @param entry table
+--- @return any # the entry's first return value
+local function levelBoundary(entry, ...)
+    local ret = entry.run(...)
+    return ret
+end
+
+--- Was this bare clear_callback() made by the running entry itself, rather than by
+--- an engine callback nested inside it? Walks up from the caller until it reaches
+--- the entry's boundary (yes) or a C function that is not a pcall (no: that is the
+--- engine calling back into Lua, from a spawn, a kill or anything else that sets off
+--- a hook).
+--- @param entry table
+--- @return boolean
+local function clearIsEntrysOwn(entry)
+    local dbg = rawget(_G, "debug")
+    if type(dbg) ~= "table" or type(dbg.getinfo) ~= "function" then
+        return false
+    end
+    -- Inside a coroutine the walk cannot reach the entry, and an engine callback is
+    -- never what is running there: the engine calls back on the main thread.
+    local co = rawget(_G, "coroutine")
+    if type(co) == "table" and type(co.running) == "function" then
+        local _, isMain = co.running()
+        if isMain == false then
+            return true
+        end
+    end
+    local getinfo = dbg.getinfo
+    -- 1 is this function, 2 the sandbox's clear_callback, 3 whoever called it
+    for depth = 3, 200 do
+        local info = getinfo(depth, "fS")
+        if type(info) ~= "table" then
+            return false
+        end
+        if info.func == levelBoundary then
+            return true
+        end
+        if info.what == "C" and info.func ~= pcall and info.func ~= xpcall then
+            return false
+        end
+    end
+    return false
+end
+
+--- The traceback of the error being raised, kept for the log. The value itself goes
+--- back unchanged, so the mod's error reads exactly as it would have.
+local levelErrTrace = nil
+
+--- @param v any
+--- @return string
+local function safeText(v)
+    local ok, text = pcall(tostring, v)
+    return ok and text or "?"
+end
+
+--- @param err any
+--- @return any err
+local function levelErrHandler(err)
+    levelErrTrace = nil
+    local dbg = rawget(_G, "debug")
+    if type(dbg) == "table" and type(dbg.traceback) == "function" then
+        local ok, tb = pcall(dbg.traceback, safeText(err), 2)
+        if ok and type(tb) == "string" then
+            levelErrTrace = tb
+        end
+    end
+    return err
+end
+
+--- Put a hosted ON.LEVEL callback's error in the desync log, under its own name.
+--- @param entry table
+--- @param err any
+--- @param trace string?
+local function noteLevelError(entry, err, trace)
+    local callbacks = rawget(_G, "Callbacks")
+    if callbacks ~= nil and type(callbacks.noteHostedError) == "function" then
+        pcall(callbacks.noteHostedError, entry.where .. " (ON.LEVEL)", err, trace)
+        return
+    end
+    local log = rawget(_G, "DesyncLog")
+    if log ~= nil and type(log.earlyEvent) == "function" then
+        pcall(log.earlyEvent, "*** HOSTED MOD ERROR in %s (ON.LEVEL): %s", entry.where,
+            trace or safeText(err))
+    end
+end
+
+--- Run one entry, named in the crash trace while it runs.
+--- @param entry table
+--- @return boolean ok, any result # its first return value, or what it threw
+--- @return string? trace
+local function runLevelEntry(entry, ...)
+    local outer = level.running
+    level.running = entry
+    local log = rawget(_G, "DesyncLog")
+    local mark = nil
+    if log ~= nil and type(log.tracing) == "function" and type(log.frameMark) == "function" then
+        local okT, on = pcall(log.tracing)
+        if okT and on == true then
+            mark = "mod " .. entry.where
+            pcall(log.frameMark, mark)
+        end
+    end
+    levelErrTrace = nil
+    local ok, err = xpcall(levelBoundary, levelErrHandler, entry, ...)
+    local trace = levelErrTrace
+    if mark ~= nil and type(log.frameDone) == "function" then
+        pcall(log.frameDone, mark)
+    end
+    level.running = outer
+    return ok, err, trace
+end
+
+--- What the engine calls for each hosted ON.LEVEL callback.
+--- @param entry table
+local function levelDispatch(entry, ...)
+    if entry.cleared then
+        return
+    end
+    local okActive, active = pcall(entry.isActive)
+    if not okActive or active ~= true or not canBatch() then
+        -- alone: this callback, at the engine's own turn, exactly as it always ran
+        local ok, ret, trace = runLevelEntry(entry, ...)
+        if not ok then
+            noteLevelError(entry, ret, trace)
+            error(ret, 0)
+        end
+        return ret
+    end
+    local pass = levelPassNow()
+    if pass ~= level.pass and not level.batching then
+        -- the first of this pass the engine reached: run them all, in order
+        level.pass = pass
+        level.top = level.seq
+        levelRan.n, levelRan.hash, levelRan.names = 0, 0, {}
+        pcall(probeLevel, entry.isActive) -- the probe looks before any of them does
+        compactLevel()
+        level.batching = true
+        local list = level.entries
+        for i = 1, #list do
+            local e = list[i]
+            if not e.cleared and e.seq <= level.top then
+                e.ranPass = pass
+                e.err, e.ret = nil, nil
+                local ok, ret, trace = runLevelEntry(e, ...)
+                if ok then
+                    e.ret, e.retPass = ret, pass
+                else
+                    e.err, e.errPass = ret, pass
+                    noteLevelError(e, ret, trace)
+                end
+                levelRan.n = levelRan.n + 1
+                levelRan.hash = (levelRan.hash * 1000003 + textHash(e.where)) % PROBE_HASH_MOD
+                if #levelRan.names < LEVEL_NAMES_MAX then
+                    levelRan.names[#levelRan.names + 1] = e.where
+                end
+            end
+        end
+        level.batching = false
+        compactLevel()
+    end
+    -- This callback's own turn. It ran in the batch (or, registered during this
+    -- pass, runs on the next floor); what it threw is raised now, once, and what it
+    -- returned is handed to the engine as if it had just run.
+    if entry.errPass == level.pass and entry.err ~= nil then
+        local err = entry.err
+        entry.err = nil
+        error(err, 0)
+    end
+    if entry.retPass == level.pass then
+        local ret = entry.ret
+        entry.ret, entry.retPass = nil, nil
+        return ret
+    end
 end
 
 --- Called by inputSync as the gate engages a floor: one more look, then the whole
@@ -559,29 +903,41 @@ function module.waterReport()
         ln = lvl.liquid.n, lh = lvl.liquid.set,
         fn = lvl.fx.n, fo = lvl.fx.ord, fs = lvl.fx.set, ft = lvl.fx.tiles,
         mv = lvl.moving and 1 or 0,
-        mq = mod.queries, mn = mod.hidden, mo = mod.ord, ms = mod.set,
+        mq = mod.queries, mn = mod.seen, mo = mod.ord, ms = mod.set, mx = mod.any,
         en = liquid.n, eh = liquid.set, ef = fx.n, es = fx.set,
+        oc = levelRan.n, oh = levelRan.hash,
     }
-    local lines = nil
+    local lines = {}
     if gen.n + lvl.liquid.n + lvl.fx.n + liquid.n + fx.n > 0 then
-        lines = {
-            string.format("water: generated liquid %d #%08X, surfaces %d | at ON.LEVEL"
-                .. " (%+d frames, %+d sim) liquid %d #%08X, surfaces %d ord #%08X set #%08X"
-                .. " tiles #%08X, moving %s | the mod asked %d time(s): %d hidden ord #%08X"
-                .. " set #%08X | at engage (%+d frames, %+d sim) liquid %d #%08X, surfaces"
-                .. " %d set #%08X",
-                gen.n, gen.set, probe.genFx,
-                lvl.frame - probe.genFrame, lvl.sim - probe.genSim,
-                lvl.liquid.n, lvl.liquid.set, lvl.fx.n, lvl.fx.ord, lvl.fx.set, lvl.fx.tiles,
-                lvl.moving and "YES" or "no",
-                mod.queries, mod.hidden, mod.ord, mod.set,
-                frame - probe.genFrame, sim - probe.genSim,
-                liquid.n, liquid.set, fx.n, fx.set),
-            "water surfaces at ON.LEVEL, as the engine listed them (x,y,layer): "
-                .. probeList(lvl.fx.keys),
-        }
+        lines[#lines + 1] = string.format("water: generated liquid %d #%08X, surfaces %d"
+            .. " | at ON.LEVEL (%+d frames, %+d sim) liquid %d #%08X, surfaces %d ord #%08X"
+            .. " set #%08X tiles #%08X, moving %s | the mod asked %d time(s): %d seen ord"
+            .. " #%08X set #%08X any #%08X | at engage (%+d frames, %+d sim) liquid %d #%08X,"
+            .. " surfaces %d set #%08X",
+            gen.n, gen.set, probe.genFx,
+            lvl.frame - probe.genFrame, lvl.sim - probe.genSim,
+            lvl.liquid.n, lvl.liquid.set, lvl.fx.n, lvl.fx.ord, lvl.fx.set, lvl.fx.tiles,
+            lvl.moving and "YES" or "no",
+            mod.queries, mod.seen, mod.ord, mod.set, mod.any,
+            frame - probe.genFrame, sim - probe.genSim,
+            liquid.n, liquid.set, fx.n, fx.set)
+        lines[#lines + 1] = "water surfaces at ON.LEVEL, as the engine listed them (x,y,layer): "
+            .. probeList(lvl.fx.keys)
     end
-    return { wire = wire, lines = lines }
+    if levelRan.n > 0 then
+        lines[#lines + 1] = string.format("level order: %d hosted ON.LEVEL callback(s) #%08X: %s%s",
+            levelRan.n, levelRan.hash, table.concat(levelRan.names, " "),
+            levelRan.n > #levelRan.names
+                and string.format(" (+%d more)", levelRan.n - #levelRan.names) or "")
+    end
+    return { wire = wire, lines = #lines > 0 and lines or nil }
+end
+
+--- @param t table
+--- @param k string
+--- @return integer # -1 when absent
+local function probeField(t, k)
+    return math.floor(tonumber(t[k]) or -1)
 end
 
 --- A non-host's verdict for one floor, from its own report and the world host's.
@@ -591,9 +947,6 @@ end
 --- @param s integer
 --- @return string?
 function module.waterVerdict(mine, host, s)
-    local function probeField(t, k)
-        return math.floor(tonumber(t[k]) or -1)
-    end
     local function probeWet(t)
         return probeField(t, "gn") > 0 or probeField(t, "ln") > 0 or probeField(t, "fn") > 0
             or probeField(t, "en") > 0 or probeField(t, "ef") > 0
@@ -615,16 +968,18 @@ function module.waterVerdict(mine, host, s)
     local asked = probeField(mine, "mq") > 0 or probeField(host, "mq") > 0
     local fxOrd, fxSet = probeSame("fn", "fo"), probeSame("fn", "fs")
     local modOrd, modSet = probeSame("mq", "mn", "mo"), probeSame("mq", "mn", "ms")
+    local modAny = probeSame("mq", "mn", "mx")
     local engage = probeSame("en", "eh", "ef", "es")
-    local seenSame, seenSet = fxOrd, fxSet
-    if asked then
-        seenSame, seenSet = modOrd, modSet
-    end
     local verdict
-    if seenSame then
-        verdict = "MATCH: the mod would have seen the same surfaces on both machines"
-    elseif seenSet then
+    if (asked and modOrd) or (not asked and fxOrd) then
+        verdict = "MATCH: the mod saw the same surfaces on both machines"
+    elseif (asked and modSet) or (not asked and fxSet) then
         verdict = "ORDER: the same surfaces, listed in a different order"
+    elseif asked and modAny then
+        verdict = "QUERY ORDER: the same answers, but the mod's queries came in a different"
+            .. " order -- its ON.LEVEL callbacks ran in a different order"
+    elseif asked and fxOrd then
+        verdict = "QUERIES: the water was the same, and the mod asked for different things"
     elseif engage then
         verdict = "SETTLING: different when the mod looked, the same by the first frame"
     else
@@ -632,16 +987,47 @@ function module.waterVerdict(mine, host, s)
     end
     local fxHow = fxOrd and "same order" or (fxSet and "other order"
         or (probeSame("fn", "ft") and "same tiles, moved within them" or "different"))
+    local seen = "n/a"
+    if asked then
+        seen = modOrd and "MATCH" or (modSet and "same set, other order"
+            or (modAny and "same answers, other query order" or "DIFFER"))
+    end
+    local order = "n/a"
+    if probeField(mine, "oc") >= 0 and probeField(host, "oc") >= 0 then
+        order = probeWord(probeSame("oc", "oh"))
+    end
     return string.format("WATER PROBE seq=%d: %s%s | generated liquid %s | at ON.LEVEL:"
         .. " liquid %s, surfaces %s (%d here, %d on the host: %s) | what the mod saw: %s"
-        .. " | at engage: %s | moving during ON.LEVEL: here %s, host %s",
+        .. " | at engage: %s | moving during ON.LEVEL: here %s, host %s | ON.LEVEL order: %s",
         s, verdict, asked and "" or " (the mod did not ask on this floor)",
         probeWord(probeSame("gn", "gh")), probeWord(probeSame("ln", "lh")), probeWord(fxOrd),
-        probeField(mine, "fn"), probeField(host, "fn"), fxHow,
-        asked and (modOrd and "MATCH" or (modSet and "same set, other order" or "DIFFER"))
-            or "n/a",
+        probeField(mine, "fn"), probeField(host, "fn"), fxHow, seen,
         probeWord(engage), probeField(mine, "mv") == 1 and "YES" or "no",
-        probeField(host, "mv") == 1 and "YES" or "no")
+        probeField(host, "mv") == 1 and "YES" or "no", order)
+end
+
+--- A non-host's line for a floor whose hosted ON.LEVEL callbacks ran in a different
+--- order from the world host's. nil when they match, or when either side has no
+--- record of it.
+---
+--- dev77 runs them in the order they were registered, so this can only differ if
+--- the mods REGISTERED them in a different order on the two machines -- something
+--- the batch cannot fix, and the two logs' `level order` lines then name.
+--- @param mine table
+--- @param host table
+--- @param s integer
+--- @return string?
+function module.levelOrderVerdict(mine, host, s)
+    local mineCount, hostCount = probeField(mine, "oc"), probeField(host, "oc")
+    if mineCount < 0 or hostCount < 0 then
+        return nil
+    end
+    if mineCount == hostCount and probeField(mine, "oh") == probeField(host, "oh") then
+        return nil
+    end
+    return string.format("ON.LEVEL ORDER seq=%d: DIFFERENT -- %d hosted ON.LEVEL callback(s)"
+        .. " here, %d on the host, not in the same order. The mods registered them"
+        .. " differently; compare the two logs' 'level order' lines", s, mineCount, hostCount)
 end
 
 local probeInstalled = false
@@ -653,9 +1039,13 @@ local probeInstalled = false
 --- Called once per hosted mod, after the host has put its own wrappers in place, so
 --- the `set_callback` chained here is whatever the host installed and both layers
 --- compose. Our own callbacks are registered with the ENGINE's `set_callback`, not
---- the sandbox one, and this runs before the mod's chunk does — so ours are ahead of
---- every callback the mod registers. The injected payload had to be prepended to the
---- mod's file to achieve that, and got it wrong once.
+--- the sandbox one, and this runs before the mod's chunk does.
+---
+--- Registering first does NOT mean running first. Overlunky keeps a script's
+--- callbacks in an unordered_map and runs them in its hash order (see "the order of
+--- ON.LEVEL"), so nothing of ours that has to come before the mod may rely on being
+--- registered earlier. The ON.LEVEL probe look is taken inside the ordered batch for
+--- exactly that reason.
 ---
 --- @param env table            # the sandbox the mod will run in
 --- @param opts table?          # { orderedPairs = boolean, active = fun(): boolean,
@@ -670,7 +1060,7 @@ function module.install(env, opts)
     local lastRunSeed = nil
     local stats = {
         reseeds = 0, newRuns = 0, anchored = 0, liquidTiles = 0,
-        levelAnchored = 0, waterFxHidden = 0, heldSkips = 0,
+        levelAnchored = 0, waterFxSeen = 0, heldSkips = 0,
     }
     local control -- forward: checkNewRun hands it to adapters
 
@@ -784,7 +1174,7 @@ function module.install(env, opts)
     --- window is closed again even if the callback throws: left open, every later
     --- gameplay liquid check would read the snapshot.
     local function liquidWindowed(cb)
-        return function(...)
+        return wraps(function(...)
             local was = liquidWindow
             liquidWindow = true
             local ok, ret = pcall(cb, ...)
@@ -793,37 +1183,34 @@ function module.install(env, opts)
                 error(ret, 0)
             end
             return ret
-        end
+        end, cb)
     end
 
     -- ---------------------------------- the water's surface effects at ON.LEVEL
     --
-    -- FX_WATER_SURFACE is the engine's drawn waterline, and it is not part of the
-    -- generated world. The liquid system creates it after generation -- "somewhere
-    -- between ON.POST_LEVEL_GENERATION and ON.LEVEL", as the HD mod's own author
-    -- narrowed it down (lib/entities/jungle_deco.lua) -- out of water the worker
-    -- threads are already moving. So at ON.LEVEL two machines do not hold the same
-    -- set of them, and the snapshot above cannot help: it answers is_liquid_at, and
-    -- these are entities.
+    -- FX_WATER_SURFACE is the engine's drawn waterline. The liquid system creates it
+    -- between ON.POST_LEVEL_GENERATION and ON.LEVEL, as the HD mod's own author
+    -- narrowed it down (lib/entities/jungle_deco.lua). 2.5's swamp stands its lily
+    -- pads on exactly these (hooks/swamp/water.lua), and the HD mod's procedural lily
+    -- pads, and the frogs on them, read them too.
     --
-    -- 2.5's swamp stands its lily pads on exactly these (hooks/swamp/water.lua). It
-    -- shuffles every surface effect with the shared PRNG, one draw each, and rolls
-    -- again for each well-spaced one. The BGNY capture was that: 2-1 generated
-    -- identically, every stream equal at gen[post], and at the first frame the peer
-    -- had one more lily pad (ITEM_LEAF 8 against 7). The PROCEDURAL_SPAWNS stream had
-    -- moved with it, and that is the stream the Wheel of Fortune then flipped its
-    -- coin on: one machine kept the dice house and the other built a Wheel House.
-    -- The HD mod's procedural lily pads, and the frogs on them, read the same effects.
+    -- dev75 hid them from a hosted mod's ON.LEVEL in a room, on the belief that two
+    -- machines do not hold the same set of them: the BGNY capture's 2-1 had one more
+    -- lily pad on the peer and a different shop. dev76 measured, and that belief was
+    -- wrong. In room FVJF the surfaces were identical on both machines on every wet
+    -- floor, to a hundredth of a tile and in the same order, at ON.LEVEL and at the
+    -- first frame. What BGNY's extra pad really came from was the ON.LEVEL callbacks
+    -- running in a different order on each machine (see "the order of ON.LEVEL"),
+    -- with nothing to stop one callback's draws moving the next one's. The anchor
+    -- (levelAnchored, below) and the registration order now stop both.
     --
-    -- So inside a hosted mod's ON.LEVEL callbacks, in a room, there are none. Every
-    -- query leaves them out and every machine builds the same floor, without the
-    -- decorative pads that would have stood on them. Outside ON.LEVEL, and alone,
-    -- the mod sees the engine's own answer.
+    -- So the mod gets the engine's own answer again, and the lily pads and frogs are
+    -- back. The probe still watches what each of the mod's ON.LEVEL queries returns,
+    -- so the next capture says whether both machines' mods saw the same surfaces.
     local waterFx = nil
     pcall(function() waterFx = ENT_TYPE.FX_WATER_SURFACE end)
     local fxMask = 64 -- MASK.FX
     pcall(function() fxMask = math.floor(MASK.FX) end)
-    local waterFxLogged = false -- this floor's first hide has been logged
 
     --- Could a query for these types return a water surface effect? 0, nothing, and
     --- an empty list all mean every type.
@@ -868,68 +1255,46 @@ function module.install(env, opts)
         return nil
     end
 
+    --- The water surface effects in one answer, in the order the engine listed them.
+    --- Read by length and index rather than tested for `type(list) == "table"`: a
+    --- build whose binding hands back an indexable container must still be read.
     --- @param list any
-    --- @return table kept
-    --- @return integer hidden
-    --- @return integer[] hiddenUids # in the order the engine listed them
-    local function splitWaterFx(list)
-        local kept, hidden, hiddenUids = {}, 0, {}
+    --- @return integer[]
+    local function surfacesIn(list)
+        local found = {}
         for i = 1, #list do
             local uid = list[i]
             if entityTypeOf(uid) == waterFx then
-                hidden = hidden + 1
-                hiddenUids[hidden] = uid
-            else
-                kept[#kept + 1] = uid
+                found[#found + 1] = uid
             end
         end
-        return kept, hidden, hiddenUids
+        return found
     end
 
-    --- The query's own answer, without the water surface effects.
-    ---
-    --- Read by length and index rather than tested for `type(list) == "table"`:
-    --- these come back as plain tables (2.5 table.sort()s one), but a build whose
-    --- binding handed back an indexable container instead must still be filtered,
-    --- not waved through. Anything that cannot be read that way is returned as the
-    --- engine gave it.
+    --- One of the mod's ON.LEVEL queries, for the probe: what it was given goes back
+    --- to it exactly as the engine gave it. Every query counts, an empty one too --
+    --- one machine finding a surface where the other finds none is exactly the
+    --- difference the probe looks for.
     --- @param list any
     --- @return any
-    local function withoutWaterFx(list)
+    local function watched(list)
         if list == nil then
             return list
         end
-        local ok, kept, hidden, hiddenUids = pcall(splitWaterFx, list)
-        -- The water probe (measurement only): what this query would have given the
-        -- mod. Every query counts, an empty one too -- one machine finding a surface
-        -- where the other finds none is exactly the difference being looked for.
-        if ok and probe ~= nil then
-            pcall(probeModView, hiddenUids)
+        local ok, found = pcall(surfacesIn, list)
+        if ok then
+            stats.waterFxSeen = stats.waterFxSeen + #found
+            pcall(probeModView, found)
         end
-        if not ok or hidden == 0 then
-            return list
-        end
-        stats.waterFxHidden = stats.waterFxHidden + hidden
-        if not waterFxLogged then
-            -- Once a floor, so a capture shows it was in force. The two machines may
-            -- well print DIFFERENT counts here, and that difference is the reason.
-            waterFxLogged = true
-            local desyncLog = rawget(_G, "DesyncLog")
-            if desyncLog ~= nil and desyncLog.event ~= nil then
-                pcall(desyncLog.event, "hid %d water-surface effect(s) from the hosted"
-                    .. " mod's ON.LEVEL: the liquid makes them after generation, and not"
-                    .. " the same on every machine", hidden)
-            end
-        end
-        return kept
+        return list
     end
 
-    --- Is a query made right now one whose answer must leave them out? The callers
-    --- test `liquidWindow` first: these wrap queries 2.5 makes many times a frame,
-    --- and outside ON.LEVEL that one upvalue is all they should cost.
+    --- Is a query made right now one the probe should look at? The callers test
+    --- `liquidWindow` first: these wrap queries 2.5 makes many times a frame, and
+    --- outside ON.LEVEL that one upvalue is all they should cost.
     --- @return boolean
-    local function hidingWaterFx()
-        return liquidWindow and waterFx ~= nil and isActive()
+    local function watchingWaterFx()
+        return liquidWindow and probe ~= nil and waterFx ~= nil and isActive()
     end
 
     --- The engine's function the mod would otherwise get. rawget, both times: the
@@ -949,43 +1314,43 @@ function module.install(env, opts)
         return nil
     end
 
-    --- Wrap one of the engine's entity queries. `typeAt` and `maskAt` are the
+    --- Watch one of the engine's entity queries. `typeAt` and `maskAt` are the
     --- positions of its type and mask arguments. Feature-detected: a build without
-    --- the function simply has nothing to wrap.
+    --- the function simply has nothing to watch.
     --- @param name string
     --- @param typeAt integer
     --- @param maskAt integer
-    local function hideWaterFxFrom(name, typeAt, maskAt)
+    local function watchQuery(name, typeAt, maskAt)
         local real = engineQuery(name)
         if real == nil then
             return
         end
         env[name] = function(...)
-            if liquidWindow and hidingWaterFx() then
+            if liquidWindow and watchingWaterFx() then
                 local types = (select(typeAt, ...))
                 local mask = (select(maskAt, ...))
                 if typesMayHoldWaterFx(types) and maskMayHoldFx(mask) then
-                    return withoutWaterFx(real(...))
+                    return watched(real(...))
                 end
             end
             return real(...)
         end
     end
-    hideWaterFxFrom("get_entities_by", 1, 2)
-    hideWaterFxFrom("get_entities_at", 1, 2)
-    hideWaterFxFrom("get_entities_overlapping_hitbox", 1, 2)
-    hideWaterFxFrom("get_entities_overlapping", 1, 2)
+    watchQuery("get_entities_by", 1, 2)
+    watchQuery("get_entities_at", 1, 2)
+    watchQuery("get_entities_overlapping_hitbox", 1, 2)
+    watchQuery("get_entities_overlapping", 1, 2)
 
     -- get_entities_by_type takes its types as the arguments themselves, or as one
     -- table of them, and has no mask
     local realByType = engineQuery("get_entities_by_type")
     if realByType ~= nil then
         env.get_entities_by_type = function(...)
-            if liquidWindow and hidingWaterFx() then
+            if liquidWindow and watchingWaterFx() then
                 local first = ...
                 local types = type(first) == "table" and first or { ... }
                 if typesMayHoldWaterFx(types) then
-                    return withoutWaterFx(realByType(...))
+                    return watched(realByType(...))
                 end
             end
             return realByType(...)
@@ -996,12 +1361,11 @@ function module.install(env, opts)
     ---
     --- POST_LEVEL_GENERATION is anchored (below) and ON.LEVEL was not, though it too
     --- fires once per floor at the same state on every machine, and it is where mods
-    --- decorate the level they were given. One callback there that reads anything
-    --- machine-dependent and rolls on it -- the swamp's lily pads, above -- drew the
-    --- shared streams a different number of times on each machine, and every roll
-    --- after it, the engine's own included, landed somewhere else. The Wheel of
-    --- Fortune's coin was one of them, and it was flipped frames later, in
-    --- POST_UPDATE, by a hook that had read nothing machine-dependent at all.
+    --- decorate the level they were given. On BGNY's 2-1 the swamp's lily pads drew
+    --- the shared streams after a different set of callbacks on each machine, and
+    --- every roll after it, the engine's own included, landed somewhere else. The
+    --- Wheel of Fortune's coin was one of them, flipped frames later in POST_UPDATE
+    --- by a hook that had read nothing machine-dependent at all.
     ---
     --- Anchored, each callback starts from the floor's lockstep-identical base and
     --- the engine's streams are put back afterwards, so whatever one callback draws,
@@ -1011,13 +1375,42 @@ function module.install(env, opts)
     --- @return function
     local function levelAnchored(cb)
         local anchored = module.anchor(cb, floorBase)
-        return function(...)
+        return wraps(function(...)
             if not isActive() then
                 return cb(...)
             end
             stats.levelAnchored = stats.levelAnchored + 1
             return anchored(...)
+        end, cb)
+    end
+
+    -- Whatever the host installed as the sandbox's set_callback, captured here --
+    -- above registerLevel, which needs it: a `local` declared after a function is a
+    -- global inside it, and comes back nil.
+    local hostSetCallback = rawget(env, "set_callback") or set_callback
+
+    --- A hosted ON.LEVEL callback, into the ordered list (see "the order of
+    --- ON.LEVEL"). The engine still gets one registration per callback, with the id
+    --- the mod is handed back, so clearing it by id works exactly as it did.
+    --- @param run function # the callback as it is to be run: windowed and anchored
+    --- @param cb function  # the mod's own function, for its name
+    --- @param id any       # ON.LEVEL
+    --- @return any # the engine's callback id
+    local function registerLevel(run, cb, id)
+        level.seq = level.seq + 1
+        local entry = {
+            seq = level.seq, run = run, env = env, isActive = isActive,
+            where = whereDefined(cb), cleared = false,
+        }
+        local engineId = hostSetCallback(function(...)
+            return levelDispatch(entry, ...)
+        end, id)
+        if type(engineId) == "number" then
+            entry.engineId = engineId
+            level.entries[#level.entries + 1] = entry
+            level.byId[engineId] = entry
         end
+        return engineId
     end
 
     --- A hosted mod's update callbacks run once per SIMULATED frame.
@@ -1039,18 +1432,37 @@ function module.install(env, opts)
     --- @param cb function
     --- @return function
     local function simulatedOnly(cb)
-        return function(...)
+        return wraps(function(...)
             if heldFrame() then
                 stats.heldSkips = stats.heldSkips + 1
                 return
             end
             return cb(...)
-        end
+        end, cb)
     end
 
-    local hostSetCallback = rawget(env, "set_callback") or set_callback
+    --- Can the engine call this? A function, or a table or userdata with __call.
+    --- @param v any
+    --- @return boolean
+    local function callable(v)
+        local t = type(v)
+        if t == "function" then
+            return true
+        end
+        if t ~= "table" and t ~= "userdata" then
+            return false
+        end
+        local ok, mt = pcall(getmetatable, v)
+        return ok and type(mt) == "table" and rawget(mt, "__call") ~= nil
+    end
 
     env.set_callback = function(cb, id)
+        if not callable(cb) then
+            -- Nothing to wrap: whatever the engine makes of a callback that cannot
+            -- be called, it makes of it unhosted too. Wrapping one hid that until
+            -- the event fired, and then raised the error from inside our wrapper.
+            return hostSetCallback(cb, id)
+        end
         if id == ON.FRAME then
             -- engine-frame rate is machine-dependent; the gameplay rate is not
             id = ON.GAMEFRAME
@@ -1084,17 +1496,42 @@ function module.install(env, opts)
             -- same seed: identical level seed, different tiles, enemies and areas.
             stats.anchored = stats.anchored + 1
             cb = module.anchor(cb, loadBase)
-        elseif id == ON.LEVEL then
+        elseif ON.LEVEL ~= nil and id == ON.LEVEL then
             -- whatever the mod decides at ON.LEVEL from the water, it decides from
-            -- the same water on every machine (see liquidSnap and waterFx), and
-            -- whatever it draws there stays there (see levelAnchored)
-            cb = levelAnchored(liquidWindowed(cb))
+            -- the same water on every machine (see liquidSnap); whatever it draws
+            -- there stays there (see levelAnchored); and in a room every machine
+            -- runs the mod's ON.LEVEL callbacks in the same order (see registerLevel)
+            return registerLevel(levelAnchored(liquidWindowed(cb)), cb, id)
         elseif (ON.PRE_UPDATE ~= nil and id == ON.PRE_UPDATE)
             or (ON.POST_UPDATE ~= nil and id == ON.POST_UPDATE) then
             -- once per SIMULATED frame, like ON.FRAME above (see simulatedOnly)
             cb = simulatedOnly(cb)
         end
         return hostSetCallback(cb, id)
+    end
+
+    -- The sandbox's clear_callback, chained the same way: the host's ownership guard
+    -- still decides, and this only keeps the ordered ON.LEVEL list in step.
+    local hostClear = rawget(env, "clear_callback")
+    if type(hostClear) == "function" then
+        env.clear_callback = function(id, ...)
+            if id == nil then
+                local running = level.running
+                if running ~= nil and running.env == env and running.engineId ~= nil
+                    and clearIsEntrysOwn(running) then
+                    -- "clear the callback I am": the one running, which in a batch is
+                    -- not the one the engine is running the pass from
+                    forgetLevel(running)
+                    return hostClear(running.engineId)
+                end
+                return hostClear()
+            end
+            local entry = level.byId[id]
+            if entry ~= nil and entry.env == env then
+                forgetLevel(entry)
+            end
+            return hostClear(id, ...)
+        end
     end
 
     -- ------------------------------------------------------------------ our own
@@ -1151,7 +1588,6 @@ function module.install(env, opts)
     local function snapshotLiquid()
         liquidSnap = nil
         stats.liquidTiles = 0
-        waterFxLogged = false -- a new floor: say it again the first time it happens
         if not ownLevels or not isActive() or type(realIsLiquidAt) ~= "function" then
             return
         end
@@ -1193,11 +1629,15 @@ function module.install(env, opts)
     set_callback(snapshotLiquid, ON.POST_LEVEL_GENERATION)
 
     -- The water probe (measurement only, see above): once, however many mods are
-    -- hosted, since it looks at the engine's water and not at any one mod. Here, so
-    -- its ON.LEVEL look comes before every callback the mod registers.
+    -- hosted, since it looks at the engine's water and not at any one mod. Its
+    -- ON.LEVEL look is also taken by the ordered batch before the first of the mod's
+    -- callbacks runs, because the engine may well reach this one after them.
     if not probeInstalled then
         probeInstalled = true
         set_callback(function()
+            -- a new floor: a new ON.LEVEL pass to come, and nothing run in it yet
+            level.floors = level.floors + 1
+            levelRan.n, levelRan.hash, levelRan.names = 0, 0, {}
             pcall(probeGeneration, isActive)
         end, ON.POST_LEVEL_GENERATION)
         set_callback(function()

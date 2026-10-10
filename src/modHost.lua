@@ -699,6 +699,10 @@ local REGISTRATION_APIS = {
     "set_global_interval",
     "set_interval",
     "set_timeout",
+    -- Missing until dev77, so its ids were never the mod's: a mod clearing its own
+    -- global timeout was refused as though it had reached for one of ours, and the
+    -- timeout fired anyway. Unhosted, Playlunky lets a script clear its own.
+    "set_global_timeout",
     "register_option_bool",
     "register_option_int",
     "register_option_float",
@@ -707,6 +711,61 @@ local REGISTRATION_APIS = {
     "register_option_button",
     "register_console_command",
 }
+
+--- The registration APIs whose FIRST argument is the callback the engine will call.
+--- (set_vanilla_sound_callback takes its callback third; the option APIs take none.)
+local CALLBACK_FIRST = {
+    set_callback = true,
+    set_pre_tile_code_callback = true,
+    set_post_tile_code_callback = true,
+    set_pre_entity_spawn = true,
+    set_post_entity_spawn = true,
+    set_global_interval = true,
+    set_interval = true,
+    set_timeout = true,
+    set_global_timeout = true,
+}
+
+--- Every live registration every hosted mod has made, by API, since boot -- and
+--- where the count stood at the last floor. Timers counted in engine frames
+--- (set_global_timeout, set_global_interval) fire at a different simulated moment on
+--- each machine, so the floor block says which kinds a mod is creating as it plays.
+local tally = {}
+local tallyAtLastFloor = {}
+
+--- What the hosted mods registered since the last call, by API, nonzero only:
+--- "set_callback +48, set_timeout +2". nil when nothing was.
+--- @return string?
+function module.registrationsSinceLastFloor()
+    local parts = {}
+    for _, name in ipairs(REGISTRATION_APIS) do
+        local now = tally[name] or 0
+        local delta = now - (tallyAtLastFloor[name] or 0)
+        if delta > 0 then
+            parts[#parts + 1] = string.format("%s +%d", name, delta)
+        end
+        tallyAtLastFloor[name] = now
+    end
+    if #parts == 0 then
+        return nil
+    end
+    return table.concat(parts, ", ")
+end
+
+--- Can the engine call this? A function, or a table or userdata with __call.
+--- @param v any
+--- @return boolean
+local function callableValue(v)
+    local t = type(v)
+    if t == "function" then
+        return true
+    end
+    if t ~= "table" and t ~= "userdata" then
+        return false
+    end
+    local ok, mt = pcall(getmetatable, v)
+    return ok and type(mt) == "table" and rawget(mt, "__call") ~= nil
+end
 
 --- Called with (moduleName, path) as each hosted module is about to run.
 ---
@@ -1008,6 +1067,12 @@ function module.newSandbox(report, opts)
     -- the mod's own.
     local owned = {}
 
+    -- A callback the engine cannot call is accepted at registration and fails every
+    -- time it fires, as `attempt to call a number value` with an empty stack -- the
+    -- engine called it, not Lua -- which is exactly what room FVJF's peer saw on 4-1,
+    -- with nothing to say which registration it was. Named here, once per API.
+    local nonCallableSaid = {}
+
     for _, name in ipairs(REGISTRATION_APIS) do
         if inert then
             env[name] = function(...)
@@ -1035,6 +1100,14 @@ function module.newSandbox(report, opts)
                 if not module.wrapDisabled() then
                     hostedWrap = Callbacks.hosted
                 end
+            elseif CALLBACK_FIRST[name] and Callbacks ~= nil and not module.wrapDisabled() then
+                -- The timers and the spawn and tile-code hooks go through the same
+                -- wrapper since dev77, for the same two reasons: the crash trace and
+                -- the profile can name them (the FVJF crash trace could see only the
+                -- mod's set_callback callbacks), and our depth is zero inside them --
+                -- a spawn hook set off by a spawn of OURS used to run at our depth,
+                -- where the mod's own bare clear_callback() in it was refused.
+                hostedWrap = Callbacks.hosted
             end
             -- Playlunky's option APIs take (id, label, long_desc, value). hdmod
             -- passes `nil` for long_desc, and a nil arriving where the binding
@@ -1048,6 +1121,7 @@ function module.newSandbox(report, opts)
                         api = name,
                         event = select(2, ...),
                     }
+                    tally[name] = (tally[name] or 0) + 1
                     -- named before the call, not after: if this is what kills the
                     -- process, the trace has to already say so
                     if module.onProgress ~= nil then
@@ -1055,6 +1129,15 @@ function module.newSandbox(report, opts)
                             name .. " " .. tostring((select(1, ...))))
                     end
                     local first = ...
+                    if CALLBACK_FIRST[name] and not nonCallableSaid[name]
+                        and not callableValue(first) then
+                        nonCallableSaid[name] = true
+                        errorf("mod host: %s passed a %s, not a function, as the callback"
+                            .. " to %s(%s, %s) -- the engine will raise \"attempt to call a"
+                            .. " %s value\" each time it fires. Named once.",
+                            tostring(opts.packDir or "the hosted mod"), type(first), name,
+                            tostring(first), tostring((select(2, ...))), type(first))
+                    end
                     -- Keep the mod's ON.LOAD handler. Because the mod runs in
                     -- OUR state, this is an ordinary Lua function we hold a
                     -- reference to -- which is what makes reloading its save
@@ -1780,12 +1863,16 @@ function module.hostOne(packDir)
     if report.ok then
         hosted[#hosted + 1] = packDir
     end
+    -- Printed, and held for the first run's log: this runs at boot, before any log
+    -- is open, so the plain `line` this used to be went nowhere. The summary is the
+    -- only place every texture the mod asked for and did not get is named -- room
+    -- FVJF's peer had 2.5 complaining `Unknown texture definition key: swamp-king` on
+    -- every swamp floor, and no log of ours could say whether we had refused it.
     for _, line in ipairs(module.summarize(report)) do
         print("[ModdedOnline] " .. line)
-    end
-    if DesyncLog ~= nil and DesyncLog.line ~= nil then
-        pcall(DesyncLog.line, "mod host: %s %s with %d modules and %d registrations",
-            packDir, report.ok and "loaded" or "FAILED", #report.modules, #report.callbacks)
+        if DesyncLog ~= nil and DesyncLog.earlyEvent ~= nil then
+            pcall(DesyncLog.earlyEvent, "%s (%s)", line, packDir)
+        end
     end
     return report
 end

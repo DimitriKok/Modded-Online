@@ -13,7 +13,7 @@
 
 meta = {
     name = "Modded Online (loader build)",
-    version = "2.0.0-dev76",
+    version = "2.0.0-dev77",
     description = "Play scriptable mods together via a self-hosted server",
     author = "EatYoCake + DoctorPuppy",
     online_safe = false, -- not for the *official* online — that's the point
@@ -238,12 +238,15 @@ if Network ~= nil and Network.enabledScriptPacks ~= nil then
 end
 
 -- Crash-trace: mark the start of the ENGINE's simulation update. Registered HERE,
--- after every module, so it is the LAST ON.PRE_UPDATE callback to run — the first
+-- after every module, meant as the LAST ON.PRE_UPDATE callback to run — the first
 -- attempt marked this inside inputSync's PRE_UPDATE and chat's PRE_UPDATE (which
 -- registers later) promptly overwrote it, so every crash still read
 -- `OUT preUpdate:chat` and the marker taught us nothing. From here until
 -- ON.POST_UPDATE the engine + every content mod's per-entity update runs, so a
 -- crash showing `IN engineUpdate` is provably NOT in Modded Online's own code.
+-- Registering last does not guarantee running last, though: Overlunky fires a
+-- script's callbacks in the hash order of their ids (determinism.lua, "the order of
+-- ON.LEVEL"), so a hosted PRE_UPDATE can still mark after this one.
 set_callback(function()
     if DesyncLog ~= nil then
         DesyncLog.frameMark("engineUpdate")
@@ -301,7 +304,9 @@ end
 -- The window in which a fresh run's QUEST_FLAG.RESET is shown to the hosted mods
 -- (see EventSync.showRunReset). Its closing callbacks must run AFTER the hosted mods'
 -- own PRE_LOAD_SCREEN / PRE_LEVEL_GENERATION callbacks and before the engine's load,
--- and callbacks run in registration order -- so it is registered here, after hosting.
+-- so it is registered here, after hosting. That assumed callbacks run in registration
+-- order, which Overlunky does not promise (it fires them in id-hash order; see
+-- HANDOFF section 17): a known gap, not yet seen to bite.
 if EventSync ~= nil and EventSync.installRunResetWindow ~= nil then
     bootStep("eventSync: run start window for the hosted mods")
     SafeCall("main/installRunResetWindow", EventSync.installRunResetWindow)
