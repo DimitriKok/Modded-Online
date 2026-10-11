@@ -124,7 +124,13 @@ LOG_PATH = None
 
 def log(msg: str) -> None:
     line = f"[fake-player] {msg}"
-    print(line, flush=True)
+    # A console with no window under Wine (Proton, on Linux) has a dead stdout, and a
+    # raising print() would end the test player at its first word. The file below
+    # is the record that matters.
+    try:
+        print(line, flush=True)
+    except (OSError, ValueError):
+        pass
     if LOG_PATH is not None:
         try:
             with open(LOG_PATH, "a", encoding="utf-8") as f:

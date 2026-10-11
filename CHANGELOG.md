@@ -1,5 +1,51 @@
 # Changelog
 
+## 2.0.0-dev81
+
+Linux again: Python was found, and every connection then failed with "Could not reach
+the server". No server change: the server stays at **1.0.13**. Both players need
+dev81 (the lobby only lets the same version play together).
+
+### What was most likely wrong
+
+Every way of playing online except a server on this machine goes through the client
+bridge, `server/client_bridge.py`, which the game starts in a window of its own. Under
+Wine, a console program started that way whose console gets no window has a dead
+stdout, and the bridge's first `print()` raised `OSError: [Errno 9] Bad file
+descriptor`. It died a moment after it started, its port closed, and the game's
+hellos went nowhere. Reproduced here with Wine 9 (what Proton 9 is built on) and a
+Windows Python 3.13: the old bridge never relayed a packet; the new one answered
+1.5 seconds after it was launched. Under Wine with a window to put the console in,
+both versions relay, so this is the likeliest cause rather than a proven one: nothing
+anywhere could say which had happened, because the bridge's window was gone and the
+game knew only that no answer had come. If it still fails, the menu now says which
+stage was the last one reached.
+
+### Fixed
+
+- **The bridge cannot die of its console.** Everything it says goes to its window if
+  it can and to `server/client_bridge.log` next to it, and a write that fails is
+  dropped. An uncaught error goes to the log with its traceback.
+- **The bridge marks how far it got**: `bridge up`, `the game reached the bridge`,
+  `the server answered`.
+- **When a connection through the bridge never comes up, the game says why**, from that
+  log: `Could not reach the server: the bridge did not start` (no log: Python never
+  ran it), `...: the game's messages never reached the bridge`, `...: the server did
+  not answer`, `...: the server's reply never reached the game`, `...: the bridge
+  cannot send to the server`, or `...: the bridge stopped (<its error>)`. The log line
+  the menu's reason came from goes to the desync log. The previous session's log is
+  deleted before each launch, so it can never be read as this one's.
+- The test players survive a dead console the same way (they already wrote a log).
+  The server already did: it writes through `logging`, which drops a failed write.
+
+### Tests
+
+New: `tests/test_bridge_report.py` (each stage the log can end on, a crash named by
+its error, a bridge that cannot send, the timeout's message and log line, the stale
+log removed before a launch, and the real bridge relaying with its stdout closed,
+which the old bridge failed). 1106 passing, 1 skipped, under Lua 5.4 and 5.5; the
+server suite passes unchanged.
+
 ## 2.0.0-dev80
 
 Playing on Linux: the mod finds a Windows Python installed inside the game's Proton

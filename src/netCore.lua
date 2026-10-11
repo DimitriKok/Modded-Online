@@ -1229,6 +1229,59 @@ end
 
 local launchedServer = false
 local launchedBridge = false
+
+-- The bridge's own log, written next to it (server/client_bridge.py): how far it
+-- got, in stages -- "bridge up", "the game reached the bridge", "the server
+-- answered". Until dev81 a connection through the bridge that never came up said
+-- only "Could not reach the server", which is all a Linux tester in a Proton
+-- prefix had to go on -- and under Wine a bridge with no console window used to
+-- die at its first print, a moment after it started.
+local BRIDGE_LOG = PackPath("server/client_bridge.log")
+
+--- Why a connection through the bridge never came up, as far as its log can say.
+--- @return string short # for the menu
+--- @return string detail # for the log
+local function bridgeReport()
+    local up, heard, answered, unreachable, last = false, false, false, nil, nil
+    local readOk = pcall(function()
+        for raw in io.lines(BRIDGE_LOG) do
+            local line = raw:gsub("^%s+", ""):gsub("%s+$", "")
+            if line ~= "" then
+                last = line
+                if line:find("^bridge up") then
+                    up = true
+                elseif line:find("^the game reached the bridge") then
+                    heard = true
+                elseif line:find("^the server answered") then
+                    answered = true
+                elseif line:find("^cannot reach") then
+                    unreachable = line
+                end
+            end
+        end
+    end)
+    if not readOk or last == nil then
+        return "the bridge did not start",
+            "there is no server/client_bridge.log, so Python never ran the bridge"
+    end
+    local detail = "its log ends: " .. last
+    if unreachable ~= nil and not answered then
+        return "the bridge cannot send to the server", unreachable
+    end
+    -- a traceback's last line names the error the bridge died of
+    if last:find("Error") ~= nil and last:find("^the ") == nil then
+        return "the bridge stopped (" .. last:sub(1, 48) .. ")", detail
+    end
+    if answered then
+        return "the server's reply never reached the game", detail
+    elseif heard then
+        return "the server did not answer", detail
+    elseif up then
+        return "the game's messages never reached the bridge", detail
+    end
+    return "the bridge did not start", detail
+end
+module.bridgeReport = bridgeReport
 -- the room our test players were started for, or nil when none are running: the
 -- `joined` reply can repeat (resends, reconnects) and must not stack up windows
 local testPlayerRoom = nil
@@ -1281,6 +1334,9 @@ function module.launchBridge(host, port)
         return false
     end
     local ok, err = pcall(function()
+        -- the last session's log goes first: no log at all must mean this bridge
+        -- never got as far as writing one (see bridgeReport)
+        pcall(os.remove, BRIDGE_LOG)
         os.execute('taskkill /F /FI "WINDOWTITLE eq Modded Online Bridge*" >nul 2>&1')
         os.execute(string.format('start "Modded Online Bridge" /min %s "%s" "%s" %d',
             py, BRIDGE_SCRIPT, host, port))
@@ -1950,6 +2006,12 @@ local function tick()
         if now - connectStartMs > CONNECT_TIMEOUT_MS then
             pendingHello = nil
             module.lastError = "Could not reach the server"
+            if launchedBridge then
+                local short, detail = bridgeReport()
+                module.lastError = "Could not reach the server: " .. short
+                errorf("could not reach the server through the bridge: %s -- %s",
+                    short, detail)
+            end
             module.phase = PHASE.IDLE
         elseif now - helloSentMs >= HELLO_RETRY_MS then
             helloSentMs = now

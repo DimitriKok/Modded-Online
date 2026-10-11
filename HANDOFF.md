@@ -6,7 +6,7 @@ them.
 
 ## Start here
 
-**Build: `2.0.0-dev55` → `dev80`. The server must be redeployed at `1.0.13`.**
+**Build: `2.0.0-dev55` → `dev81`. The server must be redeployed at `1.0.13`.**
 Section 3's fix is half a server fix and does nothing without it (1.0.11 or later).
 Section 6 has a server half too, but its client half works on its own. A client on a
 server other than the one it expects says so in a toast and in the log. Check with
@@ -34,9 +34,9 @@ server other than the one it expects says so in a toast and in the log. Check wi
 | 18 | The peer got a Lua error on 4-1 (`attempt to call a number value`) and crashed 2 s into 4-2 | **NOT FIXED: cause not known.** The crash was in the engine, after a hosted update callback returned. dev77 makes the next one name itself — section 18 |
 | 19 | 4-2 desynced 45 s in (room VOYY), and the resync that followed got stuck on the transition for 20 s | **FIXED** in dev78. dev78's run (room UVLQ, 1-1 to 2-2, twice through world 1) had no desync at all. The desync: GAMEFRAME (and every hosted ON.FRAME moved to it) and the mod's global timers ran on frames the lockstep gate held, and a hosted PRE_UPDATE before the gate read the last frame's decision. The stall: the transition barrier held our own resync warp. Also in dev78: the pet on a quick restart, and the logs to Discord at the popup — section 19 |
 | 20 | The host crashed leaving the summit's 2-2 (room UVLQ), and a Lua error a couple of floors earlier left nothing in either log | **NOT FIXED: cause not known.** The crash was in 2-2's teardown, after 2.5's PRE_LEVEL_DESTRUCTION wrapper (`helpers2.lua:533`) returned. dev79 stops the leak sweep destroying the ~360 entities 2.5 parks on those floors (the one thing hosting did there that solo 2.5 does not), and makes the next crash and the next error name themselves — section 20 |
-| 21 | On Linux (Proton) the mod said "Python is not installed" with Python installed | **FIXED** in dev80, not yet tried in game. The game is a Windows program under Proton and needs the Windows Python inside its prefix; on Proton 9 and older Wine's `where` is a stub, so the mod now also looks where a Windows install puts Python — section 21 |
+| 21 | On Linux (Proton) the mod said "Python is not installed" with Python installed; with that fixed, every connection said "Could not reach the server" | Python: **FIXED** in dev80, confirmed in game (the error went). The connection: dev81 makes the bridge survive a dead console (it died at its first print under Wine when its console had no window, reproduced with Wine 9) and the menu say how far the bridge got; not yet tried in game. The game is a Windows program under Proton and needs the Windows Python inside its prefix; on Proton 9 and older Wine's `where` is a stub, so the mod now also looks where a Windows install puts Python — section 21 |
 
-**Git state:** the work is on `main`; dev77 to dev80 were pushed to
+**Git state:** the work is on `main`; dev77 to dev81 were pushed to
 `claude/vigilant-cori-chwlul` for review. `git log --oneline origin/main..HEAD` shows
 what a branch adds.
 
@@ -1196,6 +1196,23 @@ README says, start the game on the Proton it uses, and join or host. The desync 
 `python: "C:\windows\py.exe" (found where it was installed; where found none) | under
 Wine (Proton)`.
 
+**dev81, the next report (the Linux tester):** Python found, every connection
+"Could not reach the server". Reproduced with Wine 9.0 (Ubuntu's, as Proton 9 is
+built on) and Windows Python 3.13.16 (NuGet's `python` package) in a fresh prefix,
+headless: `start "Modded Online Bridge" /min python.exe client_bridge.py ...` gives the
+bridge a console with no window (conhost's `init_window` fails and it exits), its
+stdout is dead, and the first `print()` raises `OSError: [Errno 9]`. The old bridge
+never relayed; the dev81 one relays 1.5 s after launch. With a display (xvfb) both
+relay, and the server survives either way (it writes through `logging`). So it is
+the likeliest cause, not a proven one. `client_bridge.py` now writes through `say()`
+(console if possible, `server/client_bridge.log` always) and marks its stages;
+`netCore.bridgeReport()` reads that log on a connect timeout through the bridge and
+puts the stage in `lastError` and an `errorf`. Also checked and fine under Wine 9: the
+`start` command line as `os.execute` builds it (title, `/min`, quoted interpreter path,
+relative script path, inherited working directory), Windows Python's sockets and
+`select`, the server under asyncio, and a cold launch-to-first-reply of 1.5 s against
+a 12 s connect timeout.
+
 ## Diagnostic tooling (flags and the files they write)
 
 All flag files live in the pack folder. They are files, not settings, for the reason
@@ -1276,7 +1293,7 @@ On a machine whose Python has no pytest or lupa, uv supplies both for the run:
 uv run --no-project --with pytest --with lupa python -m pytest tests/ -q
 ```
 
-1097 passing, none failing, 1 skipped (it needs hdmod next to this pack) (dev80), under Lua 5.4 and 5.5. The 16 long-standing failures went in dev67, with the two
+1106 passing, none failing, 1 skipped (it needs hdmod next to this pack) (dev81), under Lua 5.4 and 5.5. The 16 long-standing failures went in dev67, with the two
 stale test files they came from: `tests/test_world_mailbox.py` (the world mailbox
 deleted in dev44) and `tests/test_seeded_run.py` (the seeded-run flag removed in
 dev46). A failure here now means something broke.

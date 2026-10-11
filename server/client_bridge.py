@@ -18,10 +18,46 @@ Leave this window open while you play.
 """
 
 import json
+import os
 import select
 import socket
 import sys
 import time
+import traceback
+
+# Everything the bridge says goes to client_bridge.log next to this file as well as
+# to its window, and saying it can never kill the bridge.
+#
+# Under Wine (Spelunky 2 on Linux, through Proton) a helper whose console has no
+# window gets a dead stdout, and the first print() raised OSError [Errno 9]: the
+# bridge died a moment after it started and the game said "Could not reach the
+# server" with nothing anywhere to say why. The game reads this log back when it
+# cannot connect (netCore's bridgeReport), so the stages below are part of the
+# contract: "bridge up", "the game reached the bridge", "the server answered".
+LOG_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "client_bridge.log")
+try:
+    _log = open(LOG_PATH, "w", encoding="utf-8")
+except OSError:
+    _log = None
+
+
+def say(*parts):
+    text = " ".join(str(p) for p in parts) + "\n"
+    for stream in (sys.stdout, _log):
+        if stream is None:
+            continue
+        try:
+            stream.write(text)
+            stream.flush()
+        except (OSError, ValueError):
+            pass
+
+
+def _log_crash(kind, value, tb):
+    say("".join(traceback.format_exception(kind, value, tb)).rstrip())
+
+
+sys.excepthook = _log_crash
 
 GAME_LISTEN_PORT = 26010   # the game's udp_listen port (receives pushes)
 BRIDGE_LOCAL_PORT = 26011  # where the game sends its outbound traffic
@@ -29,7 +65,7 @@ BRIDGE_LOCAL_PORT = 26011  # where the game sends its outbound traffic
 server_ip = sys.argv[1] if len(sys.argv) > 1 else None
 server_port = int(sys.argv[2]) if len(sys.argv) > 2 else 26000
 if server_ip is None:
-    print(__doc__)
+    say(__doc__)
     sys.exit(1)
 
 # one persistent socket to the server: its NAT mapping stays open as long as
@@ -62,7 +98,7 @@ def bind_local():
 try:
     local = bind_local()
 except OSError:
-    print(f"port {BRIDGE_LOCAL_PORT} is busy — asking the previous bridge to stand down")
+    say(f"port {BRIDGE_LOCAL_PORT} is busy — asking the previous bridge to stand down")
     nudge = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     nudge.sendto(json.dumps({"t": QUIT_TOKEN}).encode("utf-8"),
                  ("127.0.0.1", BRIDGE_LOCAL_PORT))
@@ -78,18 +114,18 @@ except OSError:
     if local is None:
         # An older build that predates QUIT_TOKEN will not let go. Say which
         # server it is stuck on so the fix is obvious.
-        print(f"the bridge already on port {BRIDGE_LOCAL_PORT} will not release it.")
-        print("It is probably an older copy. Close its window, or end the")
-        print("python.exe running client_bridge.py in Task Manager, then retry.")
+        say(f"the bridge already on port {BRIDGE_LOCAL_PORT} will not release it.")
+        say("It is probably an older copy. Close its window, or end the")
+        say("python.exe running client_bridge.py in Task Manager, then retry.")
         time.sleep(8)
         sys.exit(1)
-    print("took over from a previous bridge")
+    say("took over from a previous bridge")
 
 upstream.setblocking(False)
 local.setblocking(False)
 
-print(f"bridge up: game(127.0.0.1:{BRIDGE_LOCAL_PORT}) <-> {server_ip}:{server_port}")
-print("closes itself when you leave the session; Ctrl+C to stop early")
+say(f"bridge up: game(127.0.0.1:{BRIDGE_LOCAL_PORT}) <-> {server_ip}:{server_port}")
+say("closes itself when you leave the session; Ctrl+C to stop early")
 
 # auto-close: the bridge is only useful while the game is in a session. When
 # the game announces it is leaving (a relayed {"t":"leave"}), exit a moment
@@ -122,10 +158,15 @@ while True:
                     pass
                 if kind == QUIT_TOKEN:
                     # a newer bridge wants this port; it may be aimed at a
-                    # different server, and it is the one the game will use
-                    print("a newer bridge is taking over this port — closing")
+                    # different server, and it is the one the game will use.
+                    # Not into the log: the log is the newer bridge's now.
+                    _log = None
+                    say("a newer bridge is taking over this port — closing")
                     local.close()
                     sys.exit(0)
+                if not seen_game_traffic:
+                    say(f"the game reached the bridge; waiting for the server at "
+                        f"{server_ip}:{server_port}")
                 seen_game_traffic = True
                 last_game_traffic = time.monotonic()
                 if kind == "leave":
@@ -134,22 +175,24 @@ while True:
                     upstream.sendto(data, server_addr)
                     sent += 1
                 except OSError as exc:
-                    print(f"  cannot reach {server_addr[0]}: {exc}")
-                    print("  (wrong address, or this PC has no route to it — "
+                    say(f"  cannot reach {server_addr[0]}: {exc}")
+                    say("  (wrong address, or this PC has no route to it — "
                           "for IPv6 targets this PC needs IPv6 internet)")
             elif src[0] == server_addr[0]:  # only the server talks to this socket
+                if received == 0:
+                    say(f"the server answered; passing it to the game on 127.0.0.1:{GAME_LISTEN_PORT}")
                 local.sendto(data, ("127.0.0.1", GAME_LISTEN_PORT))
                 received += 1
     now = time.monotonic()
     if close_at is not None and now >= close_at:
-        print("game left the session — bridge closing")
+        say("game left the session — bridge closing")
         break
     if seen_game_traffic and now - last_game_traffic > GAME_IDLE_TIMEOUT_S:
-        print(f"no traffic from the game for {GAME_IDLE_TIMEOUT_S:.0f}s — bridge closing")
+        say(f"no traffic from the game for {GAME_IDLE_TIMEOUT_S:.0f}s — bridge closing")
         break
     if not seen_game_traffic and now - started_at > STARTUP_TIMEOUT_S:
-        print("the game never connected — bridge closing")
+        say("the game never connected — bridge closing")
         break
     if now - last_report > 30 and (sent or received):
-        print(f"  relaying: {sent} out / {received} in")
+        say(f"  relaying: {sent} out / {received} in")
         last_report = now

@@ -119,6 +119,12 @@ mod finds `C:\Python313\python.exe` there.
 The helpers run under Proton like the game, so after you quit, Steam can show
 Spelunky 2 as running for up to a minute while the bridge closes itself.
 
+If joining or hosting says **Could not reach the server**, the rest of the message
+says how far the bridge got, from its log, `server/client_bridge.log` in this pack
+(dev81 on): it did not start, the game's messages never reached it, the server did not
+answer, or the server's reply never reached the game. Send that file along with the
+report.
+
 ## Testing on your own (TEST PLAYERS)
 
 Set **TEST PLAYERS** (Modded Online menu → SETTINGS) to 1, 2 or 3 and every room you
