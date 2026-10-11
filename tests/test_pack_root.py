@@ -128,3 +128,38 @@ def test_a_missing_server_script_is_named_instead_of_launched(net):
     assert net.eval("Network.launchLocalServer")() is False
     assert not any(c.startswith("start ") for c in detect.ran(net))
     assert "server/server.py" in str(net.eval("Network.lastError"))
+
+
+def test_settings_survive_the_pack_folder_being_replaced(tmp_path, monkeypatch):
+    """A fresh download unpacked over the old folder takes config.json with it."""
+    def boot():
+        rt = lupa.LuaRuntime(unpack_returned_tuples=True)
+        rt.execute(detect.ENV)
+        rt.execute((PACK / "src" / "json.lua").read_text(encoding="utf-8"))
+        rt.execute((PACK / "src" / "netCore.lua").read_text(encoding="utf-8"))
+        return rt
+    monkeypatch.chdir(tmp_path)
+    pack = tmp_path / "Mods" / "Packs" / "fyi.modded-online"
+    pack.mkdir(parents=True)
+    (tmp_path / "Mods" / "Packs" / "load_order.txt").write_text("fyi.modded-online\n", encoding="utf-8")
+    rt = boot()
+    rt.execute("Network.config.firstRunDone = true; Network.config.playerName = 'Ana'; Network.saveConfig()")
+    assert (pack / "config.json").exists() and (tmp_path / "modded_online_settings.json").exists()
+    (pack / "config.json").unlink()  # the new build's folder has none
+    rt = boot()
+    assert rt.eval("Network.config.firstRunDone") is True
+    assert rt.eval("Network.config.playerName") == "Ana"
+
+
+def test_the_packs_own_settings_win_over_the_copy(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    pack = tmp_path / "Mods" / "Packs" / "fyi.modded-online"
+    pack.mkdir(parents=True)
+    (tmp_path / "Mods" / "Packs" / "load_order.txt").write_text("fyi.modded-online\n", encoding="utf-8")
+    (pack / "config.json").write_text('{"playerName":"Pack"}', encoding="utf-8")
+    (tmp_path / "modded_online_settings.json").write_text('{"playerName":"Copy"}', encoding="utf-8")
+    rt = lupa.LuaRuntime(unpack_returned_tuples=True)
+    rt.execute(detect.ENV)
+    rt.execute((PACK / "src" / "json.lua").read_text(encoding="utf-8"))
+    rt.execute((PACK / "src" / "netCore.lua").read_text(encoding="utf-8"))
+    assert rt.eval("Network.config.playerName") == "Pack"

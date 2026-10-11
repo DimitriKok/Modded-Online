@@ -6,7 +6,7 @@ them.
 
 ## Start here
 
-**Build: `2.0.0-dev55` → `dev82`. The server must be redeployed at `1.0.13`.**
+**Build: `2.0.0-dev55` → `dev83`. The server must be redeployed at `1.0.13`.**
 Section 3's fix is half a server fix and does nothing without it (1.0.11 or later).
 Section 6 has a server half too, but its client half works on its own. A client on a
 server other than the one it expects says so in a toast and in the log. Check with
@@ -36,7 +36,7 @@ server other than the one it expects says so in a toast and in the log. Check wi
 | 20 | The host crashed leaving the summit's 2-2 (room UVLQ), and a Lua error a couple of floors earlier left nothing in either log | **NOT FIXED: cause not known.** The crash was in 2-2's teardown, after 2.5's PRE_LEVEL_DESTRUCTION wrapper (`helpers2.lua:533`) returned. dev79 stops the leak sweep destroying the ~360 entities 2.5 parks on those floors (the one thing hosting did there that solo 2.5 does not), and makes the next crash and the next error name themselves — section 20 |
 | 21 | On Linux (Proton) the mod said "Python is not installed" with Python installed; with that fixed, every connection said "Could not reach the server" | Python: **FIXED** in dev80, confirmed in game (the error went). The connection: dev81 makes the bridge survive a dead console (it died at its first print under Wine when its console had no window, reproduced with Wine 9) and the menu say how far the bridge got; not yet tried in game. The game is a Windows program under Proton and needs the Windows Python inside its prefix; on Proton 9 and older Wine's `where` is a stub, so the mod now also looks where a Windows install puts Python — section 21 |
 
-**Git state:** the work is on `main`; dev77 to dev82 were pushed to
+**Git state:** the work is on `main`; dev77 to dev83 were pushed to
 `claude/vigilant-cori-chwlul` for review. `git log --oneline origin/main..HEAD` shows
 what a branch adds.
 
@@ -1228,6 +1228,20 @@ folder under Mods/Packs (load order, `.db`, asset links). Not confirmed to be th
 tester's install shape: if it was something else, `saveConfig` and `helperPresent` now
 say which path failed.
 
+**dev83:** dev82 still "the bridge did not start", with `helperPresent` passing (so the
+script path is right; the tester's load_order line differs in case from the folder,
+which Wine resolves). No bridge log means Python stopped before the script. Under Wine
+`detectPython` now checks each candidate with `"<cmd> -V 2>&1"` through `io.popen`
+(the outer quotes are for cmd /c; the form was checked through ucrtbase `_popen` under
+Wine 9) and takes the first that answers `Python N`; `helperCommand` runs helpers as
+`start "<title>" /min cmd /c ""<py>" "<script>" <args> > "<out>" 2>&1"` (checked through
+ucrtbase `system()` under Wine 9, including a failing case, whose error landed in the
+.out); `bridgeReport` falls back to the .out's last line. `modded_online_connect.log`
+(game folder) records it all. The first-run popups "always" coming back were most
+likely each new build's folder replacing the old one's config.json:
+`modded_online_settings.json` in the game folder is now a copy read when the pack has
+none.
+
 ## Diagnostic tooling (flags and the files they write)
 
 All flag files live in the pack folder. They are files, not settings, for the reason
@@ -1308,7 +1322,7 @@ On a machine whose Python has no pytest or lupa, uv supplies both for the run:
 uv run --no-project --with pytest --with lupa python -m pytest tests/ -q
 ```
 
-1115 passing, none failing, 1 skipped (it needs hdmod next to this pack) (dev82), under Lua 5.4 and 5.5. The 16 long-standing failures went in dev67, with the two
+1125 passing, none failing, 1 skipped (it needs hdmod next to this pack) (dev83), under Lua 5.4 and 5.5. The 16 long-standing failures went in dev67, with the two
 stale test files they came from: `tests/test_world_mailbox.py` (the world mailbox
 deleted in dev44) and `tests/test_seeded_run.py` (the seeded-run flag removed in
 dev46). A failure here now means something broke.

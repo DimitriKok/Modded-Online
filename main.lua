@@ -13,7 +13,7 @@
 
 meta = {
     name = "Modded Online (loader build)",
-    version = "2.0.0-dev82",
+    version = "2.0.0-dev83",
     description = "Play scriptable mods together via a self-hosted server",
     author = "EatYoCake + DoctorPuppy",
     online_safe = false, -- not for the *official* online — that's the point
@@ -167,6 +167,11 @@ end
 
 bootStep("require src.util")
 require("src.util")
+-- where every path of ours points: the first thing to check when settings do not
+-- stick or a helper does not start (dev83)
+pcall(function()
+    bootStep("pack folder: " .. PackRootPath())
+end)
 
 local MODULES = {
     -- FIRST, and it has to stay first: it replaces the global `set_callback` so that

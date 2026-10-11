@@ -41,9 +41,16 @@ function PackRootPath() return "Mods/Packs/fyi.modded-online" end
 MACHINE = """
 local realOpen = io.open
 whereSays, files, envVars, probed = {}, {}, {}, {}
+versionSays, asked = {}, {}
 io.popen = function(command)
-    local cmd = command:match("^where (%S+)")
-    local out = whereSays[cmd] or {}
+    local out
+    local version = command:match('^"(.+) %-V 2>&1"$')
+    if version ~= nil then
+        asked[#asked + 1] = version
+        out = versionSays[version] or { "Python 3.13.16" }
+    else
+        out = whereSays[command:match("^where (%S+)")] or {}
+    end
     local i = 0
     return {
         lines = function() return function() i = i + 1; return out[i] end end,
@@ -197,6 +204,43 @@ def test_proton_with_no_windows_python_says_what_to_install_and_where(machine):
     assert "Proton" in str(rt.eval("Network.lastError"))
 
 
+def test_proton_skips_a_launcher_that_does_not_run(machine):
+    """dev82's report: Python there, the bridge script there, and the bridge never ran."""
+    rt = with_log(machine(PROTON, present=[
+        "C:\\windows\\py.exe",
+        "C:\\users\\steamuser\\AppData\\Local\\Programs\\Python\\Python313\\python.exe"]))
+    rt.eval("function(c, l) versionSays[c] = { l } end")('"C:\\windows\\py.exe"', "No suitable Python runtime found")
+    assert require(rt) == '"C:\\users\\steamuser\\AppData\\Local\\Programs\\Python\\Python313\\python.exe"'
+    assert said(rt) == []
+    assert 'did not run: "C:\\windows\\py.exe" said No suitable Python runtime found' in logged(rt)[0]
+
+
+def test_proton_with_only_a_broken_python_says_what_it_said(machine):
+    rt = machine(PROTON, present=["C:\\windows\\py.exe"])
+    rt.eval("function(c, l) versionSays[c] = { l } end")('"C:\\windows\\py.exe"', "No suitable Python runtime found")
+    assert require(rt) is None
+    assert len(said(rt)) == 1
+    assert "in Spelunky 2's Proton prefix, but it does not run" in said(rt)[0]
+    assert "No suitable Python runtime found" in said(rt)[0]
+    assert "does not run" in str(rt.eval("Network.lastError"))
+
+
+def test_proton_10_checks_a_name_where_found_too(machine):
+    rt = machine(PROTON, where={"py": ["C:\\windows\\py.exe"], "python": ["C:\\x\\python.exe"]})
+    rt.eval("function(c, l) versionSays[c] = { l } end")("py", "Unable to create process")
+    assert require(rt) == "python"
+
+
+def test_windows_never_runs_anything_to_look(machine):
+    """A Store placeholder opens the Microsoft Store when it is run."""
+    rt = machine(WINDOWS, where={"py": ["C:\\Windows\\py.exe"]},
+                 present=["C:\\Program Files\\Python313\\python.exe"])
+    require(rt)
+    rt2 = machine(WINDOWS)
+    require(rt2)
+    assert list(rt.eval("asked").values()) == [] and list(rt2.eval("asked").values()) == []
+
+
 def test_windows_is_not_taken_for_wine(machine):
     rt = machine(WINDOWS)
     assert rt.eval("Network.underWine()") is False
@@ -220,7 +264,7 @@ def test_the_log_says_which_python_and_how_it_was_found(machine):
     rt = with_log(machine(PROTON, present=["C:\\windows\\py.exe"]))
     require(rt)
     assert logged(rt) == [
-        'python: "C:\\windows\\py.exe" (found where it was installed; where found none)'
+        'python: "C:\\windows\\py.exe" (found where it was installed, Python 3.13.16)'
         " | under Wine (Proton)"]
 
 

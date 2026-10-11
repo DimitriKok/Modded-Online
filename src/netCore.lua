@@ -101,6 +101,38 @@ local module = {
 }
 
 local CONFIG_PATH = PackPath("config.json")
+-- A copy in the game folder, for when the pack's own is gone. Installing a new build
+-- by replacing the pack folder (unpacking a fresh download) takes config.json with
+-- it, and with it every setting and the answers to the first-run popups, which then
+-- come back on the first launch of every build (dev83).
+local SETTINGS_COPY = "modded_online_settings.json"
+
+-- A plain file in the game folder, next to modded_online_boot.log, saying what the
+-- connection machinery did: which Python, the exact helper command, how far the
+-- bridge got. The desync log opens only once a run starts, and errorf reaches the
+-- screen only with ENABLE DEBUG MESSAGES on, so a connection that never came up
+-- left a Linux tester nothing to send (dev83). Truncated by the first note of a
+-- session; bounded.
+local CONNECT_LOG = "modded_online_connect.log"
+local connectNotes = 0
+
+--- @param fmt string
+local function connectNote(fmt, ...)
+    if connectNotes >= 200 then
+        return
+    end
+    connectNotes = connectNotes + 1
+    local okText, text = pcall(string.format, fmt, ...)
+    pcall(function()
+        local f = io.open(CONNECT_LOG, connectNotes == 1 and "w" or "a")
+        if f ~= nil then
+            f:write("[" .. os.date("%H:%M:%S") .. "] " .. (okText and text or tostring(fmt)) .. "\n")
+            f:close()
+        end
+    end)
+end
+module.connectNote = connectNote
+
 local LOAD_ORDER_PATH = "Mods/Packs/load_order.txt"
 local SERVER_SCRIPT = PackPathWin("server/server.py")
 local HELLO_RETRY_MS = 1000   -- resend create/join while connecting
@@ -747,7 +779,7 @@ end
 
 function module.loadConfig()
     local ok, content = pcall(function()
-        local f = io.open(CONFIG_PATH, "r")
+        local f = io.open(CONFIG_PATH, "r") or io.open(SETTINGS_COPY, "r")
         if f == nil then
             return nil
         end
@@ -783,8 +815,16 @@ function module.saveConfig()
         if f == nil then
             error(tostring(openErr), 0)
         end
-        f:write(NetJson.encode(module.config))
+        local body = NetJson.encode(module.config)
+        f:write(body)
         f:close()
+        pcall(function()
+            local copy = io.open(SETTINGS_COPY, "w")
+            if copy ~= nil then
+                copy:write(body)
+                copy:close()
+            end
+        end)
     end)
     if not ok then
         dbg("could not persist config")
@@ -793,6 +833,8 @@ function module.saveConfig()
         -- only trace of it was a debug line.
         if not configSaveSaid then
             configSaveSaid = true
+            connectNote("could not save settings to %s: %s", CONFIG_PATH, tostring(err))
+            pcall(toast, "Modded Online could not save its settings — see modded_online_connect.log")
             errorf("could not save Modded Online's settings to %s (%s) -- they, and the"
                 .. " answers to the first-run popups, will be gone next launch",
                 CONFIG_PATH, tostring(err))
@@ -1109,8 +1151,9 @@ module.underWine = underWine
 -- Each place is checked with io.open: nothing is run.
 local PYTHON_MINORS = { 15, 14, 13, 12, 11, 10, 9, 8 }
 
---- @return string? # the full path of an interpreter or of the `py` launcher
-local function pythonOnDisk()
+--- @param all boolean? # every one found, in order, rather than the first
+--- @return string|string[]|nil # the full path of an interpreter or of the `py` launcher
+local function pythonOnDisk(all)
     local places = {}
     local function add(dir, file)
         if type(dir) == "string" and dir ~= "" then
@@ -1131,14 +1174,56 @@ local function pythonOnDisk()
         -- the Python install manager's own runtimes (3.14 on)
         add(localAppData, "Python\\pythoncore-3." .. minor .. "-64\\python.exe")
     end
+    local found = {}
     for _, path in ipairs(places) do
         local handle = io.open(path, "rb")
         if handle ~= nil then
             handle:close()
-            return path
+            if not all then
+                return path
+            end
+            found[#found + 1] = path
         end
     end
+    if all then
+        return found
+    end
     return nil
+end
+
+-- Under Wine, an interpreter that is THERE is not yet one that RUNS.
+--
+-- dev82's Linux report: Python found, the bridge script found, and still "the bridge
+-- did not start" -- no bridge log at all, so Python never got as far as the script.
+-- A launcher or an install that cannot start under Wine looks exactly like that, and
+-- whatever it printed died with its window. So under Wine each candidate is asked
+-- for its version first (`-V`), and the first that answers is used; what the others
+-- said is kept for the message. Not on Windows: there `python.exe` can be the
+-- Microsoft Store placeholder, and running that opens the Store (see detectPython).
+local pythonRejected = {}
+
+--- @param cmd string # a bare name, or a quoted path
+--- @return boolean ok, string said
+local function pythonAnswers(cmd)
+    local said = nil
+    local ok = pcall(function()
+        -- the extra pair of quotes is for cmd /c, which strips the outermost two
+        local pipe = io.popen(string.format('"%s -V 2>&1"', cmd))
+        if pipe == nil then
+            return
+        end
+        for line in pipe:lines() do
+            local text = line:gsub("^%s+", ""):gsub("%s+$", "")
+            if text ~= "" and said == nil then
+                said = text
+            end
+        end
+        pipe:close()
+    end)
+    if ok and said ~= nil and said:find("^Python %d") ~= nil then
+        return true, said
+    end
+    return false, said or "(nothing)"
 end
 
 --- Detect a usable interpreter ONCE, and remember it.
@@ -1154,6 +1239,8 @@ local function detectPython()
         return pythonCmd
     end
     pythonChecked = true
+    local wine = underWine()
+    local named = {}
     for _, cmd in ipairs(PYTHON_CANDIDATES) do
         pcall(function()
             local pipe = io.popen(string.format("where %s 2>nul", cmd))
@@ -1163,7 +1250,11 @@ local function detectPython()
             for line in pipe:lines() do
                 local path = line:gsub("^%s+", ""):gsub("%s+$", "")
                 if path ~= "" and path:lower():find("windowsapps", 1, true) == nil then
-                    pythonCmd = cmd
+                    if wine then
+                        named[#named + 1] = cmd
+                    else
+                        pythonCmd = cmd
+                    end
                     break
                 end
             end
@@ -1174,7 +1265,29 @@ local function detectPython()
         end
     end
     local how = "by where"
-    if pythonCmd == nil then
+    if wine then
+        -- every candidate, by name and then by place, until one answers
+        local candidates = {}
+        for _, cmd in ipairs(named) do
+            candidates[#candidates + 1] = { cmd = cmd, how = "by where" }
+        end
+        local paths = {}
+        pcall(function()
+            paths = pythonOnDisk(true)
+        end)
+        for _, path in ipairs(paths) do
+            candidates[#candidates + 1] = { cmd = '"' .. path .. '"',
+                how = "where it was installed" }
+        end
+        for _, c in ipairs(candidates) do
+            local answers, said = pythonAnswers(c.cmd)
+            if answers then
+                pythonCmd, how = c.cmd, c.how .. ", " .. said
+                break
+            end
+            pythonRejected[#pythonRejected + 1] = string.format("%s said %s", c.cmd, said)
+        end
+    elseif pythonCmd == nil then
         local path = nil
         pcall(function()
             path = pythonOnDisk()
@@ -1188,13 +1301,18 @@ local function detectPython()
     if pythonCmd ~= nil then
         dbgf("using '%s' to run the helper scripts", pythonCmd)
     end
+    connectNote("python: %s%s%s", pythonCmd ~= nil
+        and string.format("%s (found %s)", pythonCmd, how) or "none found",
+        wine and " | under Wine (Proton)" or "",
+        #pythonRejected > 0 and (" | did not run: " .. table.concat(pythonRejected, "; ")) or "")
     -- In the log too, held until a run opens it: a Linux capture has to say which
     -- Python the helpers ran on, or that there was none.
     local log = rawget(_G, "DesyncLog")
     if log ~= nil and type(log.earlyEvent) == "function" then
-        pcall(log.earlyEvent, "python: %s%s", pythonCmd ~= nil
+        pcall(log.earlyEvent, "python: %s%s%s", pythonCmd ~= nil
             and string.format("%s (found %s)", pythonCmd, how) or "none found",
-            underWine() and " | under Wine (Proton)" or "")
+            wine and " | under Wine (Proton)" or "",
+            #pythonRejected > 0 and (" | did not run: " .. table.concat(pythonRejected, "; ")) or "")
     end
     return pythonCmd
 end
@@ -1218,7 +1336,15 @@ function module.requirePython(what)
     end
     if not pythonNoticeShown then
         pythonNoticeShown = true
-        if wine then
+        if wine and #pythonRejected > 0 then
+            -- There, and broken: the message is what it said, not "install it".
+            module.lastError = "Python is in the Proton prefix but does not run — see the log"
+            errorf("Python for Windows is in Spelunky 2's Proton prefix, but it does not run,"
+                .. " so %s cannot start: %s. Reinstall it into the prefix (README.md,"
+                .. " \"Playing on Linux\"), or unpack the embeddable package to"
+                .. " drive_c/Python313.", what, table.concat(pythonRejected, "; "))
+            pcall(toast, "Python is in the Proton prefix but does not run — see the log")
+        elseif wine then
             -- The game is a Windows program here, and it looks for a Windows Python
             -- in its own Proton prefix: the Linux one is out of its sight.
             errorf("Python for Windows is not installed in Spelunky 2's Proton prefix, so "
@@ -1251,6 +1377,25 @@ local launchedBridge = false
 -- prefix had to go on -- and under Wine a bridge with no console window used to
 -- die at its first print, a moment after it started.
 local BRIDGE_LOG = PackPath("server/client_bridge.log")
+-- ...and, under Wine, everything it printed, Python's own complaints included
+-- (helperCommand): what is left to read when the log never appeared.
+local BRIDGE_OUT = PackPath("server/client_bridge.out")
+
+--- The last non-blank line of a file, or nil.
+--- @param path string
+--- @return string?
+local function lastLineOf(path)
+    local last = nil
+    pcall(function()
+        for raw in io.lines(path) do
+            local line = raw:gsub("^%s+", ""):gsub("%s+$", "")
+            if line ~= "" then
+                last = line
+            end
+        end
+    end)
+    return last
+end
 
 --- Why a connection through the bridge never came up, as far as its log can say.
 --- @return string short # for the menu
@@ -1275,6 +1420,11 @@ local function bridgeReport()
         end
     end)
     if not readOk or last == nil then
+        local printed = lastLineOf(BRIDGE_OUT)
+        if printed ~= nil then
+            return "the bridge did not start (" .. printed:sub(1, 60) .. ")",
+                "there is no server/client_bridge.log; Python said: " .. printed
+        end
         return "the bridge did not start",
             "there is no server/client_bridge.log, so Python never ran the bridge"
     end
@@ -1308,6 +1458,28 @@ module.MAX_TEST_PLAYERS = MAX_TEST_PLAYERS
 -- (194 is the usual host pick, so the stand-ins start above it)
 local TEST_PLAYER_CHARS = { 195, 196, 197 }
 
+--- The `start` command for a helper. On Windows it is what it always was. Under
+--- Wine the helper runs inside `cmd /c` with its output sent to a file next to the
+--- script (`server/<name>.out`): whatever Python or its launcher says before the
+--- script's own log exists -- a missing runtime, a script it cannot open -- used to
+--- die with a window, if there was a window at all. The doubled quotes are for the
+--- inner cmd /c, which strips the outermost pair; checked under Wine 9 with a game
+--- folder holding a space and a pack name in a different case from the folder's.
+--- @param title string
+--- @param py string # a bare name, or a quoted path
+--- @param script string # PackPathWin form
+--- @param args string # already quoted as needed
+--- @param outRel string # e.g. "server/client_bridge.out"
+--- @return string
+local function helperCommand(title, py, script, args, outRel)
+    if not underWine() then
+        return string.format('start "%s" /min %s "%s" %s', title, py, script, args)
+    end
+    local quoted = py:sub(1, 1) == '"' and py or ('"' .. py .. '"')
+    return string.format('start "%s" /min cmd /c "%s "%s" %s > "%s" 2>&1"',
+        title, quoted, script, args, PackPathWin(outRel))
+end
+
 --- Is one of our helper scripts where we are about to tell Python it is?
 ---
 --- `start` succeeds whether or not the script exists, and Python's complaint dies
@@ -1323,6 +1495,7 @@ local function helperPresent(rel, what)
         return true
     end
     module.lastError = "The " .. what .. " script is missing: " .. path
+    connectNote("cannot start the %s: %s is not there (pack folder %s)", what, path, PackRootPath())
     errorf("cannot start %s: %s is not there. Modded Online's files are expected in %s"
         .. " -- is the pack unpacked into Mods/Packs as one folder?", what, path, PackRootPath())
     return false
@@ -1349,8 +1522,11 @@ function module.launchLocalServer()
         -- shipped one. Matches by our own window title, so a `--dedicated` server
         -- someone started by hand in their own console is untouched.
         os.execute('taskkill /F /FI "WINDOWTITLE eq Modded Online Server*" >nul 2>&1')
-        os.execute(string.format('start "Modded Online Server" /min %s "%s" --verbose',
-            py, SERVER_SCRIPT))
+        pcall(os.remove, PackPath("server/server.out"))
+        local command = helperCommand("Modded Online Server", py, SERVER_SCRIPT, "--verbose",
+            "server/server.out")
+        connectNote("starting the server: %s", command)
+        os.execute(command)
     end)
     if ok then
         launchedServer = true
@@ -1378,8 +1554,11 @@ function module.launchBridge(host, port)
         -- never got as far as writing one (see bridgeReport)
         pcall(os.remove, BRIDGE_LOG)
         os.execute('taskkill /F /FI "WINDOWTITLE eq Modded Online Bridge*" >nul 2>&1')
-        os.execute(string.format('start "Modded Online Bridge" /min %s "%s" "%s" %d',
-            py, BRIDGE_SCRIPT, host, port))
+        pcall(os.remove, BRIDGE_OUT)
+        local command = helperCommand("Modded Online Bridge", py, BRIDGE_SCRIPT,
+            string.format('"%s" %d', host, port), "server/client_bridge.out")
+        connectNote("starting the bridge: %s", command)
+        os.execute(command)
     end)
     if ok then
         launchedBridge = true
@@ -2049,6 +2228,7 @@ local function tick()
             if launchedBridge then
                 local short, detail = bridgeReport()
                 module.lastError = "Could not reach the server: " .. short
+                connectNote("could not reach the server: %s -- %s", short, detail)
                 errorf("could not reach the server through the bridge: %s -- %s",
                     short, detail)
             end
@@ -2191,6 +2371,17 @@ set_callback(function()
 end, ON.PRE_UPDATE)
 
 module.loadConfig()
+-- the paths everything above depends on, said once at load
+pcall(function()
+    local here = io.open(CONFIG_PATH, "r")
+    local state = here ~= nil and "present" or "not there yet"
+    if here ~= nil then
+        here:close()
+    end
+    connectNote("Modded Online %s | pack folder %s | settings %s (%s) | first-run popups %s",
+        tostring(meta and meta.version), PackRootPath(), CONFIG_PATH, state,
+        module.config.firstRunDone == true and "answered" or "still to come")
+end)
 
 Network = module
 return module

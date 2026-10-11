@@ -128,7 +128,9 @@ If joining or hosting says **Could not reach the server**, the rest of the messa
 says how far the bridge got, from its log, `server/client_bridge.log` in this pack
 (dev81 on): it did not start, the game's messages never reached it, the server did not
 answer, or the server's reply never reached the game. Send that file along with the
-report.
+report, and `modded_online_connect.log` from the Spelunky 2 folder (dev83 on), which
+says which Python was used, the exact command each helper was started with, and
+whatever Python printed (`server/client_bridge.out`).
 
 ## Testing on your own (TEST PLAYERS)
 

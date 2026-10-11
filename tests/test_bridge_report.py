@@ -186,3 +186,55 @@ def test_the_bridge_relays_with_its_console_gone(tmp_path):
         proc.wait()
         server.close()
         game_in.close()
+
+
+# ------------------------------------------------- under Wine: what Python said
+
+def wine_game(game):
+    rt, log = game
+    for key, value in detect.PROTON.items():
+        rt.eval("function(k, v) envVars[k] = v end")(key, value)
+    return rt, log
+
+
+def test_under_wine_the_bridge_runs_with_its_output_kept(game):
+    """Checked under Wine 9 with a game folder holding a space: the inner cmd /c strips
+    the outer pair of quotes, and the redirect reaches the helper, not `start`."""
+    rt, _ = wine_game(game)
+    assert rt.eval("Network.launchBridge")("203.0.113.7", 26000) is True
+    launch = [c for c in detect.ran(rt) if c.startswith("start ")]
+    assert launch == [
+        'start "Modded Online Bridge" /min cmd /c ""C:\\windows\\py.exe" '
+        '"Mods\\Packs\\fyi.modded-online\\server\\client_bridge.py" "203.0.113.7" 26000 > '
+        '"Mods\\Packs\\fyi.modded-online\\server\\client_bridge.out" 2>&1"'], launch
+
+
+def test_on_windows_the_launch_is_what_it_always_was(game):
+    rt, _ = game
+    assert rt.eval("Network.launchBridge")("203.0.113.7", 26000) is True
+    launch = [c for c in detect.ran(rt) if c.startswith("start ")]
+    assert launch == ['start "Modded Online Bridge" /min "C:\\windows\\py.exe" '
+                      '"Mods\\Packs\\fyi.modded-online\\server\\client_bridge.py" "203.0.113.7" 26000']
+
+
+def test_when_there_is_no_log_what_python_printed_is_the_reason(game):
+    rt, log = game
+    out = log.with_name("client_bridge.out")
+    out.write_text("C:\\Python313\\python.exe: can't open file 'x.py': [Errno 2] No such file\n",
+                   encoding="utf-8")
+    short, detail = report(rt)
+    assert short.startswith("the bridge did not start (C:\\Python313\\python.exe: can't open file")
+    assert "Python said: C:\\Python313\\python.exe: can't open file 'x.py'" in detail
+
+
+def test_the_connection_log_says_what_was_tried(game, tmp_path):
+    rt, log = game
+    rt.execute("Network.joinOfficial('ABCD')")
+    write(log, UP, CLOSES, HEARD)
+    rt.execute("now = 13000")
+    rt.execute("for _, c in ipairs(callbacks) do if c.event == ON.GUIFRAME then c.fn() end end")
+    text = (tmp_path / "modded_online_connect.log").read_text(encoding="utf-8")
+    assert "pack folder" in text and "first-run popups still to come" in text
+    assert 'python: "C:\\windows\\py.exe"' in text
+    assert 'starting the bridge: start "Modded Online Bridge"' in text
+    assert "could not reach the server: the server did not answer" in text

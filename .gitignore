@@ -49,3 +49,4 @@
 
 __pycache__/
 *.pyc
+/modded_online_settings.json

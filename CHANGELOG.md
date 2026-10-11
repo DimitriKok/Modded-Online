@@ -1,5 +1,58 @@
 # Changelog
 
+## 2.0.0-dev83
+
+On Linux, dev82 still said "Could not reach the server: the bridge did not start". No
+server change: the server stays at **1.0.13**. Both players need dev83 (the lobby only
+lets the same version play together).
+
+### What the report narrows it to
+
+dev82 checks that the bridge script is there before it launches it, and that check
+passed, so the path is right. Python was found. Yet the bridge never wrote its log,
+which it opens in its first lines: whatever Python was started with stopped before it
+reached the script. A `py` launcher or a Python install that cannot start under Wine
+does exactly that, and what it printed went to a console window, if there was one.
+(Checked under Wine 9 here with the same game folder name, space included, and a pack
+name in a different case from the folder's: with a working Python the bridge starts
+and relays, so the path and the launch line are not it.)
+
+### Fixed
+
+- **Under Wine, a Python must answer before it is used.** Each candidate (each name
+  `where` finds, then each install on disk, the launcher first) is asked for its
+  version, and the first that answers `Python 3...` runs the helpers. One that does
+  not is passed over, and what it said is kept: if none answers, the message is
+  `Python for Windows is in Spelunky 2's Proton prefix, but it does not run ... "<py>"
+  said <its words>`. Nothing is run to look on Windows, where `python.exe` can be the
+  Microsoft Store's placeholder.
+- **Under Wine, the helpers' own output is kept**, in `server/client_bridge.out` and
+  `server/server.out`: the bridge runs inside `cmd /c` with its output sent there. When
+  the bridge's log never appears, the menu's reason is the last thing Python printed:
+  `Could not reach the server: the bridge did not start (<what Python said>)`. On
+  Windows the launch is what it always was.
+- **`modded_online_connect.log`, in the Spelunky 2 folder**, says what the connection
+  machinery did: the pack folder and whether the settings file is there and the
+  first-run popups answered, which Python was chosen and how (and which did not run),
+  the exact command each helper was started with, and how far the bridge got when a
+  connection failed. It is written whether or not a run ever starts, so there is always
+  something to send. `modded_online_boot.log` names the pack folder too.
+- **Settings survive reinstalling.** A copy is kept as `modded_online_settings.json` in
+  the Spelunky 2 folder, read when the pack has no `config.json` of its own. Unpacking a
+  new build over the old folder took the settings, and the answers to the first-run
+  popups, with it, so the popups came back on the first launch of every build. A
+  failed save is a toast now, as well as a line in the connection log.
+
+### Tests
+
+Added to `tests/test_python_detect.py` (a launcher that does not run passed over for an
+interpreter that does, only broken ones named with what they said, a name `where` found
+checked too, nothing run on Windows), `tests/test_bridge_report.py` (the Wine launch
+line, the Windows one unchanged, Python's words when there is no log, the connection
+log's lines) and `tests/test_pack_root.py` (settings kept through a reinstall, the
+pack's own winning over the copy). 1125 passing, 1 skipped, under Lua 5.4 and 5.5; the
+server suite passes unchanged.
+
 ## 2.0.0-dev82
 
 On Linux: "the bridge did not start", and the first-run popups on every launch. No
