@@ -40,6 +40,8 @@ ANSWERED = "the server answered; passing it to the game on 127.0.0.1:26010"
 def game(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     (tmp_path / "Mods" / "Packs" / "fyi.modded-online" / "server").mkdir(parents=True)
+    (tmp_path / "Mods" / "Packs" / "fyi.modded-online" / "server" / "client_bridge.py").write_text(
+        "# stand-in\n", encoding="utf-8")
     (tmp_path / "Mods" / "Packs" / "load_order.txt").write_text("fyi.modded-online\n", encoding="utf-8")
     rt = lupa.LuaRuntime(unpack_returned_tuples=True)
     rt.execute(detect.ENV)

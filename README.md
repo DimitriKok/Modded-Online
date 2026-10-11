@@ -107,6 +107,11 @@ installing it does nothing for the mod.
    PATH**, and choose **Install Now**.
 6. Start the game and use MODDED ONLINE as on Windows.
 
+Install the pack as one folder: `Mods/Packs/<folder>/main.lua`, not a folder inside a
+folder. Unpacking a download straight into Mods/Packs can leave it one level deeper.
+dev82 copes with that, but older builds lost their settings (the first-run popups on
+every launch) and could not start the bridge.
+
 Before dev80 the mod found Python only through Windows' `where` command, which Wine
 implements from 10.0 on: with Proton 9 or older, Python installed this way still read
 as missing. dev80 also looks where the installer puts it, so any Proton version works.

@@ -34,6 +34,7 @@ function toast(text) toasts[#toasts + 1] = text end
 function PackDir() return "fyi.modded-online" end
 function PackPath(rest) return "Mods/Packs/fyi.modded-online/" .. rest end
 function PackPathWin(rest) return (PackPath(rest):gsub("/", "\\\\")) end
+function PackRootPath() return "Mods/Packs/fyi.modded-online" end
 """
 
 # The machine: what `where <cmd>` prints, which files exist, and the environment.
@@ -82,6 +83,10 @@ def machine(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     (tmp_path / "Mods" / "Packs").mkdir(parents=True)
     (tmp_path / "Mods" / "Packs" / "load_order.txt").write_text("fyi.modded-online\n", encoding="utf-8")
+    helpers = tmp_path / "Mods" / "Packs" / "fyi.modded-online" / "server"
+    helpers.mkdir(parents=True)
+    for script in ("client_bridge.py", "server.py", "fake_player.py"):
+        (helpers / script).write_text("# stand-in\n", encoding="utf-8")
     rt = lupa.LuaRuntime(unpack_returned_tuples=True)
     rt.execute(ENV)
     rt.execute((PACK / "src" / "json.lua").read_text(encoding="utf-8"))

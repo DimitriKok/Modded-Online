@@ -169,11 +169,63 @@ local PACK_FINGERPRINT = "/src/modHost.lua" -- a file no other pack has
 -- up writing into that mod's directory.
 local FALLBACK_PACK_DIR = "fyi.modded-online-loader"
 local packDir = nil
+-- Where our files really are, relative to the game: "Mods/Packs/<pack>" normally.
+local packRoot = nil
+
+-- Where THIS file was loaded from, as the engine named it when `require` read it:
+-- "@Mods/Packs/<pack>/src/util.lua". Read once, here, at load.
+--
+-- The load-order search below was the only way the pack was found until dev82, and
+-- it only finds a pack whose main.lua sits directly in its folder. Unpack a
+-- download into Mods/Packs and the files can end up one folder deeper
+-- (Mods/Packs/<zip name>/<folder in the zip>/main.lua): Playlunky still finds and
+-- runs main.lua, and every path of ours pointed at a folder that does not exist.
+-- A Linux tester's symptoms were exactly that pair: the first-run popups on every
+-- launch (config.json could not be written) and "the bridge did not start" (Python
+-- handed a script that was not there). Whatever made the search miss, the file the
+-- engine actually loaded cannot be wrong.
+local loadedFrom = nil
+pcall(function()
+    local info = debug.getinfo(1, "S")
+    if info ~= nil and type(info.source) == "string" and info.source:sub(1, 1) == "@" then
+        loadedFrom = info.source:sub(2):gsub("\\", "/")
+    end
+end)
+
+--- Our root and pack name from where this file was loaded, if that is checkable.
+--- @return string? root, string? name
+local function rootFromSource()
+    if loadedFrom == nil then
+        return nil, nil
+    end
+    local root = loadedFrom:match("^(.+)/src/util%.lua$")
+    if root == nil then
+        return nil, nil
+    end
+    root = root:gsub("^%./", "")
+    -- the pack is the folder right under Mods/Packs, however deep the files are
+    local name = root:match("^[Mm]ods/[Pp]acks/([^/]+)")
+    if name == nil then
+        return nil, nil
+    end
+    local probe = io.open(root .. PACK_FINGERPRINT, "r")
+    if probe == nil then
+        return nil, nil
+    end
+    probe:close()
+    return root, name
+end
+
 function PackDir()
     if packDir ~= nil then
         return packDir
     end
     packDir = FALLBACK_PACK_DIR
+    local ok, root, name = pcall(rootFromSource)
+    if ok and root ~= nil and name ~= nil then
+        packDir, packRoot = name, root
+        return packDir
+    end
     pcall(function()
         -- `rawLine` then a local copy, matching netCore.shimVersions: assigning to a
         -- for-loop variable is legal in 5.4 but an error in later Lua, and this file
@@ -197,7 +249,16 @@ end
 --- @param rest string # e.g. "config.json"
 --- @return string
 function PackPath(rest)
-    return "Mods/Packs/" .. PackDir() .. "/" .. rest
+    local name = PackDir()
+    return (packRoot or ("Mods/Packs/" .. name)) .. "/" .. rest
+end
+
+--- Where our files are, relative to the game ("Mods/Packs/<pack>" unless the pack
+--- was unpacked a folder deeper), for the log header.
+--- @return string
+function PackRootPath()
+    local name = PackDir()
+    return packRoot or ("Mods/Packs/" .. name)
 end
 
 --- The same path in the backslash form `start`/`py` want on Windows.

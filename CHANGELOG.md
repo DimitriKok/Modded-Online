@@ -1,5 +1,48 @@
 # Changelog
 
+## 2.0.0-dev82
+
+On Linux: "the bridge did not start", and the first-run popups on every launch. No
+server change: the server stays at **1.0.13**. Both players need dev82 (the lobby only
+lets the same version play together).
+
+### What was wrong
+
+Those two symptoms have one cause in common: Modded Online looking for its own files in
+the wrong folder. The settings file could not be written there, so the answers to the
+first-run popups were never kept, and Python was told to run a bridge script that was
+not there, so it never ran and never wrote the bridge's log. (A history note in
+`util.lua` records the same pair from an earlier version, for the same reason.)
+
+The mod found its folder only one way: by searching `load_order.txt` for an enabled
+pack folder holding `src/modHost.lua` directly. If that search misses, every path falls
+back to a folder named `fyi.modded-online-loader`. The likeliest way to miss it is a
+download unpacked one folder too deep (`Mods/Packs/<zip name>/<folder>/main.lua`):
+Playlunky finds and runs a `main.lua` anywhere inside a pack, but the search does not.
+Nothing said so: the failed save was a debug line, and `start` succeeds whether or not
+the script it is given exists.
+
+### Fixed
+
+- **The pack is found from the file the engine actually loaded.** Playlunky names each
+  file it loads (`@Mods/Packs/<pack>/src/util.lua`); our root is that file's folder, and
+  the pack is the folder right under `Mods/Packs`, however deep the files are. It is
+  believed only if `src/modHost.lua` is there too; otherwise the load-order search runs
+  as before. For a pack installed normally both give the same folder, so nothing moves.
+- **Settings that cannot be saved are said out loud**, once, with the path and the
+  reason, and that the first-run answers will not be kept.
+- **A helper script that is not where it should be is named** instead of launched:
+  `The connection bridge script is missing: <path>` in the menu, and the folder the mod
+  expected its files in, in the log. The same for the server.
+
+### Tests
+
+New: `tests/test_pack_root.py` (a pack unpacked one folder deep, a normal install
+unchanged, Windows separators, no load_order.txt needed, the search still used when
+there is no file name, a name that does not check out not believed, an unsaveable
+config said once, a missing bridge or server script named instead of launched).
+1115 passing, 1 skipped, under Lua 5.4 and 5.5; the server suite passes unchanged.
+
 ## 2.0.0-dev81
 
 Linux again: Python was found, and every connection then failed with "Could not reach

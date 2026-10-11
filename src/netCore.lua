@@ -775,14 +775,28 @@ function module.loadConfig()
     end
 end
 
+local configSaveSaid = false
+
 function module.saveConfig()
-    local ok = pcall(function()
-        local f = assert(io.open(CONFIG_PATH, "w"))
+    local ok, err = pcall(function()
+        local f, openErr = io.open(CONFIG_PATH, "w")
+        if f == nil then
+            error(tostring(openErr), 0)
+        end
         f:write(NetJson.encode(module.config))
         f:close()
     end)
     if not ok then
         dbg("could not persist config")
+        -- Out loud, once: a config that cannot be written brings the first-run
+        -- popups back on every launch and loses every setting, and until dev82 the
+        -- only trace of it was a debug line.
+        if not configSaveSaid then
+            configSaveSaid = true
+            errorf("could not save Modded Online's settings to %s (%s) -- they, and the"
+                .. " answers to the first-run popups, will be gone next launch",
+                CONFIG_PATH, tostring(err))
+        end
     end
 end
 
@@ -1294,11 +1308,34 @@ module.MAX_TEST_PLAYERS = MAX_TEST_PLAYERS
 -- (194 is the usual host pick, so the stand-ins start above it)
 local TEST_PLAYER_CHARS = { 195, 196, 197 }
 
+--- Is one of our helper scripts where we are about to tell Python it is?
+---
+--- `start` succeeds whether or not the script exists, and Python's complaint dies
+--- with its window, so a wrong path used to look exactly like a network problem.
+--- @param rel string # e.g. "server/client_bridge.py"
+--- @param what string # for the message
+--- @return boolean
+local function helperPresent(rel, what)
+    local path = PackPath(rel)
+    local handle = io.open(path, "r")
+    if handle ~= nil then
+        handle:close()
+        return true
+    end
+    module.lastError = "The " .. what .. " script is missing: " .. path
+    errorf("cannot start %s: %s is not there. Modded Online's files are expected in %s"
+        .. " -- is the pack unpacked into Mods/Packs as one folder?", what, path, PackRootPath())
+    return false
+end
+
 --- Launch the bundled server in a background window. Safe to call when a
 --- server is already running (the second instance notices and exits).
 function module.launchLocalServer()
     local py = module.requirePython("the game server")
     if py == nil then
+        return false
+    end
+    if not helperPresent("server/server.py", "game server") then
         return false
     end
     local ok, err = pcall(function()
@@ -1331,6 +1368,9 @@ end
 function module.launchBridge(host, port)
     local py = module.requirePython("the connection bridge")
     if py == nil then
+        return false
+    end
+    if not helperPresent("server/client_bridge.py", "connection bridge") then
         return false
     end
     local ok, err = pcall(function()
