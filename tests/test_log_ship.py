@@ -21,6 +21,7 @@ import pathlib
 import random
 
 import lupa
+import pytest
 
 PACK = pathlib.Path(__file__).resolve().parent.parent
 LOG_SHIP = (PACK / "src" / "logShip.lua").read_text(encoding="utf-8")
@@ -392,8 +393,8 @@ def test_the_log_sent_is_this_runs_own_section(tmp_path):
 
 
 def test_every_desync_kind_is_noted():
-    assert 'LogShip.noteDesync, string.format("FLOOR DESYNC seq %d", s)' in DESYNC_LOG
-    assert 'LogShip.noteDesync, "POSITION DESYNC at "' in DESYNC_LOG
+    assert 'LogShip.noteDesync, string.format("FLOOR DESYNC seq %d", s), false, false, s)' in DESYNC_LOG
+    assert 'LogShip.noteDesync, "POSITION DESYNC at " .. tostring(key), false, false, s)' in DESYNC_LOG
     event_sync = (PACK / "src" / "eventSync.lua").read_text(encoding="utf-8")
     assert 'LogShip.noteDesync, string.format("RESYNC WARP to %s-%s"' in event_sync
     assert "SafeCall(\"desyncLog:logShip\", LogShip.runEnded)" in DESYNC_LOG
@@ -575,3 +576,137 @@ def test_the_alarm_is_what_sends_it():
     input_sync = (PACK / "src" / "inputSync.lua").read_text(encoding="utf-8")
     at = input_sync.index('toast("Desync detected')
     assert input_sync.index('pcall(LogShip.desyncNow, "POSITION DESYNC at " .. key, seq)', at) > at
+
+
+# ------------------------------------------- one log per player per incident (dev84)
+#
+# Room PTHP's one desync sent two logs from each player: each popup's, and then the
+# whole run's at its end. Each machine's report of the floor -- its popup's, and the
+# POSITION DESYNC note just before it -- reached the other after the other's own log
+# had gone, and was taken for a new desync. Every report now names its floor.
+
+def ask(rt, slot=1, **fields):
+    payload = rt.eval("{}")
+    for k, v in fields.items():
+        payload[k] = v
+    rt.eval("eventHandlers.desyncseen")(payload, slot)
+
+
+def queued(rt):
+    st = status(rt)
+    return st["pending"] + (1 if st["uploading"] is not None else 0)
+
+
+def test_the_rooms_popup_report_of_our_floor_does_not_send_the_run_again():
+    rt = runtime()
+    rt.eval("LogShip.runStarted")()
+    popup(rt, "ours", reason="POSITION DESYNC at 3:720", key=3)
+    ask(rt, r="POSITION DESYNC at 3:720", now=1, s=3)
+    assert status(rt).get("unsent") is None and status(rt)["deferred"] is False
+    rt.eval("LogShip.runEnded")()
+    assert queued(rt) == 1, "the same floor went twice"
+
+
+def test_the_rooms_note_of_our_floor_does_not_either():
+    """The POSITION DESYNC note that comes just before the other machine's popup."""
+    rt = runtime()
+    rt.eval("LogShip.runStarted")()
+    popup(rt, "ours", reason="POSITION DESYNC at 3:720", key=3)
+    ask(rt, r="POSITION DESYNC at 3:720", s=3)
+    rt.eval("LogShip.runEnded")()
+    assert queued(rt) == 1
+
+
+def test_a_report_naming_no_floor_after_our_popup_is_part_of_it():
+    rt = runtime()
+    rt.eval("LogShip.runStarted")()
+    popup(rt, "ours", key=3)
+    ask(rt, r="RESYNC WARP to 1-3")
+    rt.eval("LogShip.runEnded")()
+    assert queued(rt) == 1
+
+
+def test_a_report_of_another_floor_after_our_popup_still_sends_the_run():
+    rt = runtime()
+    rt.eval("LogShip.runStarted")()
+    popup(rt, "ours", key=3)
+    ask(rt, r="FLOOR DESYNC seq 7", s=7)
+    rt.execute("runText = 'the whole run'")
+    rt.eval("LogShip.runEnded")()
+    assert queued(rt) == 2, "a new floor's desync is a new incident"
+
+
+def test_a_report_before_any_popup_still_marks_the_run():
+    rt = runtime()
+    rt.eval("LogShip.runStarted")()
+    ask(rt, r="FLOOR DESYNC seq 3", s=3)
+    rt.execute("runText = 'the run'")
+    rt.eval("LogShip.runEnded")()
+    assert queued(rt) == 1
+
+
+def test_our_own_notes_of_the_popups_floor_are_part_of_it():
+    rt = runtime()
+    rt.eval("LogShip.runStarted")()
+    popup(rt, "ours", key=3)
+    rt.eval("LogShip.noteDesync")("FLOOR DESYNC seq 3", False, False, 3)
+    rt.eval("LogShip.runEnded")()
+    assert queued(rt) == 1
+
+
+def test_the_announcement_names_the_floor():
+    rt = runtime()
+    rt.eval("LogShip.noteDesync")("FLOOR DESYNC seq 3", False, False, 3)
+    got = [dict(e["payload"]) for e in rt.eval("events").values()]
+    assert len(got) == 1 and int(got[0]["s"]) == 3 and got[0].get("now") is None
+
+
+class Room:
+    """Two machines and the server between them: every event goes to everyone, the
+    sender too, and is held until delivered."""
+
+    def __init__(self):
+        self.machines = {}
+        for slot in (1, 2):
+            rt = runtime()
+            rt.execute(f"Network.slot = {slot}")
+            rt.eval("LogShip.runStarted")()
+            rt.execute(f"runText = 'slot {slot} log'")
+            self.machines[slot] = rt
+        self.wire = []
+
+    def collect(self):
+        for slot, rt in self.machines.items():
+            for e in rt.eval("events").values():
+                if str(e["kind"]) == "desyncseen":
+                    self.wire.append((slot, dict(e["payload"])))
+            rt.execute("events = {}")
+
+    def deliver(self):
+        self.collect()
+        wire, self.wire = self.wire, []
+        for origin, payload in wire:
+            for rt in self.machines.values():
+                ask(rt, slot=origin, **{k: v for k, v in payload.items() if v is not None})
+
+
+@pytest.mark.parametrize("late", [True, False], ids=["reports-after-both-popups", "reports-between"])
+def test_room_pthp_sends_one_log_from_each_player(late):
+    room = Room()
+    host, peer = room.machines[1], room.machines[2]
+    # 3:1 -- only the peer sees the floor differ
+    peer.eval("LogShip.noteDesync")("FLOOR DESYNC seq 3", False, False, 3)
+    room.deliver()
+    # 3:720 -- both popups, in the same frame; what each says crosses on the wire
+    for rt in (host, peer):
+        rt.eval("LogShip.noteDesync")("POSITION DESYNC at 3:720", False, False, 3)
+        if not late:
+            room.deliver()
+        rt.eval("LogShip.desyncNow")("POSITION DESYNC at 3:720", 3)
+    room.deliver()
+    for rt in (host, peer):
+        for _ in range(10):
+            frame(rt, 1000)  # past the room-ask wait
+        rt.eval("LogShip.runEnded")()
+    for slot, rt in room.machines.items():
+        assert queued(rt) == 1, f"slot {slot} sent {queued(rt)} logs for one desync"

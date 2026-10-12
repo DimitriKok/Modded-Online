@@ -1128,17 +1128,18 @@ function module.floorMismatch(s, mine, host)
         (mine.seed ~= host.seed) and "DIFFER" or "ok", mine.seed, host.seed,
         (mine.ent ~= host.ent) and "DIFFER" or "ok", mine.ent, host.ent)
     if LogShip ~= nil and LogShip.noteDesync ~= nil then
-        pcall(LogShip.noteDesync, string.format("FLOOR DESYNC seq %d", s))
+        pcall(LogShip.noteDesync, string.format("FLOOR DESYNC seq %d", s), false, false, s)
     end
 end
 
 --- Player positions drifted out of sync (position checksum). Dumps live spots.
-function module.positionDesync(key, mineHash, theirHash, streak)
+--- @param s integer? # the lockstep seq of the floor, which names the incident
+function module.positionDesync(key, mineHash, theirHash, streak, s)
     module.line(
         "*** POSITION DESYNC at %s: local hash %d vs remote %d (streak %d) — a mod moved a player non-deterministically",
         key, mineHash, theirHash, streak)
     if LogShip ~= nil and LogShip.noteDesync ~= nil then
-        pcall(LogShip.noteDesync, "POSITION DESYNC at " .. tostring(key))
+        pcall(LogShip.noteDesync, "POSITION DESYNC at " .. tostring(key), false, false, s)
     end
     pcall(function()
         for coopIndex = 1, 4 do

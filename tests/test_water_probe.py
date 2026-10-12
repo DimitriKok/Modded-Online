@@ -148,10 +148,25 @@ def floor(rt, *, at_level, at_engage=None, pool=((2, 3), (3, 3), (4, 3)), back=(
     return rt.eval("Determinism.waterReport()")
 
 
+def crossed(rt, wire):
+    """A report as the network carries it: plain values, rebuilt in another Lua
+    state -- nested ones too (the census of ON.LEVEL callbacks is a list)."""
+    def plain(v):
+        # by class name: lupa.lua_type is one Lua build's, and a table from another
+        # build handed to it is a crash, not an answer
+        if type(v).__name__ == "_LuaTable":
+            d = dict(v.items())
+            if d and all(isinstance(k, int) for k in d):
+                return [plain(d[i]) for i in range(1, len(d) + 1)]
+            return {k: plain(x) for k, x in d.items()}
+        return v
+    return rt.table_from(plain(wire), recursive=True)
+
+
 def verdict(host_rt, peer_rt, host_report, peer_report):
     """The peer's verdict. The host's wire crosses over as the network would carry
     it: as plain values, rebuilt in the peer's own Lua state."""
-    host_wire = peer_rt.table_from({k: v for k, v in host_report["wire"].items()})
+    host_wire = crossed(peer_rt, host_report["wire"])
     return peer_rt.eval("Determinism.waterVerdict")(peer_report["wire"], host_wire, 9)
 
 
@@ -279,7 +294,7 @@ def test_the_same_answers_to_queries_registered_in_another_order_is_query_order(
     assert line.startswith("WATER PROBE seq=9: QUERY ORDER"), line
     assert "what the mod saw: same answers, other query order" in line
     assert line.endswith("ON.LEVEL order: DIFFER"), line
-    host_wire = peer.table_from({k: v for k, v in host_report["wire"].items()})
+    host_wire = crossed(peer, host_report["wire"])
     order = peer.eval("Determinism.levelOrderVerdict")(peer_report["wire"], host_wire, 9)
     assert order is not None and order.startswith("ON.LEVEL ORDER seq=9: DIFFERENT"), order
 
@@ -302,7 +317,7 @@ def test_registered_in_the_same_order_they_match_whatever_the_engine_does():
     assert line.startswith("WATER PROBE seq=9: MATCH"), line
     assert line.endswith("ON.LEVEL order: MATCH"), line
     assert list(host.eval("asked").values()) == list(peer.eval("asked").values()) == [3, 0]
-    host_wire = peer.table_from({k: v for k, v in host_report["wire"].items()})
+    host_wire = crossed(peer, host_report["wire"])
     assert peer.eval("Determinism.levelOrderVerdict")(peer_report["wire"], host_wire, 9) is None
 
 

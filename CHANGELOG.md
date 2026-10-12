@@ -1,5 +1,67 @@
 # Changelog
 
+## 2.0.0-dev84
+
+Room PTHP: a desync on 1-2, where one player saw a turkey back room the other did not
+have; and two desync logs from each player for that one desync. No server change: the
+server stays at **1.0.13**. Both players need dev84 (the lobby only lets the same
+version play together).
+
+### What the two logs show
+
+Same seed and the same engine random state when 1-2 began, and two different floors:
+2786 entities on the host, 2713 on the peer, and only the peer's had the turkey, the
+locked door and the back room. The turkey room was what 1-2 looked like on one
+machine, not what made it. The difference was already there at 1-1: Spelunky 2.5 had
+**64** level hooks (hosted ON.LEVEL callbacks) running on the host and **38** on the
+peer. 32 of one kind, from one line of 2.5 (`entityContext.lua:1381`), stood against
+6. Those hooks are not cleared at the end of a run. They build up as the game is
+played (0 when the game starts, 6 by 1-4, more on every floor after) and are carried
+into every later run; the earlier logs show the same count on both machines when both
+games started together. The host's game had been running for longer. The existing
+`ON.LEVEL ORDER seq=1: DIFFERENT` line in the peer's log said so at 1-1, and nothing
+on screen did. It is not Modded Online's doing: the full logs of rooms VOYY and UVLQ
+show these hooks building up the same way on both machines with no clear refused, and
+the ordered level batch clears each hook 2.5 asks to clear. A run cannot bring two
+such games back together, and restarting Spelunky 2 on every machine does.
+
+### Fixed
+
+- **One desync log per player for each desync.** At the "Desync detected" popup each
+  machine sends its log and tells the room. The other machine's report of that same
+  floor came in after its own log had gone, and was taken for a new desync, so the
+  whole run went again when it ended: two logs each. Every report now names its floor,
+  and a report of the floor whose log already went is part of that desync. A desync on
+  another floor still sends the run when it ends, as before.
+
+### New
+
+- **"Desync likely" at 1-1 when the hosted mod's state differs.** On the first floor
+  of every run each peer compares the hosted mods' level hooks with the host's. When
+  they differ, every player gets the toast `Desync likely: <mod> differs between your
+  games — restart Spelunky 2 on every machine, then start a new run`, and the log
+  gets a `HOSTED MOD STATE DIFFERS` line saying how many hooks of which kind run where.
+  Once per run, on the first floor compared; nothing is changed or stopped, and nothing
+  the hosted mod does or shows is touched.
+- **The log names the hooks that differ.** `ON.LEVEL ORDER seq=1: DIFFERENT -- 38 hosted
+  ON.LEVEL callback(s) here, 64 on the host (entityContext.lua:1381: 6 here, 32 on the
+  host)`. Each floor's report carries a count of its level hooks by where they come
+  from, and the floor block's `level order` line reads in runs:
+  `entityContext.lua:1381 x32 helpers2.lua:430 x32` where it used to list one name 64
+  times.
+- README: "Start Spelunky 2 fresh on every machine before you play together".
+
+### Tests
+
+New `tests/test_mod_state.py`: the per-source count and the order line in runs, the
+verdict naming what differs (and saying so when only the order does, or when a count
+left places out), room PTHP's 64 against 38 told on both machines at 1-1, once a run,
+again on a new run but not after a resync, a third player told by the one who found
+it. Added to `tests/test_log_ship.py`: room PTHP replayed on two machines with the
+reports crossing on the wire, both orders, one log each; a report of our floor, one
+naming no floor and one of another floor. 1156 passing, 1 skipped, under Lua 5.4 and
+5.5; the server suite passes unchanged.
+
 ## 2.0.0-dev83
 
 On Linux, dev82 still said "Could not reach the server: the bridge did not start". No

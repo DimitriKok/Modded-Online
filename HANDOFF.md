@@ -6,7 +6,7 @@ them.
 
 ## Start here
 
-**Build: `2.0.0-dev55` → `dev83`. The server must be redeployed at `1.0.13`.**
+**Build: `2.0.0-dev55` → `dev84`. The server must be redeployed at `1.0.13`.**
 Section 3's fix is half a server fix and does nothing without it (1.0.11 or later).
 Section 6 has a server half too, but its client half works on its own. A client on a
 server other than the one it expects says so in a toast and in the log. Check with
@@ -24,7 +24,7 @@ server other than the one it expects says so in a toast and in the log. Check wi
 | 8 | The tutorial came back after the first real run | **FIXED** in dev64; the dev64 session "seemed to work" — section 8 |
 | 9 | Udjat key and chest on two floors, sometimes two keys | **FIXED** in dev64; the dev64 session "seemed to work" — section 9 |
 | 10 | Jungle floors desynced (2-4: one extra frog on a lily pad) | **FIXED** in dev65, not yet confirmed in game — section 10 |
-| 11 | Desync logs sent to a Discord channel automatically (opt-in) | **NEW** in dev65 / server 1.0.13. The server side starts configured; no log posted yet. Since dev78 a log goes the moment the "Desync detected" popup appears (section 19) — section 11 |
+| 11 | Desync logs sent to a Discord channel automatically (opt-in) | **NEW** in dev65 / server 1.0.13. **Working in game** (room PTHP, dev83, posted both players' logs). Since dev78 a log goes the moment the "Desync detected" popup appears (section 19); dev84 sends one log per player per desync, where PTHP got two each — section 11 |
 | 12 | A SETTINGS page, with AUTOMATICALLY SEND LOGS and AUTOMATICALLY SYNC DATA | **NEW** in dev66, reported working in game — section 12 |
 | 13 | Popups the first time Modded Online starts | **NEW** in dev66, reported working in game; a fourth added in dev67 — section 13 |
 | 14 | ENABLE DEBUG MESSAGES, and a RESTART REQUIRED popup | **NEW** in dev67, not yet tried in game — section 14 |
@@ -35,9 +35,10 @@ server other than the one it expects says so in a toast and in the log. Check wi
 | 19 | 4-2 desynced 45 s in (room VOYY), and the resync that followed got stuck on the transition for 20 s | **FIXED** in dev78. dev78's run (room UVLQ, 1-1 to 2-2, twice through world 1) had no desync at all. The desync: GAMEFRAME (and every hosted ON.FRAME moved to it) and the mod's global timers ran on frames the lockstep gate held, and a hosted PRE_UPDATE before the gate read the last frame's decision. The stall: the transition barrier held our own resync warp. Also in dev78: the pet on a quick restart, and the logs to Discord at the popup — section 19 |
 | 20 | The host crashed leaving the summit's 2-2 (room UVLQ), and a Lua error a couple of floors earlier left nothing in either log | **NOT FIXED: cause not known.** The crash was in 2-2's teardown, after 2.5's PRE_LEVEL_DESTRUCTION wrapper (`helpers2.lua:533`) returned. dev79 stops the leak sweep destroying the ~360 entities 2.5 parks on those floors (the one thing hosting did there that solo 2.5 does not), and makes the next crash and the next error name themselves — section 20 |
 | 21 | On Linux (Proton) the mod said "Python is not installed" with Python installed; with that fixed, every connection said "Could not reach the server" | Python: **FIXED** in dev80, confirmed in game (the error went). The connection: dev81 makes the bridge survive a dead console (it died at its first print under Wine when its console had no window, reproduced with Wine 9) and the menu say how far the bridge got; not yet tried in game. The game is a Windows program under Proton and needs the Windows Python inside its prefix; on Proton 9 and older Wine's `where` is a stub, so the mod now also looks where a Windows install puts Python — section 21 |
+| 22 | Room PTHP: 1-2 generated differently on the two machines (a turkey back room on one only) | **CAUSE FOUND; the cure is restarting both games.** Spelunky 2.5 keeps some level hooks from earlier play, and the host's game had been running longer: 64 hosted ON.LEVEL callbacks against 38 at 1-1. dev84 tells every player at 1-1 ("Desync likely") and the log names the hooks that differ; not yet tried in game — section 22 |
 
-**Git state:** the work is on `main`; dev77 to dev83 were pushed to
-`claude/vigilant-cori-chwlul` for review. `git log --oneline origin/main..HEAD` shows
+**Git state:** `main` is at dev83. dev84 is on `claude/vigilant-cori-chwlul` only, until
+it is asked for on main. `git log --oneline origin/main..HEAD` shows
 what a branch adds.
 
 **Before trusting any log in the pack folder**, read "why two captures came back
@@ -491,8 +492,13 @@ the frogs on them, are gone online as a result.
 
 There's an opt-in switch, **AUTOMATICALLY SEND LOGS**, on the SETTINGS page of the
 Modded Online menu (`Network.config.autoSendLogs`; dev65 had it in Playlunky's
-options instead). When it's on, a run that desynced sends its log to the server at
-run end, and the server posts it to a Discord channel. It counts as desynced when
+options instead). When it's on, a run that desynced sends its log to the server, and the
+server posts it to a Discord channel. Since dev78 the log goes at the "Desync detected"
+popup (section 19); since dev84 each player sends one log per desync. In room PTHP
+(dev83) the other machine's report of the same floor came in after the popup's log had
+gone, was taken for a new desync, and sent the whole run again at its end: every report
+now names its floor (`desyncseen` carries `s`), and a report of the floor already sent
+is part of that desync (`logShip.noteDesync`, `onDesyncSeen`). It counts as desynced when
 there was a `FLOOR DESYNC`, a `POSITION DESYNC` or a resync warp here, or another
 player reported one.
 
@@ -505,10 +511,10 @@ The parts:
 The bot token goes in `server/discord_config.json` or `MO_DISCORD_BOT_TOKEN`, and
 that file is git-ignored.
 
-**No log has been posted to a real Discord yet.** Every test uses a fake HTTP
-opener. The operator's server does start configured: on 2026-10-03 it printed the
-line in step 2. The bot shows offline in Discord, which is expected, because posting
-over REST needs no gateway connection. The first real try:
+**Logs reach Discord:** room PTHP's (2026-10-12, dev83) were posted for both players,
+as `desync_PTHP_s<slot>_<name>_<time>.txt`. The tests still use a fake HTTP opener.
+The bot shows offline in Discord, which is expected, because posting over REST needs
+no gateway connection. To try it on a new server:
 
 1. Set up a bot as in `server/DISCORD.md`.
 2. Start the server and check that it prints `desync logs from players who opted in:
@@ -1242,6 +1248,55 @@ likely each new build's folder replacing the old one's config.json:
 `modded_online_settings.json` in the game folder is now a copy read when the pack has
 none.
 
+## 22. Room PTHP: 1-2 generated differently (a turkey back room on one machine) — CAUSE FOUND; dev84 says so at 1-1, NOT YET TRIED IN GAME
+
+**The report (2026-10-12, dev83, DoctorPuppy on Linux as the peer, EatYoCake hosting):**
+the peer saw a back layer with a turkey sign over its door; the host did not. A
+`POSITION DESYNC` at 3:720 followed, and each player's log went to Discord twice.
+
+**What the logs show.** At 1-2's `gen[pre]` both machines had the same adventure seed
+and the same ten engine PRNG streams; by `gen[post]` the streams differed, and so did
+the floor (FLOOR_BORDERTILE 2001 on the host, 1710 on the peer; only the peer's had
+MOUNT_TURKEY, FLOOR_DOOR_LOCKED and the back room). Generation itself went differently,
+so something in 2.5's state decided differently. That state differed from the start of
+the run: at 1-1 the `level order` lines read 64 hosted ON.LEVEL callbacks on the host
+and 38 on the peer, 32 helpers2.lua:430 on both, and **32 `entityContext.lua:1381` on
+the host against 6**. The peer's `ON.LEVEL ORDER seq=1: DIFFERENT` line said so at
+0:0. The hosted registrations in the run were identical (`set_callback +185 ...` on
+both at seq 1), so the extra 26 came from before it. At 1-1 the c8 stream already
+differed by the time the floor was compared, while the entities still matched.
+
+**Those hooks build up over a game session.** In every earlier log, `entityContext.lua:1381`
+is 0 when the game has just started, 6 by 1-4, one more on most floors after (VOYY: 19
+by 4-2), and carried into the next run (UVLQ's second run started with 6), with the same
+count on both machines when both games started together. The PTHP host's game had been
+running for longer (event counters 2956 against the peer's 1267). Modded Online is not
+leaking them: VOYY's and UVLQ's full session logs have no refused clear, and the
+ordered batch clears each hook the mod clears (`tests/test_level_order.py`). What 2.5
+does with them, and whether they are what changed 1-2, needs 2.5's source:
+`entityContext.lua` around line 1381, and whichever of `quests.lua` (the
+`dwellingQuest` POST_LEVEL_GENERATION hook) and `game.lua` (game:init at
+PRE_LEVEL_GENERATION) decides the back room.
+
+**dev84 (`inputSync.judgeModState`, `Determinism.levelOrderJudged`):** on the first
+floor of each run (or after a mid-run join) both machines reported, each peer compares
+the hosted ON.LEVEL callbacks with the host's. If they differ, every machine shows
+`Desync likely: <mod> differs between your games — restart Spelunky 2 on every machine,
+then start a new run` and logs `HOSTED MOD STATE DIFFERS ...`. The peer sends a
+`modstate` event so the host and other peers say it too, once a run. Nothing else
+changes. Each floor report carries `og`: a count of the floor's level callbacks by where
+they come from, top ten and the rest together. The verdict line names the places that
+differ (`entityContext.lua:1381: 6 here, 32 on the host`), and the `level order` line
+reads in runs (`entityContext.lua:1381 x32 helpers2.lua:430 x32`).
+
+**Not done, on purpose:** clearing or re-creating the mod's hooks to make the two
+machines agree. That would change what 2.5 does, and nobody knows yet which of its
+hooks are stale. Restarting both games is the cure that is known to work.
+
+**To confirm in game:** keep one game running through a couple of runs, start the
+other fresh, and start a room run: both should get the toast at 1-1. Then restart both
+games and play: no toast, and 1-2 the same on both.
+
 ## Diagnostic tooling (flags and the files they write)
 
 All flag files live in the pack folder. They are files, not settings, for the reason
@@ -1322,7 +1377,7 @@ On a machine whose Python has no pytest or lupa, uv supplies both for the run:
 uv run --no-project --with pytest --with lupa python -m pytest tests/ -q
 ```
 
-1125 passing, none failing, 1 skipped (it needs hdmod next to this pack) (dev83), under Lua 5.4 and 5.5. The 16 long-standing failures went in dev67, with the two
+1156 passing, none failing, 1 skipped (it needs hdmod next to this pack) (dev84), under Lua 5.4 and 5.5. The 16 long-standing failures went in dev67, with the two
 stale test files they came from: `tests/test_world_mailbox.py` (the world mailbox
 deleted in dev44) and `tests/test_seeded_run.py` (the seeded-run flag removed in
 dev46). A failure here now means something broke.

@@ -76,7 +76,8 @@ mod — just enable it alongside your content mods.
     screen, from Modded Online and from the mods it hosts. It's off by default.
 - **Desync logs to Discord** (opt-in): switch on **AUTOMATICALLY SEND LOGS** and a
   run that desyncs sends its log to the server, which posts it to the Discord
-  channel its operator set up. Server owners: see `server/DISCORD.md`.
+  channel its operator set up: one log from each player who switched it on, for
+  each desync. Server owners: see `server/DISCORD.md`.
 - **AUTOMATICALLY SYNC DATA** does **SYNC SAVE DATA** for you every time the game's
   main menu comes up. If you also play the mod on its own, outside Modded Online,
   leave it off: it copies Modded Online's progress over the mod's every time.
@@ -211,6 +212,15 @@ fails the test with the frame it died on, instead of quietly hanging.
   differ somewhere. It is not conclusive on its own -- the mod-picker
   checkboxes are options too, and those differ legitimately when two players
   have different mods installed.
+
+- **Start Spelunky 2 fresh on every machine before you play together.** A mod
+  can keep things in memory from earlier play: Spelunky 2.5 keeps some of its
+  level hooks from every run since the game started. A game that has been
+  running for an hour is then not in the same state as one just started, and the
+  same seed can build a different floor on each machine. Modded Online compares
+  the mods' state on the first floor of every run; if it differs, everyone sees
+  **"Desync likely: ... differs between your games"**. Restart Spelunky 2 on
+  every machine, then start a new run together.
 
 - **Instant restart is a vote** while online: pressing it mid-run casts a vote
   (your spelunker keeps playing — the local restart is cancelled) and the run

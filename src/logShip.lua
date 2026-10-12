@@ -14,8 +14,9 @@
 --- DESYNC, which only the peers see and which has no popup, or a report from the
 --- room that never became one here -- goes when the run ends, as it always did. A
 --- resync warp after a popup does not send the run a second time: it is how the
---- incident already sent ends. Either way it is this run's own section of
---- desync_log.txt.
+--- incident already sent ends. Nor does the room's report of the floor whose log
+--- already went: every report names its floor, and one floor is one incident, one
+--- log per player. Either way it is this run's own section of desync_log.txt.
 ---
 --- Nothing is sent unless the player switched on AUTOMATICALLY SEND LOGS (Modded
 --- Online's SETTINGS page, `Network.config.autoSendLogs`), and nothing is sent to a
@@ -130,9 +131,14 @@ end
 --- @param fromRoom boolean? # another player reported it: do not echo it back
 --- @param followUp boolean? # what follows an incident already sent (a resync warp):
 ---                          # no reason to send the run again by itself
-function module.noteDesync(reason, fromRoom, followUp)
+--- @param key integer? # the lockstep seq of the floor it happened on. The floor
+---                     # whose log already went is that same incident: a follow-up
+function module.noteDesync(reason, fromRoom, followUp, key)
     if runNote == nil then
         runNote = tostring(reason)
+    end
+    if key ~= nil and key == snapKey then
+        followUp = true
     end
     if unsent == nil and not (followUp and snapKey ~= nil) then
         unsent = tostring(reason)
@@ -142,7 +148,7 @@ function module.noteDesync(reason, fromRoom, followUp)
     end
     if Network ~= nil and Network.isInRun ~= nil and Network.isInRun() then
         announced = true
-        Network.sendEvent("desyncseen", { r = tostring(reason):sub(1, 120) })
+        Network.sendEvent("desyncseen", { r = tostring(reason):sub(1, 120), s = key })
     end
 end
 
@@ -195,7 +201,7 @@ end
 --- @param key integer? # the lockstep seq of the floor
 function module.desyncNow(reason, key)
     reason = tostring(reason)
-    module.noteDesync(reason, true)
+    module.noteDesync(reason, true, false, key)
     if Network ~= nil and Network.isInRun ~= nil and Network.isInRun() then
         announced = true
         Network.sendEvent("desyncseen", { r = reason:sub(1, 120), now = 1, s = key })
@@ -214,11 +220,16 @@ local function onDesyncSeen(payload, originSlot)
     end
     local why = type(payload) == "table" and tostring(payload.r or "desync") or "desync"
     local reason = string.format("slot %s reported %s", tostring(originSlot), why)
-    module.noteDesync(reason, true)
+    local key = type(payload) == "table" and tonumber(payload.s) or nil
+    key = key ~= nil and math.floor(key) or nil
+    -- The other half of an incident whose log already went is not a new one. Room
+    -- PTHP sent two logs from each player: each popup's, and then the whole run's,
+    -- because the other machine's report of that same floor arrived after ours had
+    -- gone and marked the run to go again at its end. A report that names no floor,
+    -- once our popup's log has gone, is taken as part of it the same way.
+    module.noteDesync(reason, true, key == nil and snapKey ~= nil, key)
     if type(payload) == "table" and tonumber(payload.now) == 1 then
         -- their popup: ours goes too, once our own has had a moment to come up
-        local key = tonumber(payload.s)
-        key = key ~= nil and math.floor(key) or nil
         if (key == nil or key ~= snapKey) and deferred == nil then
             deferred = { atMs = get_ms() + ROOM_ASK_WAIT_MS, reason = reason, key = key }
         end

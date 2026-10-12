@@ -257,6 +257,11 @@ local myFloorDigest = nil        -- { seq, seed, ent } for the floor we're on
 local hostFloorDigests = {}      -- seq -> { seed, ent } from the world host
 local floorMismatchSeq = nil     -- seq we've already logged (once per floor)
 local floorDesyncUntil = 0       -- show the small "resyncing world" notice until (get_ms)
+-- Whether the hosted mods were in the same state on every machine, judged once a
+-- run, on the first floor this machine and the world host both reported
+-- (judgeModState); and whether it has been said here, also once a run.
+local modStateJudged = false
+local modStateWarned = false
 
 -- -------------------------------------------------------------- session
 
@@ -319,6 +324,8 @@ function module.beginSession(slots, delay)
     hostFloorDigests = {}
     floorMismatchSeq = nil
     floorDesyncUntil = 0
+    modStateJudged = false
+    modStateWarned = false
     engaged = false
     seq = 0
     offset = 0
@@ -1788,6 +1795,104 @@ function module.checkWaterProbe(s)
             DesyncLog.event("%s", orderLine)
         end
     end
+    if Determinism.levelOrderJudged ~= nil then
+        local okJudged, judged = pcall(Determinism.levelOrderJudged, mine.water, host.water)
+        if okJudged and type(judged) == "table" then
+            module.judgeModState(s, judged)
+        end
+    end
+end
+
+--- The hosted mods' names for themselves (meta.name), for the warning below.
+--- @return string
+local function hostedModName()
+    local names = {}
+    pcall(function()
+        for _, pack in ipairs(ModHost.hostedPacks()) do
+            local env = ModHost.envs[pack]
+            local meta = type(env) == "table" and rawget(env, "meta") or nil
+            local name = type(meta) == "table" and rawget(meta, "name") or nil
+            if type(name) ~= "string" or name == "" then
+                name = tostring(pack)
+            elseif #name > 32 then
+                -- cut short, and never inside a character: the toast is UTF-8
+                name = name:sub(1, 32):gsub("[\192-\255][\128-\191]*$", "")
+            end
+            names[#names + 1] = name
+        end
+    end)
+    if #names == 0 then
+        return "A hosted mod"
+    end
+    return table.concat(names, " + ")
+end
+
+--- The hosted mods are not in the same state on every machine: said on screen and
+--- in the log, once a run. What differs, from this machine's point of view: the
+--- callback counts on the machine that found it (`mineWord`, "here" or "on slot 2")
+--- and on the world host (`hostWord`, "on the host" or "here").
+--- @param mineWord string
+--- @param hostWord string
+--- @param s any        # the floor compared
+--- @param here any     # its hosted ON.LEVEL callbacks
+--- @param there any    # the world host's
+--- @param diff table?  # Determinism.levelOrderJudged's places, as they came
+function module.warnModState(mineWord, hostWord, s, here, there, diff)
+    if modStateWarned then
+        return
+    end
+    modStateWarned = true
+    local name = hostedModName()
+    local detail = ""
+    if Determinism ~= nil and Determinism.levelDiffText ~= nil then
+        local ok, text = pcall(Determinism.levelDiffText, diff, mineWord, hostWord)
+        if ok and type(text) == "string" and text ~= "" then
+            detail = " (" .. text .. ")"
+        end
+    end
+    errorf("HOSTED MOD STATE DIFFERS at seq %s, the first floor compared this run: %d hosted"
+        .. " ON.LEVEL callback(s) %s, %d %s%s. %s is not in the same state on every machine --"
+        .. " it keeps things from earlier play, or its settings differ -- so this run is likely"
+        .. " to desync. Restart Spelunky 2 on every machine, then start a new run together",
+        tostring(s), math.floor(tonumber(here) or 0), mineWord, math.floor(tonumber(there) or 0),
+        hostWord, detail, name)
+    toast(string.format("Desync likely: %s differs between your games — restart Spelunky 2"
+        .. " on every machine, then start a new run", name))
+end
+
+--- Non-host, once a run: were the hosted mods' ON.LEVEL callbacks on the first floor
+--- compared the world host's? They are registered as the mod runs, so on the first
+--- floor of a run they can only differ if the mod was already in a different state
+--- when the run began. Room PTHP's host had played for longer, and Spelunky 2.5 had
+--- kept 32 hooks of one kind (entityContext.lua:1381) from earlier play where the
+--- other machine had 6; 1-2 then generated differently from the same seed, and the
+--- run desynced. Nothing in a run brings two such games back together, and
+--- restarting the game on every machine does -- so everyone is told at 1-1, rather
+--- than finding out floors later. Detection only, like the floor digest.
+--- @param s integer
+--- @param judged { same: boolean, here: integer, host: integer, diff: table? }
+function module.judgeModState(s, judged)
+    if modStateJudged then
+        return
+    end
+    modStateJudged = true
+    if judged.same == true then
+        return
+    end
+    module.warnModState("here", "on the host", s, judged.here, judged.host, judged.diff)
+    Network.sendEvent("modstate", { s = s, m = judged.here, h = judged.host, d = judged.diff })
+end
+
+--- Another player found it: said here too, once a run.
+--- @param payload { s: integer?, m: integer?, h: integer?, d: table? }
+--- @param originSlot integer
+local function onModState(payload, originSlot)
+    if originSlot == Network.slot or type(payload) ~= "table" or not Network.isInRun() then
+        return -- our own, coming back: already said
+    end
+    module.warnModState(string.format("on slot %s", tostring(originSlot)),
+        Network.isWorldHost() and "here" or "on the host",
+        payload.s, payload.m, payload.h, payload.d)
 end
 
 --- Broadcast our fingerprint for the floor that just engaged and check it against
@@ -1968,7 +2073,7 @@ local function compareChecksums(key, entry)
             key, entry.mine, entry.theirs, desyncStreak)
         toast("Desync detected — a mod is behaving non-deterministically")
         if DesyncLog ~= nil then
-            DesyncLog.positionDesync(key, entry.mine, entry.theirs, desyncStreak)
+            DesyncLog.positionDesync(key, entry.mine, entry.theirs, desyncStreak, seq)
         end
         -- The log goes to Discord now, at the popup, for a player who switched
         -- AUTOMATICALLY SEND LOGS on -- and the room is asked for theirs (logShip).
@@ -2436,6 +2541,7 @@ Network.onState(onRemoteInputs)
 Network.onWorld(onWorldMsg)
 Network.onEvent("worldchk", onWorldChk)
 Network.onEvent("menu", onMenuEvent)
+Network.onEvent("modstate", onModState)
 
 -- -------------------------------------------------- one decision per update
 --

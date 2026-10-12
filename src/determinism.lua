@@ -607,6 +607,10 @@ end
 --     reaches the callback that threw, so Playlunky still reports it.
 
 local LEVEL_NAMES_MAX = 64 -- names in a floor block's `level order` line
+-- Places named in a floor report's census of them (`og`), most callbacks first, and
+-- how much of each place's name goes on the wire.
+local LEVEL_CENSUS_MAX = 10
+local LEVEL_CENSUS_NAME = 40
 
 local level = {
     entries = {},    -- every live hosted ON.LEVEL callback, in registration order
@@ -621,8 +625,10 @@ local level = {
 }
 
 --- What the batch ran on this floor, for the probe: how many, a running hash of
---- where each one was defined, in order, and the names.
-local levelRan = { n = 0, hash = 0, names = {} }
+--- where each one was defined, in order, the names in that order (as runs of one
+--- place: room PTHP's 32 hooks from one line of 2.5 read as one name 32 times), how
+--- many there were from each place, and how many ran past the names kept.
+local levelRan = { n = 0, hash = 0, runs = {}, byWhere = {}, more = 0 }
 
 --- Where a function was defined, as `file.lua:line`: the form Callbacks uses to name
 --- a hosted callback in the crash trace and the profile.
@@ -650,6 +656,63 @@ local function textHash(text)
         h = (h * 31 + text:byte(i)) % PROBE_HASH_MOD
     end
     return h
+end
+
+--- A new ON.LEVEL pass, with nothing run in it yet.
+local function resetLevelRan()
+    levelRan.n, levelRan.hash, levelRan.more = 0, 0, 0
+    levelRan.runs, levelRan.byWhere = {}, {}
+end
+
+--- One more callback the batch ran, into the floor's record.
+--- @param where string
+local function noteLevelRan(where)
+    levelRan.n = levelRan.n + 1
+    levelRan.hash = (levelRan.hash * 1000003 + textHash(where)) % PROBE_HASH_MOD
+    levelRan.byWhere[where] = (levelRan.byWhere[where] or 0) + 1
+    local runs = levelRan.runs
+    local last = runs[#runs]
+    if levelRan.more > 0 then
+        levelRan.more = levelRan.more + 1 -- past the names kept: none after it is shown
+    elseif last ~= nil and last.where == where then
+        last.n = last.n + 1
+    elseif #runs < LEVEL_NAMES_MAX then
+        runs[#runs + 1] = { where = where, n = 1 }
+    else
+        levelRan.more = 1
+    end
+end
+
+--- How many of this pass's callbacks came from each place, most first, as the flat
+--- list a floor report carries: { "entityContext.lua:1381", 32, "helpers2.lua:430",
+--- 32 }. A list, not a map, so the wire keeps its order. Past LEVEL_CENSUS_MAX places
+--- the rest are one last pair, "" and how many callbacks they had between them.
+--- @return table
+local function levelCensus()
+    local rows = {}
+    for where, n in rawPairs(levelRan.byWhere) do
+        rows[#rows + 1] = { where = where, n = n }
+    end
+    table.sort(rows, function(a, b)
+        if a.n ~= b.n then
+            return a.n > b.n
+        end
+        return a.where < b.where
+    end)
+    local out, rest = {}, 0
+    for i = 1, #rows do
+        if i <= LEVEL_CENSUS_MAX then
+            out[#out + 1] = rows[i].where:sub(1, LEVEL_CENSUS_NAME)
+            out[#out + 1] = rows[i].n
+        else
+            rest = rest + rows[i].n
+        end
+    end
+    if rest > 0 then
+        out[#out + 1] = ""
+        out[#out + 1] = rest
+    end
+    return out
 end
 
 --- Which ON.LEVEL pass this is. ON.LEVEL fires once per floor, so a new floor is a
@@ -842,7 +905,7 @@ local function levelDispatch(entry, ...)
         -- the first of this pass the engine reached: run them all, in order
         level.pass = pass
         level.top = level.seq
-        levelRan.n, levelRan.hash, levelRan.names = 0, 0, {}
+        resetLevelRan()
         pcall(probeLevel, entry.isActive) -- the probe looks before any of them does
         compactLevel()
         level.batching = true
@@ -859,11 +922,7 @@ local function levelDispatch(entry, ...)
                     e.err, e.errPass = ret, pass
                     noteLevelError(e, ret, trace)
                 end
-                levelRan.n = levelRan.n + 1
-                levelRan.hash = (levelRan.hash * 1000003 + textHash(e.where)) % PROBE_HASH_MOD
-                if #levelRan.names < LEVEL_NAMES_MAX then
-                    levelRan.names[#levelRan.names + 1] = e.where
-                end
+                noteLevelRan(e.where)
             end
         end
         level.batching = false
@@ -906,6 +965,7 @@ function module.waterReport()
         mq = mod.queries, mn = mod.seen, mo = mod.ord, ms = mod.set, mx = mod.any,
         en = liquid.n, eh = liquid.set, ef = fx.n, es = fx.set,
         oc = levelRan.n, oh = levelRan.hash,
+        og = levelRan.n > 0 and levelCensus() or nil,
     }
     local lines = {}
     if gen.n + lvl.liquid.n + lvl.fx.n + liquid.n + fx.n > 0 then
@@ -925,10 +985,13 @@ function module.waterReport()
             .. probeList(lvl.fx.keys)
     end
     if levelRan.n > 0 then
+        local names = {}
+        for i, run in ipairs(levelRan.runs) do
+            names[i] = run.n > 1 and string.format("%s x%d", run.where, run.n) or run.where
+        end
         lines[#lines + 1] = string.format("level order: %d hosted ON.LEVEL callback(s) #%08X: %s%s",
-            levelRan.n, levelRan.hash, table.concat(levelRan.names, " "),
-            levelRan.n > #levelRan.names
-                and string.format(" (+%d more)", levelRan.n - #levelRan.names) or "")
+            levelRan.n, levelRan.hash, table.concat(names, " "),
+            levelRan.more > 0 and string.format(" (+%d more)", levelRan.more) or "")
     end
     return { wire = wire, lines = #lines > 0 and lines or nil }
 end
@@ -1006,28 +1069,121 @@ function module.waterVerdict(mine, host, s)
         probeField(host, "mv") == 1 and "YES" or "no", order)
 end
 
+--- The places whose callback counts differ between two floor reports' censuses
+--- (`og`, see levelCensus), the biggest difference first, and whether either census
+--- left places out. nil when either report has no census: an older build's.
+--- @param mine any
+--- @param host any
+--- @return { w: string, m: integer, h: integer }[]? diff
+--- @return boolean cut
+local function levelCensusDiff(mine, host)
+    if type(mine) ~= "table" or type(host) ~= "table" then
+        return nil, false
+    end
+    local function counts(list)
+        local out, cut = {}, false
+        for i = 1, #list - 1, 2 do
+            local where, n = list[i], tonumber(list[i + 1])
+            if where == "" then
+                cut = true -- the places this census left out
+            elseif type(where) == "string" and n ~= nil then
+                out[where] = (out[where] or 0) + math.floor(n)
+            end
+        end
+        return out, cut
+    end
+    local a, cutA = counts(mine)
+    local b, cutB = counts(host)
+    local diff = {}
+    -- a place missing from a census that left places out may be one of those: its
+    -- count there is not known, so it is not called a difference
+    for where, n in rawPairs(a) do
+        if b[where] ~= nil or not cutB then
+            if (b[where] or 0) ~= n then
+                diff[#diff + 1] = { w = where, m = n, h = b[where] or 0 }
+            end
+        end
+    end
+    for where, n in rawPairs(b) do
+        if a[where] == nil and not cutA then
+            diff[#diff + 1] = { w = where, m = 0, h = n }
+        end
+    end
+    table.sort(diff, function(x, y)
+        local dx, dy = math.abs(x.m - x.h), math.abs(y.m - y.h)
+        if dx ~= dy then
+            return dx > dy
+        end
+        return x.w < y.w
+    end)
+    while #diff > 4 do
+        table.remove(diff)
+    end
+    return diff, cutA or cutB
+end
+
+--- Two floor reports' hosted ON.LEVEL callbacks, compared: nil when either side
+--- has no record of them, else whether they are the same, how many ran on each
+--- side, and which places had a different number (`diff`: nil without a census on
+--- both sides; `cut` when a census left places out, so `diff` may not be all).
+--- @param mine table
+--- @param host table
+--- @return { same: boolean, here: integer, host: integer, diff: table?, cut: boolean }?
+function module.levelOrderJudged(mine, host)
+    local mineCount, hostCount = probeField(mine, "oc"), probeField(host, "oc")
+    if mineCount < 0 or hostCount < 0 then
+        return nil
+    end
+    if mineCount == hostCount and probeField(mine, "oh") == probeField(host, "oh") then
+        return { same = true, here = mineCount, host = hostCount, diff = {}, cut = false }
+    end
+    local diff, cut = levelCensusDiff(mine.og, host.og)
+    return { same = false, here = mineCount, host = hostCount, diff = diff, cut = cut }
+end
+
+--- A census difference in words, "entityContext.lua:1381: 6 here, 32 on the host".
+--- Also reads one that came over the wire, so nothing in it is trusted to be a number.
+--- @param diff table?
+--- @param mineWord string  # "here", "on slot 2"
+--- @param hostWord string  # "on the host", "here"
+--- @return string
+function module.levelDiffText(diff, mineWord, hostWord)
+    local parts = {}
+    for _, d in ipairs(type(diff) == "table" and diff or {}) do
+        if type(d) == "table" then
+            parts[#parts + 1] = string.format("%s: %d %s, %d %s", tostring(d.w),
+                math.floor(tonumber(d.m) or 0), mineWord, math.floor(tonumber(d.h) or 0), hostWord)
+        end
+    end
+    return table.concat(parts, "; ")
+end
+
 --- A non-host's line for a floor whose hosted ON.LEVEL callbacks ran in a different
 --- order from the world host's. nil when they match, or when either side has no
 --- record of it.
 ---
 --- dev77 runs them in the order they were registered, so this can only differ if
 --- the mods REGISTERED them in a different order on the two machines -- something
---- the batch cannot fix, and the two logs' `level order` lines then name.
+--- the batch cannot fix. The line names the places that registered a different
+--- number of them (dev84); the two logs' `level order` lines show the whole order.
 --- @param mine table
 --- @param host table
 --- @param s integer
 --- @return string?
 function module.levelOrderVerdict(mine, host, s)
-    local mineCount, hostCount = probeField(mine, "oc"), probeField(host, "oc")
-    if mineCount < 0 or hostCount < 0 then
+    local judged = module.levelOrderJudged(mine, host)
+    if judged == nil or judged.same then
         return nil
     end
-    if mineCount == hostCount and probeField(mine, "oh") == probeField(host, "oh") then
-        return nil
+    local which = ", not in the same order"
+    if judged.diff ~= nil and #judged.diff > 0 then
+        which = " (" .. module.levelDiffText(judged.diff, "here", "on the host") .. ")"
+    elseif judged.diff ~= nil and not judged.cut and judged.here == judged.host then
+        which = ": the same callbacks, registered in a different order"
     end
     return string.format("ON.LEVEL ORDER seq=%d: DIFFERENT -- %d hosted ON.LEVEL callback(s)"
-        .. " here, %d on the host, not in the same order. The mods registered them"
-        .. " differently; compare the two logs' 'level order' lines", s, mineCount, hostCount)
+        .. " here, %d on the host%s. The mods registered them differently; compare the two"
+        .. " logs' 'level order' lines", s, judged.here, judged.host, which)
 end
 
 local probeInstalled = false
@@ -1656,7 +1812,7 @@ function module.install(env, opts)
         set_callback(function()
             -- a new floor: a new ON.LEVEL pass to come, and nothing run in it yet
             level.floors = level.floors + 1
-            levelRan.n, levelRan.hash, levelRan.names = 0, 0, {}
+            resetLevelRan()
             pcall(probeGeneration, isActive)
         end, ON.POST_LEVEL_GENERATION)
         set_callback(function()
