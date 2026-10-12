@@ -2122,13 +2122,50 @@ end
 --- host's seed for this level ordinal (the host itself is authoritative and
 --- leaves its own seed alone). Missing host seed for this ordinal (packet not
 --- here yet) => leave the local seed; the desync self-corrects a floor later.
-local function enforceLevelSeed()
+---
+--- The host's seed is the one its floor was GENERATED from, captured at its
+--- PRE_LEVEL_GENERATION -- after the engine's step for the floor, which the engine
+--- takes during the load, between PRE_LOAD_SCREEN and PRE_LEVEL_GENERATION:
+--- second += first. (Overlunky's get_adventure_seed undoes it the same way to find a
+--- run's starting seed, and room MGVG's 1-1 -> 1-2 was 9E2D6480 + D29E34C0 =
+--- 70CB9940.) So before the load the seed that leads to the host's is one step
+--- back, and after it, the host's own. Until dev85 the host's was set as-is at
+--- PRE_LOAD_SCREEN whenever it had arrived, and the engine then stepped it once more:
+--- MGVG's peer, seven frames behind the host after a transition hold, built 1-2 from
+--- a seed one step too far -- every engine stream different at generation, another
+--- floor, a POSITION DESYNC. In every capture before it the seed had not arrived in
+--- time, the peer used its own, and every floor matched. Now a seed is only SET when
+--- ours is out of step with the host's, and before the load as the value the engine's
+--- step takes to it.
+--- @param beforeLoad boolean? # PRE_LOAD_SCREEN: the engine has not stepped yet
+local function enforceLevelSeed(beforeLoad)
     if pendingRunSeed ~= nil then
         set_adventure_seed(pendingRunSeed[1], pendingRunSeed[2])
     elseif not Network.isWorldHost() then
         local seed = hostSeeds[levelOrdinal]
         if seed ~= nil then
-            set_adventure_seed(seed[1], seed[2])
+            local first, second = seed[1], seed[2]
+            if math.type(first) ~= "integer" or math.type(second) ~= "integer" then
+                return -- not a whole number: it cannot be stepped back exactly
+            end
+            local okNow, a, b = pcall(get_adventure_seed, false)
+            if not okNow or math.type(a) ~= "integer" or math.type(b) ~= "integer" then
+                a, b = nil, nil
+            end
+            local target = beforeLoad and second - first or second -- wraps as the step does
+            if a == first and (b == target or (beforeLoad and b == second)) then
+                -- in step: one step before the host's (or already at it, if this load
+                -- takes no step), so the engine arrives where the host did
+                return
+            end
+            set_adventure_seed(first, target)
+            if DesyncLog ~= nil then
+                DesyncLog.event("levelseed ord=%d %s: ours was %s, set to %s so this floor is the host's %s",
+                    levelOrdinal, beforeLoad and "before the load" or "at generation",
+                    (a ~= nil and b ~= nil) and string.format("%08X-%08X", a & 0xFFFFFFFF, b & 0xFFFFFFFF) or "?",
+                    string.format("%08X-%08X", first & 0xFFFFFFFF, target & 0xFFFFFFFF),
+                    string.format("%08X-%08X", first & 0xFFFFFFFF, second & 0xFFFFFFFF))
+            end
         elseif DesyncLog ~= nil then
             -- The host's authoritative seed for this floor has NOT arrived yet, so
             -- we are about to generate it from our own (un-rebased) seed — a
@@ -2465,7 +2502,7 @@ local function onPreLoadScreen()
     -- spawns coffins — or, when every slot is dead, nobody at all
     applyFreshRunReset()
     module.enforceRoster()
-    enforceLevelSeed()
+    enforceLevelSeed(true)
     applyStateSync()
     -- AFTER applyStateSync, so a stale time_of_death carried in the host's snapshot
     -- is normalized too (an alive slot must never be a coffin candidate)
@@ -2807,12 +2844,70 @@ end
 --- for the join warp at its next floor generation (see onPostLevelGeneration).
 --- @param payload { slot: integer, name: string }
 local function onJoinPending(payload)
+    local name = tostring(type(payload) == "table" and payload.name or "A player")
     if not runActive or not Network.isInRun() then
+        -- the player coming back, in the camp: say what happens next
+        if type(payload) == "table" and math.floor(tonumber(payload.slot) or -1) == Network.slot
+            and module.deferMidRunJoin() then
+            toast(string.format("You'll join the next run: %s can't take a player back into"
+                .. " a run already under way", module.hostedModName()))
+        end
+        return
+    end
+    if module.deferMidRunJoin() then
+        toast(string.format("%s is back, and will join the next run: %s can't take a player back"
+            .. " mid-run", name, module.hostedModName()))
+        if DesyncLog ~= nil then
+            DesyncLog.event("rejoin DEFERRED: %s (slot %s) waits for the next run -- a hosted mod is"
+                .. " running, and a game that rejoins mid-run does not have its run's history"
+                .. " (mo_midrunjoin.on allows it anyway)", name,
+                tostring(type(payload) == "table" and payload.slot or "?"))
+        end
         return
     end
     joinPending = true
-    toast(string.format("%s is joining next floor...",
-        tostring(type(payload) == "table" and payload.name or "A player")))
+    toast(string.format("%s is joining next floor...", name))
+end
+
+--- Folding a player back into a run under way (a mid-run join) rebuilds the party
+--- at the next floor from the host's snapshot, and that snapshot is the ENGINE's
+--- state. A hosted content mod keeps the run's history in its own memory --
+--- Spelunky 2.5's quests, its item pools, the rooms it has already given out -- and
+--- a game that rejoins mid-run has none of it, least of all one restarted after a
+--- crash. Room QZUX: the rejoiner built a different 1-4 from the same seed at once
+--- (FLOOR DESYNC on the fold-in floor), and the run desynced six seconds later.
+--- So while a hosted mod runs, a returning player waits in the camp and comes in
+--- with the next run, which the server already does for a join no transition
+--- picks up. `mo_midrunjoin.on` in the pack folder folds them in anyway; without a
+--- hosted mod nothing changes.
+module.midRunJoinAllowed = false
+pcall(function()
+    local probe = io.open(PackPath("mo_midrunjoin.on"), "r")
+    if probe ~= nil then
+        probe:close()
+        module.midRunJoinAllowed = true
+    end
+end)
+
+--- @return boolean
+function module.deferMidRunJoin()
+    if module.midRunJoinAllowed or ModHost == nil or ModHost.hostedPacks == nil then
+        return false
+    end
+    local ok, packs = pcall(ModHost.hostedPacks)
+    return ok and type(packs) == "table" and #packs > 0
+end
+
+--- The hosted mods' own names, for a toast (InputSync names them the same way).
+--- @return string
+function module.hostedModName()
+    if InputSync ~= nil and InputSync.hostedModName ~= nil then
+        local ok, name = pcall(InputSync.hostedModName)
+        if ok and type(name) == "string" then
+            return name
+        end
+    end
+    return "A hosted mod"
 end
 
 --- Fold a readied late-joiner into the run at the NEXT floor. The world host does

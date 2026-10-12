@@ -1,5 +1,70 @@
 # Changelog
 
+## 2.0.0-dev85
+
+Rooms MGVG and QZUX desynced, a game crashed, and a player who crashed left a white
+flag behind. No server change: the server stays at **1.0.13**. Both players need
+dev85 (the lobby only lets the same version play together).
+
+### Fixed
+
+- **A floor built from the wrong seed when the host's arrived early (room MGVG).**
+  The world host publishes the seed each floor was generated from, captured after
+  the engine's step for that floor, which the engine takes during the load
+  (`second += first`: MGVG's 1-1 -> 1-2 was 9E2D6480 + D29E34C0 = 70CB9940, the
+  same step Overlunky's `get_adventure_seed` undoes to find a run's first seed). A
+  peer that had the host's seed before it began loading set it as-is at
+  PRE_LOAD_SCREEN, and the engine stepped it once more. MGVG's peer, seven frames
+  behind after a 168 ms transition hold, built 1-2 from a seed one step too far:
+  every engine random stream different at generation, another floor (1353 border
+  tiles on the host's against 1640, a merchant on the host's only), and a POSITION
+  DESYNC. In every
+  earlier capture, every floor where the peer used its own seed matched. The
+  peer now sets a seed only when its own is out of step with the host's, and
+  before the load as the value the engine's step takes to it. A capture says so
+  when it happens (`levelseed ord=N before the load: ours was ..., set to ...`).
+- **No white flag where a player crashed or left.** In local co-op, which is how
+  Modded Online runs every machine, the engine flies a white flag over the leader
+  (the player its camera follows) and hands it on only when that player dies. A
+  player who crashes or leaves is kept in the party alive and hidden, so the flag
+  stayed behind at the spot they were last. It is hidden there now, and hidden
+  altogether once one player is left: a party of one is single player, which has
+  no flag. Their off-screen markers were already hidden the same way.
+
+### Changed
+
+- **A player coming back while a hosted mod runs joins the next run (room QZUX).**
+  Folding a player back into a run under way rebuilds the party from the host's
+  snapshot of the engine's state. Spelunky 2.5 keeps the run's history in its own
+  memory, and a game that rejoins mid-run has none of it, least of all one restarted
+  after a crash. QZUX's rejoiner built a different 1-4 from the same seed at once
+  (4065 entities against 4022) and the run desynced six seconds later. With a hosted
+  mod the run host no longer folds them in: they wait in the camp and come in with
+  the next run, and both sides get a toast saying so. Without a hosted mod nothing
+  changes; `mo_midrunjoin.on` in the pack folder folds them in anyway.
+
+### Not fixed: the crash after 2.5's Quetzalcoatl altar hook
+
+`crash_frame.txt` ends `OUT mod helpers2.lua:270 (onPreUpdate.callWrapper[hook=quetzalcoatlAltar@All,
+dbg=suppressNative...) PRE_UPDATE | sim 19:2682`: that hook of 2.5's had returned, and
+the game died before the next marked callback. Every callback registered through
+`set_callback` and the other hooking APIs is marked, ours and 2.5's, so it died in the
+engine's own update or in one of 2.5's per-entity hooks, which are not. Only one
+machine crashed, on a simulation both machines run, so it depends on something on
+that machine. Nothing of Modded Online's touches altars, sacrifices or corpses, and
+the leak sweep does not run on that frame. The session's logs are needed.
+
+### Tests
+
+New: `tests/test_floor_seed.py` (the engine's step, MGVG's early seed, late and
+mid-load seeds left alone, a peer out of step put back before the load and at
+generation, the step undone across overflow), `tests/test_gone_player_flag.py`
+(the flag over a departed player, a party of one, a flag left alone while two still
+play, one riding on what the player carries, one not attached at all) and
+`tests/test_rejoin_deferred.py` (no fold-in with a hosted mod, both sides told, as
+before without one, the flag file). 1189 passing, 1 skipped, under Lua 5.4 and 5.5;
+the server suite passes unchanged.
+
 ## 2.0.0-dev84
 
 Room PTHP: a desync on 1-2, where one player saw a turkey back room the other did not

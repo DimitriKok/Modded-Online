@@ -288,6 +288,17 @@ fails the test with the frame it died on, instead of quietly hanging.
     warn the server, so the others briefly wait — but a player who is silent for
     ~2 s mid-run is dropped automatically (they stream inputs constantly while
     alive), instead of stalling everyone for the full ~15 s connection timeout.
+- **A player who leaves or crashes** is gone for everyone else: their spelunker is
+  hidden where it stood, the white leader flag and their markers go with it, their
+  HUD row is emptied, and from the next floor the last player in the party is
+  dropped from it altogether. One who was player 1 keeps that slot, hidden, until
+  the run ends: renumbering the party mid-run could hand the mod's per-player
+  items to the wrong player, and a player who comes back reclaims their slot.
+- **Coming back mid-run**: without a hosted mod, a player who comes back is folded
+  in at the next floor. With one (Spelunky 2.5) they wait in the camp and join the
+  next run: the mod keeps the run's history in its own memory, which a game that
+  rejoins mid-run does not have, so the floors would come out different and the
+  run would desync. Drop `mo_midrunjoin.on` in this folder to fold them in anyway.
 - **Back layers**: any player can take a layer door alone — each machine's
   camera follows its own spelunker's layer (vanilla forces the camera to the
   leader's layer, which made solo layer travel impossible in co-op). Players

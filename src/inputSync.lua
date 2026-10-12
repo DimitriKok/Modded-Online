@@ -1826,6 +1826,7 @@ local function hostedModName()
     end
     return table.concat(names, " + ")
 end
+module.hostedModName = hostedModName
 
 --- The hosted mods are not in the same state on every machine: said on screen and
 --- in the log, once a run. What differs, from this machine's point of view: the
@@ -2459,6 +2460,49 @@ local function hideGoneOnNewLevel()
     end
 end
 
+-- The white flag the engine flies over the co-op LEADER, the player its camera
+-- follows (local co-op; Modded Online plays every machine as one). nil on an API
+-- that does not name it.
+local LEADER_FLAG = ENT_TYPE.FX_LEADER_FLAG
+
+--- Is this leader flag flying over a departed player? It rides on its holder as an
+--- overlay, like the indicators and the powerups the engine files beside it; one
+--- that is not attached to anything belongs to whoever it floats over.
+--- @param flag Entity
+--- @param goneUids table<integer, boolean>
+--- @return boolean
+local function flagOverGone(flag, goneUids)
+    local owner = flag.overlay
+    if owner ~= nil then
+        -- up the chain, in case it rides on something the player carries
+        for _ = 1, 4 do
+            if owner == nil then
+                return false
+            end
+            if goneUids[owner.uid] == true then
+                return true
+            end
+            owner = owner.overlay
+        end
+        return false
+    end
+    local fx, fy, fl = get_position(flag.uid)
+    local nearest, best = nil, nil
+    for coopIndex = 1, 4 do
+        local player = get_player(coopIndex, false)
+        if player ~= nil then
+            local px, py, pl = get_position(player.uid)
+            if pl == fl then
+                local d = (px - fx) * (px - fx) + (py - fy) * (py - fy)
+                if best == nil or d < best then
+                    nearest, best = player.uid, d
+                end
+            end
+        end
+    end
+    return nearest ~= nil and goneUids[nearest] == true
+end
+
 --- The engine shows an off-screen indicator (a floating character bubble +
 --- arrow) for every co-op player who is off the edge of the screen. A departed
 --- player that stays in the party (a middle/leading slot the contiguous roster
@@ -2466,6 +2510,13 @@ end
 --- frozen off-screen, so its indicator lingers. Hide the indicator FX attached
 --- to any gone player every frame. These are cosmetic, camera-derived, per-
 --- machine entities, so hiding them never touches the shared simulation.
+---
+--- And the leader's white flag (dev85). The engine hands it on only when its holder
+--- DIES, and a departed spelunker is kept alive, hidden where it was: so when the
+--- leader crashed or left, the flag stayed behind, flying over nothing at the spot
+--- they were last -- the "white flag where they crashed" the players reported. It is
+--- hidden there, and hidden altogether once one player is left: a party of one is a
+--- single-player game, which has no flag.
 local function hideGoneIndicators()
     if not active or not Network.isInRun() or next(goneSlots) == nil then
         return
@@ -2481,6 +2532,20 @@ local function hideGoneIndicators()
                 any = true
             end
         end
+    end
+    local alone = module.activePlayers() <= 1
+    if LEADER_FLAG ~= nil and (any or alone) then
+        pcall(function()
+            for _, uid in ipairs(get_entities_by_type(LEADER_FLAG)) do
+                local flag = get_entity(uid)
+                if flag ~= nil then
+                    local okOver, over = pcall(flagOverGone, flag, goneUids)
+                    if alone or (okOver and over) then
+                        flag.flags = set_flag(flag.flags, ENT_FLAG.INVISIBLE)
+                    end
+                end
+            end
+        end)
     end
     if not any then
         return

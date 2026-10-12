@@ -6,7 +6,7 @@ them.
 
 ## Start here
 
-**Build: `2.0.0-dev55` → `dev84`. The server must be redeployed at `1.0.13`.**
+**Build: `2.0.0-dev55` → `dev85`. The server must be redeployed at `1.0.13`.**
 Section 3's fix is half a server fix and does nothing without it (1.0.11 or later).
 Section 6 has a server half too, but its client half works on its own. A client on a
 server other than the one it expects says so in a toast and in the log. Check with
@@ -36,9 +36,12 @@ server other than the one it expects says so in a toast and in the log. Check wi
 | 20 | The host crashed leaving the summit's 2-2 (room UVLQ), and a Lua error a couple of floors earlier left nothing in either log | **NOT FIXED: cause not known.** The crash was in 2-2's teardown, after 2.5's PRE_LEVEL_DESTRUCTION wrapper (`helpers2.lua:533`) returned. dev79 stops the leak sweep destroying the ~360 entities 2.5 parks on those floors (the one thing hosting did there that solo 2.5 does not), and makes the next crash and the next error name themselves — section 20 |
 | 21 | On Linux (Proton) the mod said "Python is not installed" with Python installed; with that fixed, every connection said "Could not reach the server" | Python: **FIXED** in dev80, confirmed in game (the error went). The connection: dev81 makes the bridge survive a dead console (it died at its first print under Wine when its console had no window, reproduced with Wine 9) and the menu say how far the bridge got; not yet tried in game. The game is a Windows program under Proton and needs the Windows Python inside its prefix; on Proton 9 and older Wine's `where` is a stub, so the mod now also looks where a Windows install puts Python — section 21 |
 | 22 | Room PTHP: 1-2 generated differently on the two machines (a turkey back room on one only) | **CAUSE FOUND; the cure is restarting both games.** Spelunky 2.5 keeps some level hooks from earlier play, and the host's game had been running longer: 64 hosted ON.LEVEL callbacks against 38 at 1-1. dev84 tells every player at 1-1 ("Desync likely") and the log names the hooks that differ; not yet tried in game — section 22 |
+| 23 | Room MGVG: 1-2 built differently on the two machines | **FIXED** in dev85, not yet tried in game. The peer had the host's seed before it began loading and set it before the engine's step, so the floor came from one step too far — section 23 |
+| 24 | Room QZUX: a player who crashed and rejoined desynced at once; a white flag left where a player crashed | **CHANGED / FIXED** in dev85, not yet tried in game. With a hosted mod a returning player now joins the next run, not this one (2.5's run history is not in a rejoined game); the leader's white flag is hidden over a departed player and with one player left — section 24 |
+| 25 | A crash right after 2.5's Quetzalcoatl altar hook (sim 19:2682) | **NOT FIXED: cause not known.** In the engine's update or 2.5's per-entity hooks, on one machine only. Needs the session's logs — section 25 |
 
-**Git state:** `main` is at dev84; `claude/vigilant-cori-chwlul` stays open for the next
-fixes. `git log --oneline origin/main..HEAD` shows what a branch adds.
+**Git state:** `main` is at dev84. dev85 is on `claude/vigilant-cori-chwlul` only, until
+it is asked for on main. `git log --oneline origin/main..HEAD` shows what a branch adds.
 
 **Before trusting any log in the pack folder**, read "why two captures came back
 empty" in section 2. A stale `desync_log.txt` used to ship *inside the repo* and cost
@@ -1296,6 +1299,83 @@ hooks are stale. Restarting both games is the cure that is known to work.
 other fresh, and start a room run: both should get the toast at 1-1. Then restart both
 games and play: no toast, and 1-2 the same on both.
 
+## 23. Room MGVG: 1-2 built from a seed one step too far — FIXED in dev85, NOT YET TRIED IN GAME
+
+**The report (2026-10-12, dev84, EatYoCake hosting, DoctorPuppy the peer):** 1-1 matched;
+1-2 `FLOOR DESYNC seq=3 seed ok entities DIFFER` on the peer, a POSITION DESYNC 6 s in.
+The level hooks matched (58 and 58), so not section 22.
+
+**What the logs show.** At the peer's 1-2 `gen[pre]` every one of the ten engine PRNG
+streams differed from the host's; on the host, streams 1..9 at 1-2's `gen[pre]` equal
+its 1-1 values (they are reseeded per level from the run constant), only stream 0
+moves. The peer's 1-2 was the only floor in any capture without a `no host seed yet`
+line: a 168 ms transition hold had put it seven frames behind, so the host's
+`levelseed ord=1` had arrived before its load. In every other capture the seed came
+late, the peer used its own, and every floor matched.
+
+**Why.** The adventure seed steps once per level, during the load (between
+PRE_LOAD_SCREEN and PRE_LEVEL_GENERATION): `second += first`. Overlunky's
+`get_adventure_seed(true)` (rpc.cpp) undoes exactly that, `level_count` times, to find a
+run's first seed, and MGVG's 9E2D6480 + D29E34C0 = 70CB9940 is 1-1 -> 1-2. The host
+captures its seed at PRE_LEVEL_GENERATION, after the step; `enforceLevelSeed` set it
+as-is at the peer's PRE_LOAD_SCREEN, before the step, and the engine stepped it once
+more (0x70CB9940 -> 0x4369CE00 for MGVG's 1-2). `set_adventure_seed` itself only writes
+the two numbers.
+
+**dev85 (`eventSync.enforceLevelSeed(beforeLoad)`):** a host seed is only SET when ours
+is out of step: before the load as `second - first` (Lua integers wrap exactly as the
+engine's step does), at generation as the host's value. Ours one step before the
+host's, or already at it, is left alone. The run seed and a resync's or a join's seed
+(`pendingRunSeed`) are forced on every machine as before, which keeps them in step with
+each other. `tests/test_floor_seed.py`.
+
+## 24. Room QZUX: a rejoin desynced at once, and the white flag — CHANGED/FIXED in dev85, NOT YET TRIED IN GAME
+
+**The report:** DoctorPuppy crashed, restarted and rejoined; folded in at 1-4
+(`rejoin kit: slot 1 (coop 1) folded in`), their game built a different 1-4 from the
+same seed (4065 entities against 4022; streams 1..9 matched, so the seed was applied
+the same way on both) and the run desynced 6 s later. Separately: "when one player
+crashes the game still thinks two people are in the game ... a white flag is placed
+where they crashed/died".
+
+**The rejoin.** The fold-in rebuilds the party from the host's snapshot, which is
+engine state. 2.5 keeps the run's history in its own memory (quests, item pools, the
+rooms it has given out) and a rejoined game has none of it. (Also seen: at a fold-in
+the run host becomes the lowest slot in the roster, which made the freshly restarted
+game the world host. Moot now.) dev85: while a hosted mod runs, `onJoinPending` does
+not arm the fold-in; the returning player waits in the camp and the server brings
+them in with the next `run_start`, as it already did for a join no transition picked
+up. Toasts on both sides; `rejoin DEFERRED` in the log; `mo_midrunjoin.on` overrides.
+`tests/test_rejoin_deferred.py`.
+
+**The flag.** `FX_LEADER_FLAG` (684): in local co-op the engine flies it over the
+leader (`state.items.leader`, 1-based in Lua since Overlunky 2023-06-21) and passes it
+on only when that player dies. A departed spelunker is kept alive and hidden, so the
+flag stayed. dev85: `hideGoneIndicators` hides a flag riding (via its overlay chain,
+or floating nearest) on a departed player, and every flag once one player is left.
+`items.leader` itself is not written: nothing says how the engine moves the flag when
+it changes, and the leader matters for the camera and layer doors (both ours online)
+and the Olmec/Tiamat cutscene skip (cosmetic). `tests/test_gone_player_flag.py`.
+
+**Still the case:** a departed player 1 stays in the party, hidden, until the run ends.
+Only the last slot can be cut (the party is contiguous); renumbering the others would
+move 2.5's per-player items, if it keys them by slot, and break the rejoin's
+reclaim-your-slot rule. Not tried.
+
+## 25. A crash right after 2.5's Quetzalcoatl altar hook — CAUSE NOT KNOWN
+
+`crash_frame.txt` (session after dev84's, 23:45:23):
+`OUT mod helpers2.lua:270 (onPreUpdate.callWrapper[hook=quetzalcoatlAltar@All,dbg=suppressNative...) PRE_UPDATE | sim 19:2682`.
+Every `set_callback`-family callback is marked when tracing, ours and the mod's, and
+GAMEFRAME's are marked too, so the process died after the last PRE_UPDATE callback and
+before GAMEFRAME: in the engine's update, or in one of 2.5's per-entity hooks
+(`Entity:set_pre_*`/`set_post_*`), which are not marked. The named hook may simply be
+the last PRE_UPDATE callback in hash order. One machine only, on a simulation both
+run. Not the leak sweep (frame 2682 is off its cadence, and it acts past 1000 parked).
+Nothing of ours touches altars, sacrifices or corpses. Needed: both machines'
+`desync_log.txt` from that session (`desync_log.prev.txt` on a machine relaunched since),
+`crash_notes.txt`, and 2.5's altar code (`quetzalcoatlAltar`).
+
 ## Diagnostic tooling (flags and the files they write)
 
 All flag files live in the pack folder. They are files, not settings, for the reason
@@ -1376,7 +1456,7 @@ On a machine whose Python has no pytest or lupa, uv supplies both for the run:
 uv run --no-project --with pytest --with lupa python -m pytest tests/ -q
 ```
 
-1156 passing, none failing, 1 skipped (it needs hdmod next to this pack) (dev84), under Lua 5.4 and 5.5. The 16 long-standing failures went in dev67, with the two
+1189 passing, none failing, 1 skipped (it needs hdmod next to this pack) (dev85), under Lua 5.4 and 5.5. The 16 long-standing failures went in dev67, with the two
 stale test files they came from: `tests/test_world_mailbox.py` (the world mailbox
 deleted in dev44) and `tests/test_seeded_run.py` (the seeded-run flag removed in
 dev46). A failure here now means something broke.
