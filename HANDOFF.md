@@ -37,9 +37,8 @@ server other than the one it expects says so in a toast and in the log. Check wi
 | 21 | On Linux (Proton) the mod said "Python is not installed" with Python installed; with that fixed, every connection said "Could not reach the server" | Python: **FIXED** in dev80, confirmed in game (the error went). The connection: dev81 makes the bridge survive a dead console (it died at its first print under Wine when its console had no window, reproduced with Wine 9) and the menu say how far the bridge got; not yet tried in game. The game is a Windows program under Proton and needs the Windows Python inside its prefix; on Proton 9 and older Wine's `where` is a stub, so the mod now also looks where a Windows install puts Python — section 21 |
 | 22 | Room PTHP: 1-2 generated differently on the two machines (a turkey back room on one only) | **CAUSE FOUND; the cure is restarting both games.** Spelunky 2.5 keeps some level hooks from earlier play, and the host's game had been running longer: 64 hosted ON.LEVEL callbacks against 38 at 1-1. dev84 tells every player at 1-1 ("Desync likely") and the log names the hooks that differ; not yet tried in game — section 22 |
 
-**Git state:** `main` is at dev83. dev84 is on `claude/vigilant-cori-chwlul` only, until
-it is asked for on main. `git log --oneline origin/main..HEAD` shows
-what a branch adds.
+**Git state:** `main` is at dev84; `claude/vigilant-cori-chwlul` stays open for the next
+fixes. `git log --oneline origin/main..HEAD` shows what a branch adds.
 
 **Before trusting any log in the pack folder**, read "why two captures came back
 empty" in section 2. A stale `desync_log.txt` used to ship *inside the repo* and cost
