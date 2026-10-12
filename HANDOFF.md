@@ -40,8 +40,8 @@ server other than the one it expects says so in a toast and in the log. Check wi
 | 24 | Room QZUX: a player who crashed and rejoined desynced at once; a white flag left where a player crashed | **CHANGED / FIXED** in dev85, not yet tried in game. With a hosted mod a returning player now joins the next run, not this one (2.5's run history is not in a rejoined game); the leader's white flag is hidden over a departed player and with one player left — section 24 |
 | 25 | A crash right after 2.5's Quetzalcoatl altar hook (sim 19:2682) | **NOT FIXED: cause not known.** In the engine's update or 2.5's per-entity hooks, on one machine only. Needs the session's logs — section 25 |
 
-**Git state:** `main` is at dev84. dev85 is on `claude/vigilant-cori-chwlul` only, until
-it is asked for on main. `git log --oneline origin/main..HEAD` shows what a branch adds.
+**Git state:** `main` is at dev85; `claude/vigilant-cori-chwlul` stays open for the next
+fixes. `git log --oneline origin/main..HEAD` shows what a branch adds.
 
 **Before trusting any log in the pack folder**, read "why two captures came back
 empty" in section 2. A stale `desync_log.txt` used to ship *inside the repo* and cost
