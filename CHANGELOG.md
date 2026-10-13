@@ -1,5 +1,92 @@
 # Changelog
 
+## 2.0.0-dev86
+
+A player who comes back mid-run is brought in at the next floor again while 2.5 runs.
+No server change: the server stays at **1.0.13**. Every player needs dev86 (the lobby
+only lets the same version play together).
+
+### Changed
+
+- **Coming back mid-run works again with a hosted mod.** dev85 made a returning
+  player wait for the next run, because a game that rejoins has none of Spelunky
+  2.5's memory of the run, and room QZUX's rejoiner built a different 1-4 at once.
+  Now the world host hands that memory over: 2.5's run state (its plan and every
+  quest), which of its worlds the run is in, the custom items its item library
+  carries from floor to floor, what four of its item files keep in their own
+  variables across a load (a held ray gun's charge, a ridden Qilin's health and its
+  rapid fire, and whether the Qilin quest's egg, the crystal Udjat or the worm meat
+  is being carried), and the Summit climbers' rescue chain, which 2.5 keeps outside
+  each floor's callbacks on purpose so it lasts from Summit-2 to Summit-4.
+- **Taken when it is right, and given only to the player coming back.** 2.5 reads
+  the screen being left as a floor loads. Everyone else is leaving the transition
+  screen; the returning player is leaving the camp, where 2.5 would find none of it
+  (and on one Ascent route 2.5 picks a different floor there). So the host takes the
+  state at the end of its own start of loading that floor, after 2.5 has read its
+  transition, and sends it with the floor that load is going to. The returning
+  player waits a moment in the camp ("Bringing you back into the run..."), loads the
+  same floor, and puts 2.5's state in before and after their own 2.5 load callbacks.
+  Nobody else's game is touched.
+- **Two floors of probation, and a safe way back.** If, on the floor they come back
+  on or the next one, the returning player's floor comes out different from the
+  host's, or 2.5's run state does, or their game drifts from the host's positions,
+  they go back to the camp and join the next run. Everyone else keeps playing as if
+  they had stayed away, and both sides are told why. The same happens if the host's
+  state has not arrived after 10 seconds. A player whose fold-in failed waits for the
+  next run for the rest of that run. A hosted mod nothing here can hand over still
+  means the next run, as in dev85, with the reason in the toast; `mo_midrunjoin.on`
+  in the pack folder still folds them in without any of this.
+
+### Fixed
+
+- **A hosted mod's callbacks run in the same order on every machine.** Overlunky
+  runs callbacks in the order of its internal hash map, which depends on every
+  callback ever registered and cleared on that machine, and a game that rejoined or
+  restarted has a different history. dev77 fixed this for ON.LEVEL only. In a room,
+  the hosted mod's callbacks for the load screen, the level files, generation, level
+  creation and destruction, the update and the screen events (GAMEFRAME, CAMP,
+  TRANSITION, START, RESET and the rest) now run in the order the mod registered
+  them, with each event's return rules kept. Modded Online's own work for those
+  events runs before every one of the mod's (state sync, seed and reset at the load
+  screen and generation; the lockstep gate) or after all of them (the run-start
+  window; the late input guard). Until now that held only where the engine happened
+  to keep ours first. Alone, everything runs as before.
+
+### Diagnostics
+
+- The floor report carries a fingerprint of 2.5's run state and world. When it
+  differs from the world host's it is logged, once a floor. While a returning player
+  is on probation it fails their fold-in, and each machine writes its copy of 2.5's
+  run state into its log, to set side by side.
+- New log lines: `fold-in: sent the hosted mods' run ...`, `hosted run state from the
+  world host: ...` and `fold-in FAILED (why)`.
+
+### Known limits
+
+- What is handed over is what Modded Online knows 2.5 keeps for a run. If 2.5 keeps
+  something else that the returning player's game lacks and it shows within two
+  floors, they go back to the camp; if it only shows later, the run can still desync.
+- On the floor someone comes back on, everyone waits a little longer at the start:
+  the returning player starts loading once the host has begun (about the host's fade
+  plus one trip over the network).
+- A future 2.5 that renames one of the values carried makes rejoins wait for the next
+  run again, with the reason in the toast, until Modded Online is updated for it.
+
+### Still open
+
+- The crash right after 2.5's Quetzalcoatl altar hook (dev85): the session's logs
+  are still needed.
+
+### Tests
+
+New: `tests/test_ordered_passes.py` (33: registration order, each event's return
+rules, callbacks added during a pass, heads and tails), `tests/test_run_state.py` (41:
+the handover, the item lists, the file values, the climbers' chain, refusals, the
+fingerprint, the encoding) and `tests/test_fold_in.py` (53: the decision, the wait, the host's send,
+the returning player's apply, the timeout, probation, the wiring, the immediate
+send). Removed: `tests/test_rejoin_deferred.py`. 1311 passing, 1 skipped, under Lua
+5.4 and 5.5; the server suite passes unchanged.
+
 ## 2.0.0-dev85
 
 Rooms MGVG and QZUX desynced, a game crashed, and a player who crashed left a white

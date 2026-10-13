@@ -256,6 +256,7 @@ local mismatchLines = 0 -- CHECKSUM MISMATCH lines this floor (see MISMATCH_LINE
 local myFloorDigest = nil        -- { seq, seed, ent } for the floor we're on
 local hostFloorDigests = {}      -- seq -> { seed, ent } from the world host
 local floorMismatchSeq = nil     -- seq we've already logged (once per floor)
+local runMismatchSeq = nil       -- ...and the same for the hosted mods' run state
 local floorDesyncUntil = 0       -- show the small "resyncing world" notice until (get_ms)
 -- Whether the hosted mods were in the same state on every machine, judged once a
 -- run, on the first floor this machine and the world host both reported
@@ -323,6 +324,7 @@ function module.beginSession(slots, delay)
     myFloorDigest = nil
     hostFloorDigests = {}
     floorMismatchSeq = nil
+    runMismatchSeq = nil
     floorDesyncUntil = 0
     modStateJudged = false
     modStateWarned = false
@@ -529,6 +531,7 @@ function module.rebase(newSeq)
     myFloorDigest = nil
     hostFloorDigests = {}
     floorMismatchSeq = nil
+    runMismatchSeq = nil
     floorDesyncUntil = 0
     for netSlot in pairs(inputBuf) do
         inputBuf[netSlot] = {}
@@ -715,10 +718,13 @@ end
 --- Every machine executes this at the identical simulation state.
 local function engage()
     if not lateGuardRegistered then
-        -- registered here (run time) so it lands AFTER all mods' load-time
-        -- registrations and therefore runs after them on every frame
+        -- After the mods' own GAMEFRAME callbacks on every frame: a tail of the
+        -- ordered pass in a room hosting one (see module.ordered). Registering it
+        -- here, at run time, after the mods' load-time registrations, was meant to
+        -- do that and could not: the engine does not keep registration order, and
+        -- the hooks a mod registers each floor come after it anyway.
         lateGuardRegistered = true
-        set_callback(function()
+        module.ordered(ON.GAMEFRAME, "inputSync:lateInputGuard", function()
             -- Bracketed like every other per-frame callback of ours. It was the ONE
             -- that was not, and because ON.GAMEFRAME runs between our PRE_UPDATE and
             -- POST_UPDATE marks, a crash in here left crash_frame.txt reading
@@ -732,7 +738,7 @@ local function engage()
             if DesyncLog ~= nil then
                 DesyncLog.frameDone("gameframe:lateInputGuard")
             end
-        end, ON.GAMEFRAME)
+        end, true)
         -- verify the sentinel bit survives a real write to the input field
         pcall(function()
             local slot = get_local_state().player_inputs.player_slots[myCoopIndex]
@@ -1753,7 +1759,29 @@ function module.checkFloorDigest(s)
     -- raised a false "FLOOR DESYNC" (and the top-right notice) on every single
     -- floor for non-hosts. A differing ENTITY fingerprint is the only real
     -- world divergence, so that alone is what we surface now (detection only).
+    -- The hosted mods' run (dev86): what an adapter fingerprints of it, for 2.5 its
+    -- run state and which of its worlds the run is in -- plain gameplay data, the
+    -- same on every machine in the same run. Measured on every floor and said once a
+    -- floor. While a returning player is on probation a difference is their fold-in
+    -- failing (EventSync.foldVerdict) even with the entities alike: a mod's run that
+    -- differs builds a different floor sooner or later, and no resync can mend it.
+    -- The mod's run as this machine has it then goes into the log, to be set beside
+    -- the host's.
+    local runDiffers = mine.run ~= nil and host.run ~= nil and mine.run ~= host.run
+    if runDiffers and runMismatchSeq ~= s then
+        runMismatchSeq = s
+        if DesyncLog ~= nil then
+            DesyncLog.event("hosted run state on seq %d DIFFERS from the world host's (#%08X here,"
+                .. " #%08X there)", s, mine.run, host.run)
+        end
+        if EventSync ~= nil and EventSync.logRunState ~= nil then
+            pcall(EventSync.logRunState, "it differs from the host's")
+        end
+    end
     if mine.ent == host.ent then
+        if EventSync ~= nil and EventSync.foldVerdict ~= nil then
+            pcall(EventSync.foldVerdict, runDiffers and "run" or nil)
+        end
         return
     end
     if floorMismatchSeq ~= s then
@@ -1763,6 +1791,13 @@ function module.checkFloorDigest(s)
         if DesyncLog ~= nil then
             DesyncLog.floorMismatch(s, mine, host)
         end
+    end
+    -- while a returning player is on probation, that is their fold-in failing
+    if EventSync ~= nil and EventSync.logRunState ~= nil then
+        pcall(EventSync.logRunState, "the floor differs from the host's")
+    end
+    if EventSync ~= nil and EventSync.foldVerdict ~= nil then
+        pcall(EventSync.foldVerdict, "floor")
     end
 end
 
@@ -1918,10 +1953,20 @@ function module.sendWorldDigest()
             water = report
         end
     end
+    -- ...and a fingerprint of the hosted mods' own run (dev86): the same on every
+    -- machine whose mod is in the same run, which on the floor a returning player was
+    -- brought back on is what says the mod's run came across (EventSync.foldVerdict)
+    local runDigest = nil
+    if ModHost ~= nil and ModHost.runStateDigest ~= nil then
+        local okRun, d = pcall(ModHost.runStateDigest)
+        if okRun and math.type(d) == "integer" then
+            runDigest = d
+        end
+    end
     myFloorDigest = { seq = seq, seed = seedHash, ent = entHash,
-        water = water ~= nil and water.wire or nil }
+        water = water ~= nil and water.wire or nil, run = runDigest }
     Network.sendEvent("worldchk", { s = seq, sd = seedHash, e = entHash,
-        w = water ~= nil and water.wire or nil })
+        w = water ~= nil and water.wire or nil, r = runDigest })
     local extra = water ~= nil and water.lines or nil
     -- what the hosted mods registered since the last floor, by kind (dev77): a timer
     -- counted in engine frames fires at a different moment on each machine
@@ -1955,6 +2000,7 @@ local function onWorldChk(payload, originSlot)
         seed = math.floor(tonumber(payload.sd) or 0),
         ent = math.floor(tonumber(payload.e) or 0),
         water = type(payload.w) == "table" and payload.w or nil,
+        run = math.tointeger(tonumber(payload.r)),
     }
     hostFloorDigests[s - 3] = nil -- floors long past can be dropped
     module.checkFloorDigest(s)
@@ -2075,6 +2121,10 @@ local function compareChecksums(key, entry)
         toast("Desync detected — a mod is behaving non-deterministically")
         if DesyncLog ~= nil then
             DesyncLog.positionDesync(key, entry.mine, entry.theirs, desyncStreak, seq)
+        end
+        -- on the floor a returning player was brought back on, the fold-in failing
+        if EventSync ~= nil and EventSync.foldVerdict ~= nil then
+            pcall(EventSync.foldVerdict, "positions")
         end
         -- The log goes to Discord now, at the popup, for a player who switched
         -- AUTOMATICALLY SEND LOGS on -- and the room is asked for theirs (logShip).
@@ -2685,8 +2735,32 @@ local function closeGatePass()
     gatePass.open = false
 end
 
+--- One of ours for an event whose hosted callbacks are ordered in a room: a head of
+--- the pass, before every one of the mod's (a tail, after them all, with `tail`).
+--- See "the order hosted callbacks run in" in determinism.lua. Without Determinism,
+--- set_callback.
+--- @param event any
+--- @param name string
+--- @param fn function
+--- @param tail boolean?
+--- @return any
+function module.ordered(event, name, fn, tail)
+    local det = rawget(_G, "Determinism")
+    if det ~= nil and type(det.head) == "function" and type(det.tail) == "function" then
+        if tail then
+            return det.tail(event, name, fn)
+        end
+        return det.head(event, name, fn)
+    end
+    return set_callback(fn, event)
+end
+
 -- Global infrastructure callbacks: no-ops unless a networked run is active.
-set_callback(function()
+--
+-- The gate is the first head of PRE_UPDATE (module.ordered): in a pass with a hosted
+-- mod's PRE_UPDATE callbacks it runs before any of them, wherever the engine keeps
+-- it, as gateFirst already made it do when the engine reached one of theirs first.
+module.ordered(ON.PRE_UPDATE, "inputSync:gate", function()
     -- The resend keepalive, which normally lives in guiTick (ON.GUIFRAME).
     --
     -- It has to run from here as well. While the lockstep gate is holding, our own
@@ -2709,7 +2783,7 @@ set_callback(function()
         return true
     end
     -- anything else: return NOTHING (not nil) and let the tick proceed
-end, ON.PRE_UPDATE)
+end)
 -- ...and where an update ends: after the sim ticked, or instead of it
 if ON.POST_UPDATE ~= nil then
     set_callback(closeGatePass, ON.POST_UPDATE)

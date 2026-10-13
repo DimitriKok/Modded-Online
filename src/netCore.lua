@@ -1053,6 +1053,35 @@ function module.sendEvent(kind, payload)
     nextCseq = nextCseq + 1
 end
 
+--- Put every reliable event that is due on the wire now: the ones never sent, and
+--- the ones whose last send is RESEND_MS old. The GUI-frame tick does this; a caller
+--- about to block on a screen load does it too, for an event that must not wait out
+--- the load (eventSync's fold-in).
+---
+--- ASCENDING cseq, never pairs(): the server takes our reliable events in strict
+--- order and will not apply one that leaves a gap, so sending them in Lua's hash
+--- order routinely put the later one on the wire first and made the server wait (and
+--- us re-send) for no reason. `next` first: in the steady state nothing is pending.
+--- @param now number? # ms, as nowMs() gives it
+function module.flushEvents(now)
+    if next(pendingOut) == nil then
+        return
+    end
+    now = now or nowMs()
+    local waiting = {}
+    for cseq in pairs(pendingOut) do
+        waiting[#waiting + 1] = cseq
+    end
+    table.sort(waiting)
+    for _, cseq in ipairs(waiting) do
+        local pending = pendingOut[cseq]
+        if pending ~= nil and now - pending.sentAt >= RESEND_MS then
+            pending.sentAt = now
+            sendToServer(pending.msg)
+        end
+    end
+end
+
 --- Warn the server that we are about to block on a screen load.
 ---
 --- While the game builds a level our Lua callbacks do not run at all, so we send
@@ -2248,28 +2277,10 @@ local function tick()
     -- allocate a table and run a sort every GUI frame -- i.e. at display rate -- to
     -- find that out. The ascending-cseq order inside is untouched; the server
     -- stalls if resends arrive in hash order.
-    if next(pendingOut) ~= nil then
-        local waiting = {}
-        for cseq in pairs(pendingOut) do
-            waiting[#waiting + 1] = cseq
-        end
-        -- The reliable stream's depth, said out loud on a slow cadence. An event
-        -- that is never acknowledged sits here forever and every event behind it
-        -- waits, which is invisible from the outside: the symptom is a peer
-        -- reporting a MISSING event while the sender believes it was sent. If this
-        -- number climbs and never falls, that is the answer.
-        -- No notice here. This queue drains normally even when the channel is
-        -- broken -- it only proves the SERVER acknowledged us, which it does. The
-        -- half that stalls is inbound, and it is watched below.
-        table.sort(waiting)
-        for _, cseq in ipairs(waiting) do
-            local pending = pendingOut[cseq]
-            if pending ~= nil and now - pending.sentAt >= RESEND_MS then
-                pending.sentAt = now
-                sendToServer(pending.msg)
-            end
-        end
-    end
+    -- No notice about the reliable stream's depth here. This queue drains normally
+    -- even when the channel is broken -- it only proves the SERVER acknowledged us,
+    -- which it does. The half that stalls is inbound, and it is watched below.
+    module.flushEvents(now)
     if now - lastPingMs >= HEARTBEAT_MS then
         lastPingMs = now
         pingStalled = false -- fresh window: judge the reply on its own merits

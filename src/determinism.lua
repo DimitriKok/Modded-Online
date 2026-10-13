@@ -571,58 +571,132 @@ local function probeList(keys)
     return table.concat(parts, " ")
 end
 
--- ------------------------------------------------------- the order of ON.LEVEL
+-- ---------------------------------------------- the order hosted callbacks run in
 --
 -- Overlunky keeps a script's callbacks in a std::unordered_map keyed by callback id
--- (lua_backend.hpp) and fires them in the order that map iterates. That is not the
--- order they were registered in, and it depends on the ids, which come from one
--- counter per script: hosted, the mod's and ours. Two machines never reach a floor
--- having registered exactly the same things (one sat in the camp twice, one joined
--- fresh, and the mod re-registers its hooks every floor), so the same mod's ON.LEVEL
--- callbacks run in a different order on each.
+-- (lua_backend.hpp) and fires an event's callbacks in the order that map iterates.
+-- Microsoft's unordered_map is a list with a bucket index over it: a new callback goes
+-- at the END of the list when its bucket is empty, and next to the one already in its
+-- bucket when not, and a rehash moves callbacks up to join their bucket. So the order
+-- is the order of registration, except where two ids happened to share a bucket --
+-- and which ids do depends on the ids, which come from one counter per script:
+-- hosted, the mod's and ours. Two machines never reach a floor having registered
+-- exactly the same things (one sat in the camp twice, one joined fresh, and the mod
+-- re-registers its hooks every floor), so the same mod's callbacks run in a slightly
+-- different order on each.
 --
 -- The FVJF capture shows it. On 2-1, 2.5 asked twice for water surfaces at ON.LEVEL.
 -- The surfaces were identical on both machines and so were the answers, the other
 -- way round: the host's first query got all 117 and its second none, the peer's
--- first got none and its second all 117. Two of the mod's callbacks had swapped.
+-- first got none and its second all 117. Two of the mod's callbacks had swapped. A
+-- player folded back into a run under way has a history shorter by the whole run,
+-- so there every hook 2.5 registers gets a different id from the host's: every
+-- event, every frame.
 --
--- The ON.LEVEL anchor (levelAnchored) already keeps one callback's rolls out of
--- another's. It cannot keep one callback from seeing what another one SPAWNED, and
--- with the lily pads back the pads are exactly such a spawn. So in a room the hosted
--- mods' ON.LEVEL callbacks run in the order they were registered, on every machine:
--- whichever of them the engine reaches first runs them all, in that order, and the
--- rest return when the engine reaches them. Alone, each runs at the engine's own
--- turn, as it always did.
+-- So in a room the hosted mods' callbacks for every event in ORDER_KIND run in the
+-- order they were registered, on every machine: whichever of them the engine reaches
+-- first runs them all, in that order, and the rest hand the engine what they
+-- returned when it reaches them. Ours that must come before the mod's (heads: our
+-- state sync before a level loads, the mod's random generator reseeded) run first,
+-- and ours that must come after (tails) run last. Alone, every callback runs at the
+-- engine's own turn, as it always did; and with no hosted callback for an event,
+-- ours run at their own turn too, so nothing changes without a hosted mod.
+--
+-- What the engine does with a callback's answer is kept, event by event:
+--   * "stop" (PRE_LOAD_SCREEN, PRE_LEVEL_CREATION, PRE_LEVEL_DESTRUCTION): the
+--     engine stops at the first callback that returns true. The batch stops at the
+--     first that does in ITS order; the ones after it do not run, and its true
+--     reaches the engine at its own turn, which stops the engine there;
+--   * "any" (PRE_LEVEL_GENERATION, PRE_UPDATE): every callback runs, and a true
+--     from any of them blocks; each hands back its own answer;
+--   * "all": every callback runs, and their answers are not used.
+-- Only a real boolean true counts, as in the engine, which converts strictly
+-- (handle_function: anything else is an "Unexpected return type").
 --
 -- Where the engine's own behaviour depends on the map, the batch picks one answer
 -- and gives it on every machine:
 --   * a callback cleared during the pass, by one that ran before it, does not run;
---   * a callback registered during the pass first runs on the next floor (the engine
---     reaches one inserted mid-iteration or not, depending on where its id hashes);
+--   * a callback registered during the pass runs in it, after all the others: where
+--     the engine nearly always puts it, at the end of the list;
 --   * a bare clear_callback() made by a callback itself clears that callback, not
 --     the one the engine happens to be running the pass from. One made inside an
 --     engine callback nested in it (an entity hook a spawn set off) is left alone,
 --     and the engine clears the callback it is running, as it always did;
 --   * an error in one callback does not stop the rest. It is raised when the engine
 --     reaches the callback that threw, so Playlunky still reports it.
+--
+-- A pass is one firing of one event. A new one starts when the engine frame has
+-- moved on, when an event that always comes between two firings has fired (the
+-- update's end between two PRE_UPDATEs, the next update between two loads), or when
+-- a callback that already had its turn is reached again after every callback of the
+-- pass has had one (or the one that stopped it has): an event firing twice in one
+-- frame is two passes. A callback registered during a pass and reached after the
+-- others is still in that pass, and is not run twice.
 
 local LEVEL_NAMES_MAX = 64 -- names in a floor block's `level order` line
 -- Places named in a floor report's census of them (`og`), most callbacks first, and
 -- how much of each place's name goes on the wire.
 local LEVEL_CENSUS_MAX = 10
 local LEVEL_CENSUS_NAME = 40
+--- The most callbacks one pass runs. One that registers another every time it runs
+--- would keep a pass going for ever, here as in the engine.
+local ORDER_PASS_MAX = 4096
 
-local level = {
-    entries = {},    -- every live hosted ON.LEVEL callback, in registration order
-    byId = {},       -- engine callback id -> its entry
-    seq = 0,         -- registrations so far: the order itself
-    pass = nil,      -- the ON.LEVEL pass the last batch ran in
-    top = 0,         -- the newest registration that pass's batch took
-    running = nil,   -- the entry being run right now
-    batching = false,
-    floors = 0,      -- floors generated, one ON.LEVEL pass each
-    dirty = false,   -- entries cleared but still in `entries`
+--- The events ordered in a room, and what the engine does with their answers.
+local ORDER_KINDS = {
+    PRE_LOAD_SCREEN = "stop", POST_LOAD_SCREEN = "all",
+    PRE_LOAD_LEVEL_FILES = "all",
+    PRE_LEVEL_GENERATION = "any", POST_ROOM_GENERATION = "all",
+    POST_LEVEL_GENERATION = "all",
+    PRE_LEVEL_CREATION = "stop", POST_LEVEL_CREATION = "all",
+    PRE_LEVEL_DESTRUCTION = "stop", POST_LEVEL_DESTRUCTION = "all",
+    PRE_UPDATE = "any", POST_UPDATE = "all",
+    GAMEFRAME = "all", LEVEL = "all", LOADING = "all", SCREEN = "all",
+    TRANSITION = "all", CAMP = "all", START = "all", RESET = "all",
+    DEATH = "all", WIN = "all",
 }
+--- Events that always fire between two firings of the one on the left, in the
+--- engine's update (StateUpdate: PRE_UPDATE, the update with any level load inside
+--- it, POST_UPDATE or BLOCKED_UPDATE, then every script's update -- LEVEL, GAMEFRAME,
+--- the screens). One of them firing ends the pass of the event on the left.
+local ORDER_CLOSERS = {
+    PRE_UPDATE = { "POST_UPDATE", "BLOCKED_UPDATE" },
+    POST_UPDATE = { "PRE_UPDATE" },
+    PRE_LOAD_SCREEN = { "POST_LOAD_SCREEN", "PRE_UPDATE" },
+    POST_LOAD_SCREEN = { "PRE_LOAD_SCREEN", "PRE_UPDATE" },
+    PRE_LOAD_LEVEL_FILES = { "POST_LOAD_SCREEN", "PRE_UPDATE" },
+    PRE_LEVEL_GENERATION = { "POST_LEVEL_GENERATION", "PRE_UPDATE" },
+    POST_ROOM_GENERATION = { "POST_LEVEL_GENERATION", "PRE_UPDATE" },
+    POST_LEVEL_GENERATION = { "PRE_LEVEL_GENERATION", "PRE_UPDATE" },
+    PRE_LEVEL_CREATION = { "POST_LEVEL_CREATION", "PRE_UPDATE" },
+    POST_LEVEL_CREATION = { "PRE_LEVEL_CREATION", "PRE_UPDATE" },
+    PRE_LEVEL_DESTRUCTION = { "POST_LEVEL_DESTRUCTION", "PRE_UPDATE" },
+    POST_LEVEL_DESTRUCTION = { "PRE_LEVEL_DESTRUCTION", "PRE_UPDATE" },
+    GAMEFRAME = { "PRE_UPDATE" }, LEVEL = { "PRE_UPDATE" }, LOADING = { "PRE_UPDATE" },
+    SCREEN = { "PRE_UPDATE" }, TRANSITION = { "PRE_UPDATE" }, CAMP = { "PRE_UPDATE" },
+    START = { "PRE_UPDATE" }, RESET = { "PRE_UPDATE" }, DEATH = { "PRE_UPDATE" },
+    WIN = { "PRE_UPDATE" },
+}
+
+--- event value -> its kind, and its name for the trace and the log
+local ORDER_KIND, ORDER_NAME = {}, {}
+do
+    local on = rawget(_G, "ON")
+    if type(on) == "table" then
+        for name, kind in rawPairs(ORDER_KINDS) do
+            local value = rawget(on, name)
+            if type(value) == "number" and ORDER_KIND[value] == nil then
+                ORDER_KIND[value], ORDER_NAME[value] = kind, name
+            end
+        end
+    end
+end
+
+local order = {}         -- event -> the state of its passes (see orderOf)
+local closerFor = {}     -- event -> the passes its firing ends (see ORDER_CLOSERS)
+local orderSeq = 0       -- registrations so far, across every event: the order itself
+local orderById = {}     -- engine callback id -> the hosted entry it was registered for
+local orderRunning = nil -- the entry being run right now
 
 --- What the batch ran on this floor, for the probe: how many, a running hash of
 --- where each one was defined, in order, the names in that order (as runs of one
@@ -715,19 +789,18 @@ local function levelCensus()
     return out
 end
 
---- Which ON.LEVEL pass this is. ON.LEVEL fires once per floor, so a new floor is a
---- new pass; the engine frame is there in case anything ever fires it twice on one.
+--- The engine frame, which moves on between two firings of an event in all but the
+--- rare case of one firing twice in a frame (see "A pass is one firing" above).
 --- @return integer
-local function levelPassNow()
-    local frame = -1
+local function enginePassFrame()
     local getFrame = rawget(_G, "get_frame") -- the engine's: the mod's is our clock
     if type(getFrame) == "function" then
         local ok, f = pcall(getFrame)
         if ok and type(f) == "number" then
-            frame = math.floor(f)
+            return math.floor(f)
         end
     end
-    return (level.floors << 32) | (frame & 0xFFFFFFFF)
+    return -1
 end
 
 --- Can the batch tell a callback's own bare clear from one made inside an engine
@@ -739,33 +812,128 @@ local function canBatch()
     return type(dbg) == "table" and type(dbg.getinfo) == "function"
 end
 
+--- Have the events that end a pass of `ord`'s event end it. One callback of ours per
+--- such event, registered the first time an ordered event needs it.
+--- @param ord table
+local function ensureClosers(ord)
+    local names = ORDER_CLOSERS[ord.name]
+    local on = rawget(_G, "ON")
+    if names == nil or type(on) ~= "table" then
+        return
+    end
+    for _, name in ipairs(names) do
+        local value = rawget(on, name)
+        if type(value) == "number" then
+            local list = closerFor[value]
+            if list == nil then
+                list = {}
+                closerFor[value] = list
+                set_callback(function()
+                    for i = 1, #list do
+                        list[i].closed = true
+                    end
+                end, value)
+            end
+            list[#list + 1] = ord
+        end
+    end
+end
+
+--- The state of one event's passes, made on first use.
+--- @param event integer
+--- @return table
+local function orderOf(event)
+    local ord = order[event]
+    if ord == nil then
+        ord = {
+            event = event, kind = ORDER_KIND[event], name = ORDER_NAME[event] or tostring(event),
+            entries = {},      -- every live entry for the event, in registration order
+            mods = 0,          -- how many of them are a hosted mod's
+            active = nil,      -- whether the hosted mods are in a room
+            pass = 0,          -- passes begun
+            frame = nil,       -- the engine frame the current pass began on
+            complete = true,   -- every entry the current pass expected has had its turn
+            closed = false,    -- an event that ends this event's passes fired since
+            expect = 0,        -- entries the current pass expects the engine to reach
+            seen = 0,          -- of those, how many it has
+            stopper = nil,     -- the entry whose true stops the engine this pass
+            batching = false,
+            dirty = false,     -- entries cleared but still in `entries`
+        }
+        if ord.name == "LEVEL" then
+            -- the floor's census of what ran, for the probe (waterReport)
+            ord.onBatch = resetLevelRan
+            ord.onRan = function(entry)
+                noteLevelRan(entry.where)
+            end
+        end
+        order[event] = ord
+        ensureClosers(ord)
+    end
+    return ord
+end
+
+--- Batch this event now? Only in a room, and only with one of the mod's callbacks for
+--- it: ours alone are left to the engine, exactly as they always were.
+--- @param ord table
+--- @return boolean
+local function batchMode(ord)
+    if ord.mods <= 0 or ord.active == nil or not canBatch() then
+        return false
+    end
+    local ok, active = pcall(ord.active)
+    return ok and active == true
+end
+
 --- Drop cleared entries. Never during a batch, which is walking the list.
-local function compactLevel()
-    if not level.dirty or level.batching then
+--- @param ord table
+local function compactOrder(ord)
+    if not ord.dirty or ord.batching then
         return
     end
     local kept = {}
-    for i = 1, #level.entries do
-        local e = level.entries[i]
+    for i = 1, #ord.entries do
+        local e = ord.entries[i]
         if not e.cleared then
             kept[#kept + 1] = e
         end
     end
-    level.entries = kept
-    level.dirty = false
+    ord.entries = kept
+    ord.dirty = false
 end
 
+--- Has every entry this pass expected had its turn? Then the next call the engine
+--- makes for this event is a new pass. Never decided inside the batch: the engine
+--- has reached nothing of the pass yet but the callback that started it.
+--- @param ord table
+local function checkComplete(ord)
+    if not ord.batching and ord.expect > 0 and ord.seen >= ord.expect then
+        ord.complete = true
+    end
+end
+
+--- A hosted entry its mod cleared.
 --- @param entry table
-local function forgetLevel(entry)
+local function forgetOrdered(entry)
     if entry.cleared then
         return
     end
     entry.cleared = true
-    if entry.engineId ~= nil and level.byId[entry.engineId] == entry then
-        level.byId[entry.engineId] = nil
+    local ord = entry.ord
+    if entry.engineId ~= nil and orderById[entry.engineId] == entry then
+        orderById[entry.engineId] = nil
     end
-    level.dirty = true
-    compactLevel()
+    if entry.mod then
+        ord.mods = ord.mods - 1
+    end
+    -- one the pass was still waiting for: the engine will not reach it now
+    if entry.expected == ord.pass and entry.seenPass ~= ord.pass then
+        entry.expected = nil
+        ord.expect = ord.expect - 1
+        checkComplete(ord)
+    end
+    ord.dirty = true
+    compactOrder(ord)
 end
 
 --- The bottom of one entry's run, as a frame of its own. Never a tail call: the
@@ -773,7 +941,7 @@ end
 --- clear_callback() looks for on the stack (clearIsEntrysOwn).
 --- @param entry table
 --- @return any # the entry's first return value
-local function levelBoundary(entry, ...)
+local function orderBoundary(entry, ...)
     local ret = entry.run(...)
     return ret
 end
@@ -806,7 +974,7 @@ local function clearIsEntrysOwn(entry)
         if type(info) ~= "table" then
             return false
         end
-        if info.func == levelBoundary then
+        if info.func == orderBoundary then
             return true
         end
         if info.what == "C" and info.func ~= pcall and info.func ~= xpcall then
@@ -818,7 +986,7 @@ end
 
 --- The traceback of the error being raised, kept for the log. The value itself goes
 --- back unchanged, so the mod's error reads exactly as it would have.
-local levelErrTrace = nil
+local orderErrTrace = nil
 
 --- @param v any
 --- @return string
@@ -829,118 +997,295 @@ end
 
 --- @param err any
 --- @return any err
-local function levelErrHandler(err)
-    levelErrTrace = nil
+local function orderErrHandler(err)
+    orderErrTrace = nil
     local dbg = rawget(_G, "debug")
     if type(dbg) == "table" and type(dbg.traceback) == "function" then
         local ok, tb = pcall(dbg.traceback, safeText(err), 2)
         if ok and type(tb) == "string" then
-            levelErrTrace = tb
+            orderErrTrace = tb
         end
     end
     return err
 end
 
---- Put a hosted ON.LEVEL callback's error in the desync log, under its own name.
+--- Put a hosted callback's error in the desync log, under its own name.
 --- @param entry table
 --- @param err any
 --- @param trace string?
-local function noteLevelError(entry, err, trace)
+local function noteOrderedError(entry, err, trace)
+    local where = entry.where .. " (ON." .. entry.ord.name .. ")"
     local callbacks = rawget(_G, "Callbacks")
     if callbacks ~= nil and type(callbacks.noteHostedError) == "function" then
-        pcall(callbacks.noteHostedError, entry.where .. " (ON.LEVEL)", err, trace)
+        pcall(callbacks.noteHostedError, where, err, trace)
         return
     end
     local log = rawget(_G, "DesyncLog")
     if log ~= nil and type(log.earlyEvent) == "function" then
-        pcall(log.earlyEvent, "*** HOSTED MOD ERROR in %s (ON.LEVEL): %s", entry.where,
-            trace or safeText(err))
+        pcall(log.earlyEvent, "*** HOSTED MOD ERROR in %s: %s", where, trace or safeText(err))
     end
 end
 
---- Run one entry, named in the crash trace while it runs.
+--- What a hosted entry is called in the crash trace and the profile: what Callbacks
+--- calls any hosted callback (the mod's own function, and the name the mod's wrapper
+--- gives it), worked out once, the first time it is wanted.
+--- @param entry table
+--- @return string
+local function entryLabel(entry)
+    if entry.label == nil then
+        local name = entry.where
+        local callbacks = rawget(_G, "Callbacks")
+        if callbacks ~= nil and type(callbacks.hostedName) == "function" and entry.own ~= nil then
+            local ok, rich = pcall(callbacks.hostedName, entry.own)
+            if ok and type(rich) == "string" then
+                name = rich
+            end
+        end
+        entry.label = name
+    end
+    return entry.label
+end
+
+--- ...and its line in the crash trace while it runs: the event after it, as
+--- Callbacks.hosted marks every hosted callback.
+--- @param entry table
+--- @return string
+local function entryMark(entry)
+    if entry.mark == nil then
+        entry.mark = "mod " .. entryLabel(entry) .. " " .. entry.ord.name
+    end
+    return entry.mark
+end
+
+--- Run one entry. A hosted one runs as Callbacks.hosted would run it, whichever
+--- callback the engine started the pass from: our depth zero, its time on its own
+--- name in the profile, and named in the crash trace while it runs.
 --- @param entry table
 --- @return boolean ok, any result # its first return value, or what it threw
 --- @return string? trace
-local function runLevelEntry(entry, ...)
-    local outer = level.running
-    level.running = entry
-    local log = rawget(_G, "DesyncLog")
-    local mark = nil
-    if log ~= nil and type(log.tracing) == "function" and type(log.frameMark) == "function" then
-        local okT, on = pcall(log.tracing)
-        if okT and on == true then
-            mark = "mod " .. entry.where
-            pcall(log.frameMark, mark)
+local function runOrderedEntry(entry, ...)
+    local outer = orderRunning
+    orderRunning = entry
+    local log, mark = nil, nil
+    local callbacks = nil
+    if entry.mod then
+        log = rawget(_G, "DesyncLog")
+        if log ~= nil and type(log.tracing) == "function" and type(log.frameMark) == "function" then
+            local okT, on = pcall(log.tracing)
+            if okT and on == true then
+                mark = entryMark(entry)
+                pcall(log.frameMark, mark)
+            end
+        end
+        callbacks = rawget(_G, "Callbacks")
+        if callbacks ~= nil and type(callbacks.asHosted) ~= "function" then
+            callbacks = nil
         end
     end
-    levelErrTrace = nil
-    local ok, err = xpcall(levelBoundary, levelErrHandler, entry, ...)
-    local trace = levelErrTrace
+    orderErrTrace = nil
+    local startedAt = callbacks ~= nil and type(callbacks.batchClock) == "function"
+        and callbacks.batchClock() or nil
+    local ok, err
+    if callbacks ~= nil then
+        ok, err = callbacks.asHosted(xpcall, orderBoundary, orderErrHandler, entry, ...)
+    else
+        ok, err = xpcall(orderBoundary, orderErrHandler, entry, ...)
+    end
+    local trace = orderErrTrace
+    if startedAt ~= nil and type(callbacks.chargeBatched) == "function" then
+        pcall(callbacks.chargeBatched, entryLabel(entry), startedAt)
+    end
     if mark ~= nil and type(log.frameDone) == "function" then
         pcall(log.frameDone, mark)
     end
-    level.running = outer
+    orderRunning = outer
     return ok, err, trace
 end
 
---- What the engine calls for each hosted ON.LEVEL callback.
+--- A new pass of `ord`'s event: every live entry is one the engine should reach.
+--- @param ord table
+--- @param now integer
+local function beginPass(ord, now)
+    compactOrder(ord)
+    ord.pass = ord.pass + 1
+    ord.frame = now
+    ord.complete = false
+    ord.closed = false
+    ord.stopper = nil
+    local expect = 0
+    for i = 1, #ord.entries do
+        local e = ord.entries[i]
+        if not e.cleared then
+            e.expected = ord.pass
+            expect = expect + 1
+        end
+    end
+    ord.expect, ord.seen = expect, 0
+end
+
+--- The whole pass, in order: our heads, the mod's callbacks, our tails, each in the
+--- order registered, including any registered while the pass runs.
+--- @param ord table
+local function runPass(ord, ...)
+    local pass = ord.pass
+    local stopKind = ord.kind == "stop"
+    local stopped = false
+    if ord.onBatch ~= nil then
+        pcall(ord.onBatch)
+    end
+    ord.batching = true
+    for phase = 1, 3 do
+        local list = ord.entries
+        local i, ran = 1, 0
+        while i <= #list and ran < ORDER_PASS_MAX do
+            local e = list[i]
+            if e.phase == phase and not e.cleared and not (stopped and phase < 3) then
+                ran = ran + 1
+                local ok, ret, trace = runOrderedEntry(e, ...)
+                e.donePass = pass
+                if ok then
+                    e.ret, e.err = ret, nil
+                    if stopKind and phase < 3 and ret == true then
+                        stopped = true
+                        ord.stopper = e
+                    end
+                else
+                    e.ret, e.err = nil, ret
+                    if e.mod then
+                        noteOrderedError(e, ret, trace)
+                    end
+                end
+                if e.mod and ord.onRan ~= nil then
+                    pcall(ord.onRan, e)
+                end
+            end
+            i = i + 1
+        end
+    end
+    ord.batching = false
+    compactOrder(ord)
+end
+
+--- An entry's own turn in the pass: count it, and hand the engine what it returned
+--- in the batch -- or raise what it threw, once.
+--- @param ord table
 --- @param entry table
-local function levelDispatch(entry, ...)
+local function turnOf(ord, entry)
+    local pass = ord.pass
+    entry.turnPass = pass
+    if entry.expected == pass and entry.seenPass ~= pass then
+        entry.seenPass = pass
+        ord.seen = ord.seen + 1
+        checkComplete(ord)
+    end
+    if ord.stopper == entry then
+        ord.complete = true -- the engine stops here: the pass is over
+    end
+    if entry.donePass ~= pass then
+        return -- it did not run in this pass: registered after it, or stopped before it
+    end
+    entry.donePass = nil
+    local err = entry.err
+    if err ~= nil then
+        entry.ret, entry.err = nil, nil
+        error(err, 0)
+    end
+    local ret = entry.ret
+    entry.ret = nil
+    if ret == nil then
+        return -- nothing, not nil: what the engine got when it ran alone
+    end
+    return ret
+end
+
+--- What the engine calls for every ordered callback, ours and the mod's.
+--- @param entry table
+local function orderedDispatch(entry, ...)
     if entry.cleared then
         return
     end
-    local okActive, active = pcall(entry.isActive)
-    if not okActive or active ~= true or not canBatch() then
-        -- alone: this callback, at the engine's own turn, exactly as it always ran
-        local ok, ret, trace = runLevelEntry(entry, ...)
+    local ord = entry.ord
+    if not batchMode(ord) then
+        -- alone, or no hosted callback for this event: this one, at the engine's own
+        -- turn, exactly as it always ran
+        if not entry.mod then
+            return entry.run(...)
+        end
+        local ok, ret, trace = runOrderedEntry(entry, ...)
         if not ok then
-            noteLevelError(entry, ret, trace)
+            noteOrderedError(entry, ret, trace)
             error(ret, 0)
         end
-        return ret
-    end
-    local pass = levelPassNow()
-    if pass ~= level.pass and not level.batching then
-        -- the first of this pass the engine reached: run them all, in order
-        level.pass = pass
-        level.top = level.seq
-        resetLevelRan()
-        pcall(probeLevel, entry.isActive) -- the probe looks before any of them does
-        compactLevel()
-        level.batching = true
-        local list = level.entries
-        for i = 1, #list do
-            local e = list[i]
-            if not e.cleared and e.seq <= level.top then
-                e.ranPass = pass
-                e.err, e.ret = nil, nil
-                local ok, ret, trace = runLevelEntry(e, ...)
-                if ok then
-                    e.ret, e.retPass = ret, pass
-                else
-                    e.err, e.errPass = ret, pass
-                    noteLevelError(e, ret, trace)
-                end
-                noteLevelRan(e.where)
-            end
+        if ret == nil then
+            return
         end
-        level.batching = false
-        compactLevel()
-    end
-    -- This callback's own turn. It ran in the batch (or, registered during this
-    -- pass, runs on the next floor); what it threw is raised now, once, and what it
-    -- returned is handed to the engine as if it had just run.
-    if entry.errPass == level.pass and entry.err ~= nil then
-        local err = entry.err
-        entry.err = nil
-        error(err, 0)
-    end
-    if entry.retPass == level.pass then
-        local ret = entry.ret
-        entry.ret, entry.retPass = nil, nil
         return ret
     end
+    if not ord.batching then
+        local now = enginePassFrame()
+        if ord.frame ~= now or ord.closed or (ord.complete and entry.turnPass == ord.pass) then
+            -- the first of this pass the engine reached: run them all, in order
+            beginPass(ord, now)
+            runPass(ord, ...)
+        end
+    end
+    return turnOf(ord, entry)
+end
+
+--- One of OURS for an ordered event, as a head (phase 1) or a tail (phase 3).
+--- @param event any
+--- @param name string
+--- @param fn any
+--- @param phase integer
+--- @return any # the engine's callback id
+local function ownOrdered(event, name, fn, phase)
+    if event == nil then
+        -- an event this build of the API does not have: set_callback(fn, nil) would
+        -- abort the whole chunk (see main.lua), and there is nothing to run it for
+        return nil
+    end
+    if ORDER_KIND[event] == nil or type(fn) ~= "function" then
+        return set_callback(fn, event) -- not an ordered event: as it always was
+    end
+    local ord = orderOf(event)
+    orderSeq = orderSeq + 1
+    local entry = {
+        ord = ord, seq = orderSeq, phase = phase, run = fn, where = name, mod = false,
+        cleared = false,
+    }
+    -- listed before the engine has it: a pass it starts must find it there
+    ord.entries[#ord.entries + 1] = entry
+    entry.engineId = set_callback(function(...)
+        return orderedDispatch(entry, ...)
+    end, event)
+    return entry.engineId
+end
+
+--- Register one of ours that must run before every hosted callback of `event` in a
+--- room (see "the order hosted callbacks run in"). Alone, or with no hosted callback
+--- for the event, it is an ordinary callback at the engine's own turn.
+--- @param event any # an ON value
+--- @param name string # for the log
+--- @param fn function
+--- @return any # the engine's callback id
+function module.head(event, name, fn)
+    return ownOrdered(event, name, fn, 1)
+end
+
+--- ...and one that must run after them all.
+--- @param event any
+--- @param name string
+--- @param fn function
+--- @return any
+function module.tail(event, name, fn)
+    return ownOrdered(event, name, fn, 3)
+end
+
+--- Is this event one whose hosted callbacks are ordered in a room?
+--- @param event any
+--- @return boolean
+function module.isOrdered(event)
+    return ORDER_KIND[event] ~= nil
 end
 
 --- Called by inputSync as the gate engages a floor: one more look, then the whole
@@ -1198,10 +1543,10 @@ local probeInstalled = false
 --- the sandbox one, and this runs before the mod's chunk does.
 ---
 --- Registering first does NOT mean running first. Overlunky keeps a script's
---- callbacks in an unordered_map and runs them in its hash order (see "the order of
---- ON.LEVEL"), so nothing of ours that has to come before the mod may rely on being
---- registered earlier. The ON.LEVEL probe look is taken inside the ordered batch for
---- exactly that reason.
+--- callbacks in an unordered_map and runs them in its own order (see "the order
+--- hosted callbacks run in"), so nothing of ours that has to come before the mod may
+--- rely on being registered earlier: those are heads (module.head), run first in the
+--- ordered pass.
 ---
 --- @param env table            # the sandbox the mod will run in
 --- @param opts table?          # { orderedPairs = boolean, active = fun(): boolean,
@@ -1541,30 +1886,33 @@ function module.install(env, opts)
     end
 
     -- Whatever the host installed as the sandbox's set_callback, captured here --
-    -- above registerLevel, which needs it: a `local` declared after a function is a
+    -- above registerOrdered, which needs it: a `local` declared after a function is a
     -- global inside it, and comes back nil.
     local hostSetCallback = rawget(env, "set_callback") or set_callback
 
-    --- A hosted ON.LEVEL callback, into the ordered list (see "the order of
-    --- ON.LEVEL"). The engine still gets one registration per callback, with the id
-    --- the mod is handed back, so clearing it by id works exactly as it did.
-    --- @param run function # the callback as it is to be run: windowed and anchored
-    --- @param cb function  # the mod's own function, for its name
-    --- @param id any       # ON.LEVEL
+    --- A hosted callback for an ordered event, into that event's list (see "the order
+    --- hosted callbacks run in"). The engine still gets one registration per callback,
+    --- with the id the mod is handed back, so clearing it by id works exactly as it did.
+    --- @param run any # the callback as it is to be run: windowed, anchored, held-skipping
+    --- @param cb any  # the mod's own function, for its name
+    --- @param id any  # the event
     --- @return any # the engine's callback id
-    local function registerLevel(run, cb, id)
-        level.seq = level.seq + 1
+    local function registerOrdered(run, cb, id)
+        local ord = orderOf(id)
+        orderSeq = orderSeq + 1
         local entry = {
-            seq = level.seq, run = run, env = env, isActive = isActive,
-            where = whereDefined(cb), cleared = false,
+            ord = ord, seq = orderSeq, phase = 2, run = run, own = cb, env = env,
+            mod = true, isActive = isActive, where = whereDefined(cb), cleared = false,
         }
-        local engineId = hostSetCallback(function(...)
-            return levelDispatch(entry, ...)
-        end, id)
+        local engineId = hostSetCallback(wraps(function(...)
+            return orderedDispatch(entry, ...)
+        end, run), id)
         if type(engineId) == "number" then
             entry.engineId = engineId
-            level.entries[#level.entries + 1] = entry
-            level.byId[engineId] = entry
+            ord.entries[#ord.entries + 1] = entry
+            ord.mods = ord.mods + 1
+            ord.active = isActive
+            orderById[engineId] = entry
         end
         return engineId
     end
@@ -1633,6 +1981,7 @@ function module.install(env, opts)
             -- the event fired, and then raised the error from inside our wrapper.
             return hostSetCallback(cb, id)
         end
+        local own = cb -- the mod's own function, before anything of ours is around it
         if id == ON.FRAME then
             -- moved to GAMEFRAME, as it always has been; once per SIMULATED frame
             -- there too (see simulatedOnly)
@@ -1673,37 +2022,41 @@ function module.install(env, opts)
             cb = module.anchor(cb, loadBase)
         elseif ON.LEVEL ~= nil and id == ON.LEVEL then
             -- whatever the mod decides at ON.LEVEL from the water, it decides from
-            -- the same water on every machine (see liquidSnap); whatever it draws
-            -- there stays there (see levelAnchored); and in a room every machine
-            -- runs the mod's ON.LEVEL callbacks in the same order (see registerLevel)
-            return registerLevel(levelAnchored(liquidWindowed(cb)), cb, id)
+            -- the same water on every machine (see liquidSnap), and whatever it draws
+            -- there stays there (see levelAnchored)
+            cb = levelAnchored(liquidWindowed(cb))
         elseif (ON.PRE_UPDATE ~= nil and id == ON.PRE_UPDATE)
             or (ON.POST_UPDATE ~= nil and id == ON.POST_UPDATE) then
             -- once per SIMULATED frame, like GAMEFRAME above (see simulatedOnly)
             cb = simulatedOnly(cb)
         end
+        if ORDER_KIND[id] ~= nil then
+            -- in a room every machine runs the mod's callbacks for this event in the
+            -- order it registered them (see "the order hosted callbacks run in")
+            return registerOrdered(cb, own, id)
+        end
         return hostSetCallback(cb, id)
     end
 
     -- The sandbox's clear_callback, chained the same way: the host's ownership guard
-    -- still decides, and this only keeps the ordered ON.LEVEL list in step.
+    -- still decides, and this only keeps the ordered lists in step.
     local hostClear = rawget(env, "clear_callback")
     if type(hostClear) == "function" then
         env.clear_callback = function(id, ...)
             if id == nil then
-                local running = level.running
+                local running = orderRunning
                 if running ~= nil and running.env == env and running.engineId ~= nil
                     and clearIsEntrysOwn(running) then
                     -- "clear the callback I am": the one running, which in a batch is
                     -- not the one the engine is running the pass from
-                    forgetLevel(running)
+                    forgetOrdered(running)
                     return hostClear(running.engineId)
                 end
                 return hostClear()
             end
-            local entry = level.byId[id]
+            local entry = orderById[id]
             if entry ~= nil and entry.env == env then
-                forgetLevel(entry)
+                forgetOrdered(entry)
             end
             return hostClear(id, ...)
         end
@@ -1797,27 +2150,45 @@ function module.install(env, opts)
         end
     end
 
-    set_callback(onLoading, ON.LOADING)
-    set_callback(onFloor, ON.PRE_LEVEL_GENERATION)
-    set_callback(onFrame, ON.GAMEFRAME)
-    set_callback(clock.invalidate, ON.PRE_LOAD_SCREEN)
-    set_callback(snapshotLiquid, ON.POST_LEVEL_GENERATION)
+    --- PRE_UPDATE and POST_UPDATE, ahead of the mod's: its generator reseeded for this
+    --- update, from the floor and the simulated frame alone. GAMEFRAME already is
+    --- (onFrame); between GAMEFRAME and the next PRE_UPDATE come the render callbacks,
+    --- which run as often as this machine draws, so anything they drew moved the
+    --- stream the mod's next update read.
+    --- @param salt integer # one per event, so the two never draw the same numbers
+    --- @return function
+    local function reseedFor(salt)
+        return function()
+            if not isActive() then
+                return -- solo: leave the mod's own randomness alone
+            end
+            gen.randomseed(module.floorBase() ~ (clock.rawSimFrame() * 2654435761) ~ salt)
+        end
+    end
+
+    -- Ours, ahead of the mod's in every pass: what the mod's callbacks for each event
+    -- see, they see on every machine (see "the order hosted callbacks run in").
+    module.head(ON.LOADING, "determinism:onLoading", onLoading)
+    module.head(ON.PRE_LEVEL_GENERATION, "determinism:onFloor", onFloor)
+    module.head(ON.GAMEFRAME, "determinism:onFrame", onFrame)
+    module.head(ON.PRE_UPDATE, "determinism:reseed", reseedFor(0x50524555))
+    module.head(ON.POST_UPDATE, "determinism:reseed", reseedFor(0x504F5355))
+    module.head(ON.PRE_LOAD_SCREEN, "determinism:clock", clock.invalidate)
+    module.head(ON.POST_LEVEL_GENERATION, "determinism:snapshotLiquid", snapshotLiquid)
 
     -- The water probe (measurement only, see above): once, however many mods are
-    -- hosted, since it looks at the engine's water and not at any one mod. Its
-    -- ON.LEVEL look is also taken by the ordered batch before the first of the mod's
-    -- callbacks runs, because the engine may well reach this one after them.
+    -- hosted, since it looks at the engine's water and not at any one mod. Both its
+    -- looks come before the first of the mod's callbacks runs.
     if not probeInstalled then
         probeInstalled = true
-        set_callback(function()
+        module.head(ON.POST_LEVEL_GENERATION, "determinism:probeGeneration", function()
             -- a new floor: a new ON.LEVEL pass to come, and nothing run in it yet
-            level.floors = level.floors + 1
             resetLevelRan()
             pcall(probeGeneration, isActive)
-        end, ON.POST_LEVEL_GENERATION)
-        set_callback(function()
+        end)
+        module.head(ON.LEVEL, "determinism:probeLevel", function()
             pcall(probeLevel, isActive)
-        end, ON.LEVEL)
+        end)
     end
 
     control = {
@@ -1845,8 +2216,495 @@ function module.install(env, opts)
             return matched
         end,
         matched = function() return matched end,
+        --- This mod's run state for a player folded back into the run (see "a hosted
+        --- mod's run state"): an adapter's, as one string, or nil and why not.
+        captureRun = function()
+            return module.captureRunFor(env, matched)
+        end,
+        --- ...put into a returning player's mod, at the head and the tail of the
+        --- fold-in floor's load.
+        applyRun = function(blob)
+            return module.applyRunFor(env, matched, blob)
+        end,
+        runSupported = function()
+            return module.runSupportedFor(env, matched)
+        end,
+        runDigest = function()
+            return module.runDigestFor(env, matched)
+        end,
     }
     return control
+end
+
+-- ---------------------------------------------------------- a hosted mod's run state
+--
+-- A player folded back into a run under way rebuilds the party's next floor from the
+-- host's snapshot of the ENGINE's state (eventSync's captureStateSync). A content mod
+-- keeps the run's history in its own memory as well, and a game that rejoins mid-run
+-- has none of it: room QZUX's returning player warped in from the camp, where
+-- Overlunky's warp() raises the reset flag, and Spelunky 2.5 reset its whole run --
+-- then rolled a new Dwelling plan at the next floor's level files, and built a
+-- different 1-4 from the same seed.
+--
+-- So an adapter that knows where a mod keeps its run can hand it over: the world host
+-- that folds the player in takes it at the end of its own PRE_LOAD_SCREEN for that
+-- floor, once the mod's load callbacks have read the transition screen it is leaving,
+-- and the returning player's machine puts it in at the head of its own load and again
+-- at its tail (eventSync, "bringing a player back"). Nobody else's mod is touched.
+--
+-- Only plain data travels: numbers, strings, booleans and tables of them. Functions,
+-- userdata and threads stay where they are, and so does anything an adapter names as
+-- this machine's own (an engine callback id, say).
+
+--- The longest a run state may be, in characters. It rides one UDP datagram with the
+--- rest of the run_start (the client reads 32 KB at most), so the snapshot stays well
+--- inside that; a bigger one is refused, and the player waits for the next run.
+local RUN_STATE_MAX = 16000
+local RUN_STATE_DEPTH = 32
+
+--- @param text string
+--- @return string
+local function escapeRunText(text)
+    -- `"` and `\` too: JSON would escape them, and the state must not grow on the wire
+    return (text:gsub("[%c%%;\"\\\128-\255]", function(c)
+        return string.format("%%%02X", c:byte())
+    end))
+end
+
+--- @param a any
+--- @param b any
+--- @return boolean
+local function runKeyLess(a, b)
+    local ra, rb = RANK[type(a)], RANK[type(b)]
+    if ra ~= rb then
+        return ra < rb
+    end
+    if ra == 3 then
+        return b and not a -- false before true
+    end
+    return a < b
+end
+
+--- @param k any
+--- @return boolean
+local function runKey(k)
+    local kind = type(k)
+    return (kind == "number" and k == k) or kind == "string" or kind == "boolean"
+end
+
+--- @param v any
+--- @return boolean
+local function runCarried(v)
+    local kind = type(v)
+    return kind ~= "function" and kind ~= "userdata" and kind ~= "thread"
+end
+
+--- @param v any
+--- @param out string[]
+--- @param ctx table # { seen, tables, len, skipped, cut, limit, skip }
+--- @param depth integer
+local function encodeRunValue(v, out, ctx, depth)
+    local piece
+    local kind = type(v)
+    if kind == "boolean" then
+        piece = v and "T" or "F"
+    elseif kind == "number" then
+        if math.type(v) == "integer" then
+            piece = string.format("i%d;", v)
+        elseif v ~= v then
+            piece = "fnan;"
+        elseif v == math.huge then
+            piece = "f+inf;"
+        elseif v == -math.huge then
+            piece = "f-inf;"
+        else
+            piece = "f" .. string.format("%a", v) .. ";"
+        end
+    elseif kind == "string" then
+        piece = "s" .. escapeRunText(v) .. ";"
+    elseif kind == "table" then
+        local ref = ctx.seen[v]
+        if ref ~= nil then
+            piece = string.format("r%d;", ref)
+        elseif depth >= RUN_STATE_DEPTH then
+            ctx.cut = ctx.cut + 1
+            piece = "n"
+        else
+            ctx.tables = ctx.tables + 1
+            ctx.seen[v] = ctx.tables
+            local keys = {}
+            for k, val in next, v do
+                if runKey(k) and runCarried(val) and not (ctx.skip ~= nil and ctx.skip[k]) then
+                    keys[#keys + 1] = k
+                else
+                    ctx.skipped = ctx.skipped + 1
+                end
+            end
+            table.sort(keys, runKeyLess)
+            out[#out + 1] = "t"
+            ctx.len = ctx.len + 1
+            for i = 1, #keys do
+                local k = keys[i]
+                encodeRunValue(k, out, ctx, depth + 1)
+                encodeRunValue(rawget(v, k), out, ctx, depth + 1)
+                if ctx.len > ctx.limit then
+                    return
+                end
+            end
+            piece = "e"
+        end
+    else
+        piece = "n" -- nil, and anything that does not travel
+        if kind ~= "nil" then
+            ctx.skipped = ctx.skipped + 1
+        end
+    end
+    out[#out + 1] = piece
+    ctx.len = ctx.len + #piece
+end
+
+--- A run state as text that survives JSON unchanged -- printable ASCII, no quote or
+--- backslash -- and
+--- reads back exactly: integers and floats apart (floats in hex, %a), strings
+--- escaped, a table's keys in one fixed order, a table met twice written once.
+--- Values that do not travel, and keys in `skip`, are left out.
+--- @param value any
+--- @param limit integer?
+--- @param skip table<string, boolean>?
+--- @return string? text
+--- @return table|string info # { tables, skipped, cut } or why not
+function module.encodeRun(value, limit, skip)
+    local ctx = {
+        seen = {}, tables = 0, len = 0, skipped = 0, cut = 0,
+        limit = limit or RUN_STATE_MAX, skip = skip,
+    }
+    local out = {}
+    local ok, err = pcall(encodeRunValue, value, out, ctx, 0)
+    if not ok then
+        return nil, "it could not be written: " .. tostring(err)
+    end
+    if ctx.len > ctx.limit then
+        return nil, string.format("it is too big to send (over %d characters)", ctx.limit)
+    end
+    return table.concat(out), { tables = ctx.tables, skipped = ctx.skipped, cut = ctx.cut }
+end
+
+--- The run state encodeRun wrote, back as Lua values.
+--- @param text string
+--- @return any value, string? why # value nil and why on anything malformed
+function module.decodeRun(text)
+    if type(text) ~= "string" then
+        return nil, "not text"
+    end
+    local pos, tables = 1, {}
+    local function fail(why)
+        error({ runDecode = why }, 0)
+    end
+    local function field()
+        local stop = text:find(";", pos, true)
+        if stop == nil then
+            fail("unterminated value")
+        end
+        local s = text:sub(pos, stop - 1)
+        pos = stop + 1
+        return s
+    end
+    local value
+    function value(depth)
+        if depth > RUN_STATE_DEPTH + 1 then
+            fail("too deep")
+        end
+        local c = text:sub(pos, pos)
+        pos = pos + 1
+        if c == "n" then
+            return nil
+        elseif c == "T" then
+            return true
+        elseif c == "F" then
+            return false
+        elseif c == "i" then
+            local n = math.tointeger(tonumber(field()))
+            if n == nil then
+                fail("bad integer")
+            end
+            return n
+        elseif c == "f" then
+            local s = field()
+            if s == "nan" then
+                return 0 / 0
+            elseif s == "+inf" then
+                return math.huge
+            elseif s == "-inf" then
+                return -math.huge
+            end
+            local n = tonumber(s)
+            if n == nil then
+                fail("bad float")
+            end
+            return n + 0.0
+        elseif c == "s" then
+            local raw = field()
+            if raw:gsub("%%%x%x", ""):find("%", 1, true) ~= nil then
+                fail("bad escape") -- the encoder writes every % as %25
+            end
+            return (raw:gsub("%%(%x%x)", function(h)
+                return string.char(tonumber(h, 16))
+            end))
+        elseif c == "r" then
+            local i = math.tointeger(tonumber(field()))
+            local t = i ~= nil and tables[i] or nil
+            if t == nil then
+                fail("bad reference")
+            end
+            return t
+        elseif c == "t" then
+            local t = {}
+            tables[#tables + 1] = t
+            while true do
+                if pos > #text then
+                    fail("unterminated table")
+                end
+                if text:sub(pos, pos) == "e" then
+                    pos = pos + 1
+                    return t
+                end
+                local k = value(depth + 1)
+                local v = value(depth + 1)
+                if k == nil then
+                    fail("a table key that is not a value")
+                end
+                rawset(t, k, v)
+            end
+        end
+        fail("unknown mark " .. string.format("%q", c))
+    end
+    local ok, result = pcall(value, 0)
+    if not ok then
+        return nil, type(result) == "table" and result.runDecode or tostring(result)
+    end
+    if pos ~= #text + 1 then
+        return nil, "more after the end"
+    end
+    return result, nil
+end
+
+--- Make `target` hold what `source` holds, in place: the tables already there stay
+--- the same tables (whoever holds one keeps seeing it), with what they keep that
+--- does not travel -- a function, an engine object -- left alone.
+--- @param target table
+--- @param source table
+--- @param depth integer?
+function module.assignRun(target, source, depth)
+    depth = depth or 0
+    local drop = {}
+    for k, v in next, target do
+        if runKey(k) and runCarried(v) and rawget(source, k) == nil then
+            drop[#drop + 1] = k
+        end
+    end
+    for i = 1, #drop do
+        rawset(target, drop[i], nil)
+    end
+    for k, v in next, source do
+        if type(v) == "table" and depth < RUN_STATE_DEPTH then
+            local here = rawget(target, k)
+            if type(here) ~= "table" then
+                here = {}
+                rawset(target, k, here)
+            end
+            module.assignRun(here, v, depth + 1)
+        else
+            rawset(target, k, v)
+        end
+    end
+end
+
+--- Visit every upvalue of every function reachable from `roots` through upvalues, at
+--- most `depth` steps in, until `visit(fn, index, name, value)` returns true.
+--- Reading an upvalue runs nothing of the mod's.
+--- @param roots function[]
+--- @param depth integer
+--- @param visit fun(fn: function, index: integer, name: string, value: any): boolean?
+--- @param accept (fun(fn: function): boolean)? # which functions to look into
+--- @return boolean found
+local function walkUpvalues(roots, depth, visit, accept)
+    local dbg = rawget(_G, "debug")
+    if type(dbg) ~= "table" or type(dbg.getupvalue) ~= "function" then
+        return false
+    end
+    local seen, frontier, steps = {}, {}, 0
+    for i = 1, #roots do
+        local fn = roots[i]
+        if type(fn) == "function" and not seen[fn] then
+            seen[fn] = true
+            frontier[#frontier + 1] = fn
+        end
+    end
+    for _ = 0, depth do
+        local nextFrontier = {}
+        for _, fn in ipairs(frontier) do
+            if accept == nil or accept(fn) then
+                for i = 1, 255 do
+                    local ok, name, value = pcall(dbg.getupvalue, fn, i)
+                    if not ok or name == nil then
+                        break
+                    end
+                    steps = steps + 1
+                    if steps > 100000 then
+                        return false
+                    end
+                    if visit(fn, i, name, value) then
+                        return true
+                    end
+                    if type(value) == "function" and not seen[value] then
+                        seen[value] = true
+                        nextFrontier[#nextFrontier + 1] = value
+                    end
+                end
+            end
+        end
+        frontier = nextFrontier
+        if #frontier == 0 then
+            break
+        end
+    end
+    return false
+end
+
+--- The mod's own callbacks, as registered with us: where its functions begin.
+--- @param env table
+--- @return function[]
+local function hostedRoots(env)
+    local roots = {}
+    for _, ord in rawPairs(order) do
+        for _, e in ipairs(ord.entries) do
+            if e.env == env and not e.cleared and type(e.own) == "function" then
+                roots[#roots + 1] = e.own
+            end
+        end
+    end
+    return roots
+end
+
+--- Is this function defined in a file whose name ends `suffix`?
+--- @param fn function
+--- @param suffix string
+--- @return boolean
+local function definedIn(fn, suffix)
+    local dbg = rawget(_G, "debug")
+    if type(dbg) ~= "table" or type(dbg.getinfo) ~= "function" then
+        return false
+    end
+    local ok, info = pcall(dbg.getinfo, fn, "S")
+    if not ok or type(info) ~= "table" then
+        return false
+    end
+    -- either slash: the host names a file with forward ones, but a path is a path
+    local src = tostring(info.source or ""):gsub("\\", "/")
+    return src:sub(-#suffix) == suffix
+end
+
+module.runStateMax = RUN_STATE_MAX
+module.walkUpvalues = walkUpvalues
+module.hostedRoots = hostedRoots
+module.definedIn = definedIn
+
+--- This mod's run state, from the first matched adapter that keeps one: the adapter's
+--- name and the encoded state, as one string. nil and why not otherwise.
+--- @param env table
+--- @param matched table[]
+--- @return string? blob, string|table info
+function module.captureRunFor(env, matched)
+    for _, adapter in ipairs(matched or {}) do
+        if type(adapter.captureRun) == "function" then
+            local ok, data, why = pcall(adapter.captureRun, env)
+            if not ok then
+                return nil, "its run state could not be read: " .. safeText(data)
+            end
+            if data == nil then
+                return nil, tostring(why or "it gave no run state")
+            end
+            local text, info = module.encodeRun(data, RUN_STATE_MAX, adapter.runSkipKeys)
+            if text == nil then
+                return nil, info
+            end
+            return tostring(adapter.name) .. ";" .. text, info
+        end
+    end
+    return nil, "nothing here knows where this mod keeps its run"
+end
+
+--- Can this mod's run state be handed over? The same question captureRunFor answers,
+--- without keeping the answer.
+--- @param env table
+--- @param matched table[]
+--- @return boolean, string?
+function module.runSupportedFor(env, matched)
+    local blob, why = module.captureRunFor(env, matched)
+    if blob == nil then
+        return false, why
+    end
+    return true
+end
+
+--- Put a run state captureRunFor wrote into this mod.
+--- @param env table
+--- @param matched table[]
+--- @param blob string
+--- @return boolean ok, string what
+function module.applyRunFor(env, matched, blob)
+    if type(blob) ~= "string" then
+        return false, "no run state arrived"
+    end
+    local name, text = blob:match("^([^;]*);(.*)$")
+    if name == nil then
+        return false, "the run state is not one this build wrote"
+    end
+    local adapter = nil
+    for _, a in ipairs(matched or {}) do
+        if tostring(a.name) == name and type(a.applyRun) == "function" then
+            adapter = a
+        end
+    end
+    if adapter == nil then
+        return false, "this machine's copy of the mod is not one " .. name .. " recognised"
+    end
+    local data, why = module.decodeRun(text)
+    if data == nil then
+        return false, "the run state did not read back: " .. tostring(why)
+    end
+    local ok, applied, what = pcall(adapter.applyRun, env, data)
+    if not ok then
+        return false, "putting it back failed: " .. safeText(applied)
+    end
+    return applied == true, tostring(what or "")
+end
+
+--- A fingerprint of this mod's run state as an adapter reads it, or nil: the same
+--- number on two machines whose mods are in the same run. An adapter's `digestRun`
+--- picks what is compared -- what every machine in the run holds alike, not what one
+--- of them is in the middle of carrying across a load -- and without one it is the
+--- whole of what captureRun hands over.
+--- @param env table
+--- @param matched table[]
+--- @return integer?
+function module.runDigestFor(env, matched)
+    for _, adapter in ipairs(matched or {}) do
+        if type(adapter.captureRun) == "function" then
+            local pick = type(adapter.digestRun) == "function" and adapter.digestRun
+                or adapter.captureRun
+            local ok, data = pcall(pick, env)
+            if not ok or data == nil then
+                return nil
+            end
+            local text = module.encodeRun(data, RUN_STATE_MAX, adapter.runSkipKeys)
+            if text == nil then
+                return nil
+            end
+            return textHash(tostring(adapter.name) .. ";" .. text)
+        end
+    end
+    return nil
 end
 
 -- ------------------------------------------------------------------- adapters
@@ -2141,6 +2999,378 @@ module.register({
                 .. " prologue %d -> 4 (%s)", was, why)
         end
         return true
+    end,
+})
+
+-- ------------------------------------------------------- Spelunky 2.5's run state
+--
+-- 2.5 keeps its run in one object, the game (src/game.lua): the run's plan and quests
+-- in `globalState` (src/gameState.lua: "A collection of state variables which are
+-- reset on game reset. These are preserved through the entire game." -- plain data,
+-- every field of it), and which of its worlds the run is in (sp25World,
+-- spelunky2World, the route of the transition being crossed, gameRestarted). The
+-- game is a local of its main.lua that the callbacks it registers hold, so it is
+-- found through their upvalues, once.
+--
+-- The custom items a player carries from floor to floor are remembered by its Custom
+-- Entities library (SereneRuby12's) in four lists the library's functions share:
+-- taken at the load INTO a transition, read back at the load out of it. They travel
+-- too -- without the ids of the entity hooks the library installed on this machine
+-- (`_lib_callbacks`), which are this machine's own; the library reads a record
+-- without them as it reads one for an item taken out of storage, and installs its
+-- hooks afresh.
+--
+-- And a few of 2.5's own files keep, in locals of their own, what their load
+-- callbacks read off the screen being left (SP25_LOCALS): a held ray gun's charge, a
+-- ridden Qilin's health and the rapid-fire Qilin itself, whether the Qilin quest's egg,
+-- the crystal Udjat or the worm meat was being carried. Those callbacks find nothing
+-- in a camp, so the returning player gets the host's values, read through the
+-- function each file hands back to the `require` that loaded it. One quest keeps its
+-- progress in its initialize's locals so that it outlives each floor's callbacks: the
+-- Summit climbers' chain, read through the handler of a hook 2.5 registered for it.
+
+local SP25_CARRY = {
+    t = "custom_entities_t_info", hh = "custom_entities_t_info_hh",
+    st = "custom_entities_t_info_storage", cog = "custom_entities_t_info_cog_ankh",
+}
+local SP25_RUN_VERSION = 2
+local sp25Games = setmetatable({}, { __mode = "k" }) -- sandbox -> its game, once found
+
+--- The file-scope locals 2.5's load callbacks set from the screen being left, by the
+--- end of the file's path. Every one must be found, or the run is not handed over.
+local SP25_LOCALS = {
+    { file = "/src/items/rayGun.lua", names = { "transitionRestoreBySlot" } },
+    { file = "/src/items/qilinQuest.lua", names = { "questRockWasHeld", "rapidQilinStates",
+        "rapidQilinUid", "rapidQilinHealth", "rapidQilinTransitionPending",
+        "rapidQilinRestoreFrames" } },
+    { file = "/src/items/crystalUdjatQuest.lua", names = { "crystalUdjatWasHeld" } },
+    { file = "/src/items/wormMeat.lua", names = { "wormMeatWasHeld" } },
+    -- "These variables intentionally live outside the per-level hook callbacks so the
+    -- chain can persist across Summit-2, Summit-3, and Summit-4." Reached through the
+    -- hook that clears them off the Summit, whose handler holds every one.
+    { file = "/src/hooks/summit/climbersquest.lua", hook = "cleanup-climberchainquest@NOT-Summit",
+        names = { "quest_active", "quest_failed", "saved_count", "active_fly_uid",
+            "active_fly_level", "level_is_ending", "pending_rescued_climber",
+            "pending_fly_level", "pending_fly_attempts" } },
+}
+local sp25Locals = setmetatable({}, { __mode = "k" }) -- sandbox -> its SP25_LOCALS, found
+
+--- 2.5's game object, found through the upvalues of the callbacks it registered.
+--- @param env table
+--- @return table?
+local function sp25Game(env)
+    local game = sp25Games[env]
+    if game ~= nil then
+        return game
+    end
+    local class = rawget(env, "Sp25GameClass")
+    if type(class) ~= "table" then
+        return nil
+    end
+    walkUpvalues(hostedRoots(env), 4, function(_, _, _, value)
+        if type(value) == "table" then
+            local ok, mt = pcall(getmetatable, value)
+            if ok and rawequal(mt, class) then
+                game = value
+                return true
+            end
+        end
+        return false
+    end)
+    if game ~= nil then
+        sp25Games[env] = game
+    end
+    return game
+end
+
+--- Where the Custom Entities library keeps its four carry lists: key -> { fn, index }
+--- of an upvalue holding it, read through the library's own functions only.
+--- @param env table
+--- @return table<string, { fn: function, index: integer }>?
+local function sp25CarrySlots(env)
+    local lib = rawget(env, "CustomEntities")
+    if type(lib) ~= "table" then
+        return nil
+    end
+    local roots = {}
+    for _, v in next, lib do
+        if type(v) == "function" then
+            roots[#roots + 1] = v
+        end
+    end
+    local want = {}
+    for key, name in rawPairs(SP25_CARRY) do
+        want[name] = key
+    end
+    local slots, found = {}, 0
+    walkUpvalues(roots, 2, function(fn, index, name)
+        local key = want[name]
+        if key ~= nil and slots[key] == nil then
+            slots[key] = { fn = fn, index = index }
+            found = found + 1
+            return found == 4
+        end
+        return false
+    end, function(fn)
+        return definedIn(fn, "custom_entities.lua")
+    end)
+    if found < 4 then
+        return nil
+    end
+    return slots
+end
+
+--- The handler 2.5 gave Hooks.runWhen under `name`, from its registry (a hook context
+--- keeps `name` and `handler`), or nil.
+--- @param env table
+--- @param name string
+--- @return function?
+local function sp25HookHandler(env, name)
+    local hooks = rawget(env, "Hooks")
+    if type(hooks) ~= "table" then
+        return nil
+    end
+    local lists = { rawget(hooks, "alwaysHooks"), rawget(hooks, "alwaysCheckHooks") }
+    local byKey = rawget(hooks, "hooks")
+    if type(byKey) == "table" then
+        for _, list in next, byKey do
+            lists[#lists + 1] = list
+        end
+    end
+    for _, list in ipairs(lists) do
+        if type(list) == "table" then
+            for _, ctx in ipairs(list) do
+                if type(ctx) == "table" and rawget(ctx, "name") == name
+                    and type(rawget(ctx, "handler")) == "function" then
+                    return rawget(ctx, "handler")
+                end
+            end
+        end
+    end
+    return nil
+end
+
+--- Where SP25_LOCALS live: "file:name" -> { fn, index, name } of an upvalue holding
+--- each, found from the value the file returned to `require` (2.5's item files return
+--- their initialize function, whose upvalues reach every local its callbacks use), or
+--- from a hook's handler. nil and why when any is missing, or a name could mean two
+--- different locals.
+--- @param env table
+--- @return table<string, { fn: function, index: integer, name: string }>?, string?
+local function sp25LocalSlots(env)
+    local cached = sp25Locals[env]
+    if cached ~= nil then
+        return cached
+    end
+    local mh = rawget(_G, "ModHost")
+    local dbg = rawget(_G, "debug")
+    if type(mh) ~= "table" or type(mh.loadedModuleValue) ~= "function"
+        or type(dbg) ~= "table" or type(dbg.upvalueid) ~= "function" then
+        return nil, "this build cannot read a file's own locals"
+    end
+    local slots = {}
+    for _, spec in ipairs(SP25_LOCALS) do
+        local root
+        if spec.hook ~= nil then
+            root = sp25HookHandler(env, spec.hook)
+            if root == nil then
+                return nil, "the hook " .. spec.hook .. " was not found"
+            end
+        else
+            local ok, value = pcall(mh.loadedModuleValue, env, spec.file)
+            if not ok or type(value) ~= "function" then
+                return nil, spec.file .. " was not loaded"
+            end
+            root = value
+        end
+        local wanted, ids = {}, {}
+        for _, name in ipairs(spec.names) do
+            wanted[name] = true
+        end
+        local twice = nil
+        walkUpvalues({ root }, 3, function(fn, index, name)
+            if wanted[name] then
+                local okId, id = pcall(dbg.upvalueid, fn, index)
+                local key = spec.file .. ":" .. name
+                if not okId then
+                    twice = key
+                elseif ids[name] == nil then
+                    ids[name] = id
+                    slots[key] = { fn = fn, index = index, name = name }
+                elseif ids[name] ~= id then
+                    twice = key -- two locals of that name: which one is meant?
+                end
+            end
+            return false
+        end, function(fn)
+            return definedIn(fn, spec.file)
+        end)
+        if twice ~= nil then
+            return nil, twice .. " is not one local"
+        end
+        for _, name in ipairs(spec.names) do
+            if slots[spec.file .. ":" .. name] == nil then
+                return nil, spec.file .. ":" .. name .. " was not found"
+            end
+        end
+    end
+    sp25Locals[env] = slots
+    return slots
+end
+
+--- 2.5's run state and which of its worlds the run is in: what captureRun hands over
+--- and the run's fingerprint compares.
+--- @param game table
+--- @return table
+local function sp25World(game)
+    return {
+        sp25World = rawget(game, "sp25World"),
+        spelunky2World = rawget(game, "spelunky2World"),
+        gameRestarted = rawget(game, "gameRestarted"),
+        from = rawget(game, "transitionFromSp25World"),
+        to = rawget(game, "transitionToSp25World"),
+    }
+end
+
+module.register({
+    name = "spelunky-2.5",
+    detect = function(env)
+        return type(rawget(env, "Sp25GameClass")) == "table"
+            and type(rawget(env, "Sp25GameStateClass")) == "table"
+    end,
+    newRun = function() end,
+    -- this machine's own: the entity hooks the Custom Entities library installed
+    runSkipKeys = { _lib_callbacks = true },
+    --- @param env table
+    --- @return table? data, string? why
+    captureRun = function(env)
+        local game = sp25Game(env)
+        if game == nil then
+            return nil, "its game was not found"
+        end
+        local gs = rawget(game, "globalState")
+        if type(gs) ~= "table" then
+            return nil, "it has no run state yet"
+        end
+        local slots = sp25CarrySlots(env)
+        if slots == nil then
+            return nil, "its custom item lists were not found"
+        end
+        local locals, whyNot = sp25LocalSlots(env)
+        if locals == nil then
+            return nil, whyNot
+        end
+        local dbg = rawget(_G, "debug")
+        local carry = {}
+        for key, slot in rawPairs(slots) do
+            local ok, _, value = pcall(dbg.getupvalue, slot.fn, slot.index)
+            if ok and type(value) == "table" then
+                carry[key] = value
+            end
+        end
+        local own = {}
+        for key, slot in rawPairs(locals) do
+            local ok, name, value = pcall(dbg.getupvalue, slot.fn, slot.index)
+            if not ok or name ~= slot.name then
+                return nil, key .. " moved"
+            end
+            own[key] = { v = value } -- a box, so a nil travels as one
+        end
+        return {
+            v = SP25_RUN_VERSION,
+            gs = gs,
+            w = sp25World(game),
+            ce = carry,
+            ml = own,
+        }
+    end,
+    --- What two machines in the same run hold alike: the run state and the world,
+    --- not the items and values in the middle of being carried across a load.
+    --- @param env table
+    --- @return table?
+    digestRun = function(env)
+        local game = sp25Game(env)
+        if game == nil then
+            return nil
+        end
+        local gs = rawget(game, "globalState")
+        if type(gs) ~= "table" then
+            return nil
+        end
+        return { v = SP25_RUN_VERSION, gs = gs, w = sp25World(game) }
+    end,
+    --- @param env table
+    --- @param data table
+    --- @return boolean ok, string what
+    applyRun = function(env, data)
+        if type(data) ~= "table" or data.v ~= SP25_RUN_VERSION or type(data.gs) ~= "table"
+            or type(data.w) ~= "table" or type(data.ce) ~= "table"
+            or type(data.ml) ~= "table" then
+            return false, "it is not a run state this build reads"
+        end
+        local game = sp25Game(env)
+        if game == nil then
+            return false, "its game was not found"
+        end
+        local slots = sp25CarrySlots(env)
+        if slots == nil then
+            return false, "its custom item lists were not found"
+        end
+        local locals, whyNot = sp25LocalSlots(env)
+        if locals == nil then
+            return false, whyNot
+        end
+        for key in rawPairs(locals) do
+            if type(data.ml[key]) ~= "table" then
+                return false, key .. " did not come with it"
+            end
+        end
+        local dbg = rawget(_G, "debug")
+        if type(dbg) ~= "table" or type(dbg.setupvalue) ~= "function" then
+            return false, "debug.setupvalue is not available"
+        end
+        local gs = rawget(game, "globalState")
+        if type(gs) ~= "table" then
+            gs = {}
+            local class = rawget(env, "Sp25GameStateClass")
+            if type(class) == "table" then
+                setmetatable(gs, class)
+            end
+            rawset(game, "globalState", gs)
+        end
+        module.assignRun(gs, data.gs)
+        rawset(game, "sp25World", data.w.sp25World)
+        rawset(game, "spelunky2World", data.w.spelunky2World)
+        rawset(game, "gameRestarted", data.w.gameRestarted)
+        rawset(game, "transitionFromSp25World", data.w.from)
+        rawset(game, "transitionToSp25World", data.w.to)
+        local carried = 0
+        for key, name in rawPairs(SP25_CARRY) do
+            local slot = slots[key]
+            local list = data.ce[key]
+            if type(list) ~= "table" then
+                list = {}
+            end
+            carried = carried + #list
+            local set = dbg.setupvalue(slot.fn, slot.index, list)
+            if set ~= name then
+                return false, "the custom item list " .. name .. " moved"
+            end
+        end
+        local own = 0
+        for key, slot in rawPairs(locals) do
+            local set = dbg.setupvalue(slot.fn, slot.index, data.ml[key].v)
+            if set ~= slot.name then
+                return false, key .. " moved"
+            end
+            own = own + 1
+        end
+        local fields = 0
+        for _ in next, gs do
+            fields = fields + 1
+        end
+        return true, string.format("world %s, %d run values, %d carried custom item(s),"
+            .. " %d of its own", tostring(rawget(game, "sp25World")), fields, carried, own)
     end,
 })
 

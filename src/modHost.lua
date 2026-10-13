@@ -1731,6 +1731,28 @@ end
 
 -- -------------------------------------------------------------- the import path
 
+--- Each sandbox's module cache (installImports), for module.loadedModuleValue.
+module.importedBy = setmetatable({}, { __mode = "k" })
+
+--- What one of a hosted mod's files returned when `require` loaded it, by the end of
+--- its path ("/src/items/rayGun.lua"), or nil. An adapter reads a file's own locals
+--- through it (determinism.lua, "Spelunky 2.5's run state"); nothing is run.
+--- @param env table
+--- @param suffix string
+--- @return any
+function module.loadedModuleValue(env, suffix)
+    local loaded = module.importedBy[env]
+    if loaded == nil or type(suffix) ~= "string" then
+        return nil
+    end
+    for path, entry in pairs(loaded) do
+        if type(path) == "string" and path:gsub("\\", "/"):sub(-#suffix) == suffix then
+            return entry.value
+        end
+    end
+    return nil
+end
+
 --- Give the sandbox the import functions a pack expects, sharing one module cache
 --- so a module imported twice executes once — the same contract `require` has, and
 --- what 2.5's SafeImport relies on.
@@ -1741,6 +1763,7 @@ end
 --- @param sources table<string, string>? # module path -> source, tried before disk
 local function installImports(env, packDir, report, sources)
     local loaded = {}   -- resolved FILE PATH -> { value }, not module name
+    module.importedBy[env] = loaded
     local dirStack = {} -- directories of the modules currently being loaded
     local absent = {}   -- module names with no file, so the disk is scanned once
     sources = sources or {}
@@ -2131,6 +2154,118 @@ function module.hostOne(packDir)
         end
     end
     return report
+end
+
+-- ---------------------------------------------------- the hosted mods' run state
+--
+-- What a player folded back into a run under way needs of each hosted mod's memory,
+-- handed over by the adapters that know where a mod keeps its run (see "a hosted
+-- mod's run state" in determinism.lua). The world host that folds them in takes it
+-- from its own load of the floor; the returning player's machine puts it in (see
+-- "bringing a player back" in eventSync.lua).
+
+--- Every hosted mod's run state: pack -> its state. nil and why not when any hosted
+--- mod cannot hand its run over -- then a returning player waits for the next run.
+--- @return table<string, string>? states
+--- @return string? why
+function module.captureRunState()
+    local packs = module.hostedPacks()
+    if #packs == 0 then
+        return nil, "no mod is hosted"
+    end
+    local out, total = {}, 0
+    for _, packDir in ipairs(packs) do
+        local control = module.controls[packDir]
+        if control == nil or type(control.captureRun) ~= "function" then
+            return nil, tostring(packDir) .. " is not set up for it"
+        end
+        local ok, blob, why = pcall(control.captureRun)
+        if not ok then
+            return nil, tostring(packDir) .. ": " .. tostring(blob)
+        end
+        if type(blob) ~= "string" then
+            return nil, tostring(packDir) .. ": " .. tostring(why)
+        end
+        out[packDir] = blob
+        total = total + #blob
+    end
+    -- they ride one datagram together, which the client reads 32 KB of at most
+    local limit = Determinism ~= nil and Determinism.runStateMax or 16000
+    if total > limit then
+        return nil, string.format("the hosted mods' run is too big to send (%d characters)", total)
+    end
+    return out
+end
+
+--- Can every hosted mod hand its run over right now?
+--- @return boolean ok
+--- @return string? why
+function module.runStateSupported()
+    local states, why = module.captureRunState()
+    return states ~= nil, why
+end
+
+--- Put the run states the world host captured into this machine's hosted mods.
+--- @param states table<string, string>?
+--- @return string[] lines # one per mod, for the log
+--- @return boolean allApplied
+function module.applyRunState(states)
+    if type(states) ~= "table" then
+        return { "no run state came with the fold-in" }, false
+    end
+    local lines, all = {}, true
+    local hostedHere = {}
+    for _, packDir in ipairs(module.hostedPacks()) do
+        hostedHere[packDir] = true
+        local blob = states[packDir]
+        local control = module.controls[packDir]
+        if type(blob) ~= "string" then
+            lines[#lines + 1] = tostring(packDir) .. ": none came with the fold-in"
+            all = false
+        elseif control == nil or type(control.applyRun) ~= "function" then
+            lines[#lines + 1] = tostring(packDir) .. ": not set up for it"
+            all = false
+        else
+            local ok, applied, what = pcall(control.applyRun, blob)
+            if ok and applied == true then
+                lines[#lines + 1] = tostring(packDir) .. ": " .. tostring(what)
+            else
+                lines[#lines + 1] = tostring(packDir) .. ": NOT applied, "
+                    .. tostring(ok and what or applied)
+                all = false
+            end
+        end
+    end
+    local extra = {}
+    for packDir in pairs(states) do
+        if not hostedHere[packDir] then
+            extra[#extra + 1] = tostring(packDir)
+        end
+    end
+    table.sort(extra)
+    for _, packDir in ipairs(extra) do
+        lines[#lines + 1] = packDir .. ": the host runs it, this machine does not"
+        all = false
+    end
+    return lines, all
+end
+
+--- One fingerprint of every hosted mod's run state, for a floor report: the same on
+--- two machines whose mods are in the same run. nil when no hosted mod gives one.
+--- @return integer?
+function module.runStateDigest()
+    local h, any = 0, false
+    for _, packDir in ipairs(module.hostedPacks()) do
+        local control = module.controls[packDir]
+        if control ~= nil and type(control.runDigest) == "function" then
+            local ok, d = pcall(control.runDigest)
+            if ok and math.type(d) == "integer" then
+                h = (h * 1000003 + d) % 2147483647
+                any = true
+            end
+        end
+    end
+    return any and h or nil
 end
 
 ModHost = module

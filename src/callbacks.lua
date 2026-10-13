@@ -89,6 +89,10 @@ local function describe(fn)
 end
 
 local depth = 0     -- how many of OUR callbacks are currently on the stack
+--- Milliseconds the ordered batches have charged to the hosted callbacks they ran,
+--- so far. A batch runs inside whichever callback the engine reached first; that
+--- callback's own charge leaves out what the batch charged on (see chargeBatched).
+local batchedMs = 0
 local entries = {}  -- every callback we registered, so it can be revived
 local perFrame = {} -- ON value -> name, for the kinds that must fire every frame
 local lastSweepLogMs = 0
@@ -217,10 +221,11 @@ local function record(entry, fn)
         raisedByMod = nil
         depth = depth + 1
         local startedAt = profiling and entry.lastRanMs or 0
+        local batchedBefore = batchedMs
         local ok, value = xpcall(fn, hostedTraceback, ...)
         depth = depth - 1
         if profiling then
-            chargeTo("ours " .. tostring(entry.where), startedAt)
+            chargeTo("ours " .. tostring(entry.where), startedAt + (batchedMs - batchedBefore))
         end
         if ok ~= true then
             pcall(logOurError, entry, value)
@@ -450,6 +455,7 @@ local function hostedName(fn)
     end
     return where
 end
+module.hostedName = hostedName
 
 --- What a hosted callback handed back, for crash_notes.txt. Its own function so the
 --- wrapper does not build a closure per call, and called protected: the table is the
@@ -511,6 +517,7 @@ function module.hosted(fn, label, offThread)
         local saved = depth
         depth = 0
         local startedAt = profiling and nowMs() or 0
+        local batchedBefore = batchedMs
         if mark ~= nil then
             DesyncLog.frameMark(mark)
         end
@@ -533,7 +540,7 @@ function module.hosted(fn, label, offThread)
         end
         depth = saved
         if profiling then
-            chargeTo("mod  " .. where, startedAt)
+            chargeTo("mod  " .. where, startedAt + (batchedMs - batchedBefore))
         end
         if ok ~= true then
             if not takeNoted(value) then
@@ -550,6 +557,48 @@ function module.hosted(fn, label, offThread)
         end
         return value
     end
+end
+
+--- Run `fn(...)` as a hosted mod's code runs inside module.hosted: our depth zero
+--- while it runs, back after. The ordered batches (determinism.lua) run each of the
+--- mod's callbacks from inside whichever callback the engine reached first, which
+--- can be one of ours, and the mod's bare clear_callback() must still be the mod's.
+--- @param fn function # must not raise past here; xpcall, in practice
+--- @return any ...
+function module.asHosted(fn, ...)
+    local saved = depth
+    depth = 0
+    local packed = table.pack(pcall(fn, ...))
+    depth = saved
+    if not packed[1] then
+        error(packed[2], 0)
+    end
+    return table.unpack(packed, 2, packed.n)
+end
+
+--- The profile clock, when the profile is on: nil when it is not, so a batch takes
+--- no clock reads at all.
+--- @return number?
+function module.batchClock()
+    if not profiling then
+        return nil
+    end
+    return nowMs()
+end
+
+--- A hosted callback a batch ran, charged on its own name (as module.hosted names
+--- it), and left out of the charge of the callback the batch ran inside.
+--- @param where string
+--- @param startedAt number # from batchClock
+function module.chargeBatched(where, startedAt)
+    if not profiling or type(startedAt) ~= "number" then
+        return
+    end
+    local took = nowMs() - startedAt
+    if took > 0 then
+        batchedMs = batchedMs + took
+    end
+    chargeTo("mod  " .. tostring(where), startedAt)
 end
 
 --- Register one of ours, and remember it.

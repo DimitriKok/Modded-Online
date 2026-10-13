@@ -313,6 +313,14 @@ local function clearRunState(reason)
     moneyBaseline = {}
     moneyBaselineSeq = -1
     trackedMoney = {}
+    -- a fold-in belongs to the run it happened in (see "bringing a player back")
+    module.pendingRunState = nil
+    module.foldTail = nil
+    module.foldIn = nil
+    module.foldWait = nil
+    module.foldSendTail = false
+    module.foldFailed = {}
+    module.joinWaiting = {}
 end
 
 -- -------------------------------------------------------------- state sync
@@ -2007,6 +2015,17 @@ local function onRunStart(payload)
     coffinHook = nil
     pendingRunSeed = payload.seed
     rosterChars = payload.chars or {}
+    module.pendingRunState = nil
+    module.foldTail = nil
+    module.foldWait = nil
+    module.foldSendTail = false
+    module.joinWaiting = {}
+    if type(payload.floor) ~= "table" then
+        -- a fresh run: no fold-in of the last one is on probation or held against
+        -- anyone any more
+        module.foldIn = nil
+        module.foldFailed = {}
+    end
     set_adventure_seed(payload.seed[1], payload.seed[2])
 
     InputSync.beginSession(Network.playerNames, payload.delay)
@@ -2024,10 +2043,36 @@ local function onRunStart(payload)
         -- (level_count etc.) — without it the joiner would use level_count 0
         pendingStateSync = type(payload.st) == "table" and payload.st or nil
             applyRejoinKit(payload.join)
-        toast("A player is joining — resyncing this floor!")
-        moWarp(math.floor(tonumber(payload.floor.w) or 1),
-            math.floor(tonumber(payload.floor.l) or 1),
-            math.floor(tonumber(payload.floor.t) or THEME.DWELLING))
+        -- ...and when a hosted mod's run is coming with it (`cap`: the machine that
+        -- sends it, from its own load of this floor -- see "bringing a player back"),
+        -- the returning player waits in the camp for it instead of warping now, and
+        -- this floor and the next are their probation (module.foldVerdict)
+        module.foldIn = nil
+        local cap = pendingStateSync ~= nil and math.tointeger(tonumber(pendingStateSync.cap)) or nil
+        local warpNow = true
+        if cap ~= nil then
+            local slots, coming = {}, false
+            for _, slot in ipairs(type(payload.join) == "table" and payload.join or {}) do
+                local s = math.floor(tonumber(slot) or -1)
+                slots[#slots + 1] = s
+                coming = coming or s == Network.slot
+            end
+            module.foldIn = { slots = slots, ord = levelOrdinal, decided = false, cap = cap }
+            if Network.slot == cap then
+                module.foldSendTail = true
+            elseif coming then
+                module.foldWait = { floor = payload.floor, untilMs = get_ms() + module.FOLD_WAIT_MS }
+                warpNow = false
+            end
+        end
+        if warpNow then
+            toast("A player is joining — resyncing this floor!")
+            moWarp(math.floor(tonumber(payload.floor.w) or 1),
+                math.floor(tonumber(payload.floor.l) or 1),
+                math.floor(tonumber(payload.floor.t) or THEME.DWELLING))
+        else
+            toast("Bringing you back into the run...")
+        end
     else
         -- GUARANTEED fresh-run reset. The load callbacks it normally runs from
         -- (PRE_LOAD_SCREEN / PRE_LEVEL_GENERATION) DO NOT FIRE on many restarts —
@@ -2468,18 +2513,45 @@ function module.hideRunReset()
     st.quest_flags = st.quest_flags & ~QUEST_RESET
 end
 
---- Called from main.lua AFTER the hosted mods are loaded, so these run after their
---- PRE_LOAD_SCREEN and PRE_LEVEL_GENERATION callbacks and before the engine's load.
+--- Register one of ours for an event whose hosted callbacks are ordered in a room:
+--- in a pass of it, a head runs before every one of the hosted mod's callbacks and a
+--- tail (`tail` true) after them all (see "the order hosted callbacks run in" in
+--- determinism.lua). With no hosted mod, or without Determinism, it is set_callback.
+--- @param event any # an ON value
+--- @param name string
+--- @param fn function
+--- @param tail boolean?
+--- @return any # the engine's callback id
+function module.ordered(event, name, fn, tail)
+    local det = rawget(_G, "Determinism")
+    if det ~= nil and type(det.head) == "function" and type(det.tail) == "function" then
+        if tail then
+            return det.tail(event, name, fn)
+        end
+        return det.head(event, name, fn)
+    end
+    return set_callback(fn, event)
+end
+
+--- Called from main.lua AFTER the hosted mods are loaded. Tails of the ordered
+--- passes, so they run after the hosted mods' PRE_LOAD_SCREEN and
+--- PRE_LEVEL_GENERATION callbacks, whatever order the engine keeps them in, and before
+--- the engine's load. Without a hosted mod they run at the engine's own turn.
 function module.installRunResetWindow()
     if module.runResetWindow then
         return
     end
-    set_callback(function()
+    module.ordered(ON.PRE_LOAD_SCREEN, "eventSync:hideRunReset", function()
         SafeCall("eventSync:hideRunReset", module.hideRunReset)
-    end, ON.PRE_LOAD_SCREEN)
-    set_callback(function()
+    end, true)
+    module.ordered(ON.PRE_LEVEL_GENERATION, "eventSync:hideRunReset", function()
         SafeCall("eventSync:hideRunReset", module.hideRunReset)
-    end, ON.PRE_LEVEL_GENERATION)
+    end, true)
+    -- the fold-in floor's load, after the hosted mods' own load callbacks: see
+    -- "bringing a player back"
+    module.ordered(ON.PRE_LOAD_SCREEN, "eventSync:foldTail", function()
+        SafeCall("eventSync:foldTail", module.onFoldTail)
+    end, true)
     module.runResetWindow = true
 end
 
@@ -2507,6 +2579,15 @@ local function onPreLoadScreen()
     -- AFTER applyStateSync, so a stale time_of_death carried in the host's snapshot
     -- is normalized too (an alive slot must never be a coffin candidate)
     normalizeCoffinTargets()
+    -- a returning player's machine only: the hosted mods' run, from the world host's
+    -- own load of this floor (module.onFoldState). Here, at the head of the load's
+    -- ordered pass, before any of the mod's own load callbacks (this is a head: see
+    -- module.ordered); and again at its tail (module.onFoldTail)
+    if module.pendingRunState ~= nil then
+        local states = module.pendingRunState
+        module.pendingRunState = nil
+        module.applyHostedRunState(states)
+    end
 end
 
 local function onPreLevelGeneration()
@@ -2846,22 +2927,16 @@ end
 local function onJoinPending(payload)
     local name = tostring(type(payload) == "table" and payload.name or "A player")
     if not runActive or not Network.isInRun() then
-        -- the player coming back, in the camp: say what happens next
-        if type(payload) == "table" and math.floor(tonumber(payload.slot) or -1) == Network.slot
-            and module.deferMidRunJoin() then
-            toast(string.format("You'll join the next run: %s can't take a player back into"
-                .. " a run already under way", module.hostedModName()))
-        end
-        return
+        return -- the player coming back, in the camp: the run's world host decides
     end
-    if module.deferMidRunJoin() then
-        toast(string.format("%s is back, and will join the next run: %s can't take a player back"
-            .. " mid-run", name, module.hostedModName()))
-        if DesyncLog ~= nil then
-            DesyncLog.event("rejoin DEFERRED: %s (slot %s) waits for the next run -- a hosted mod is"
-                .. " running, and a game that rejoins mid-run does not have its run's history"
-                .. " (mo_midrunjoin.on allows it anyway)", name,
-                tostring(type(payload) == "table" and payload.slot or "?"))
+    local slot = math.floor(tonumber(type(payload) == "table" and payload.slot or nil) or -1)
+    module.joinWaiting[slot] = name
+    local defer, why = module.deferMidRunJoin(slot)
+    if defer then
+        -- the world host says so, for everyone (module.onJoinDefer); the others
+        -- just do not count on the fold-in
+        if Network.isWorldHost() then
+            module.deferJoin(why)
         end
         return
     end
@@ -2869,17 +2944,34 @@ local function onJoinPending(payload)
     toast(string.format("%s is joining next floor...", name))
 end
 
---- Folding a player back into a run under way (a mid-run join) rebuilds the party
---- at the next floor from the host's snapshot, and that snapshot is the ENGINE's
---- state. A hosted content mod keeps the run's history in its own memory --
---- Spelunky 2.5's quests, its item pools, the rooms it has already given out -- and
---- a game that rejoins mid-run has none of it, least of all one restarted after a
---- crash. Room QZUX: the rejoiner built a different 1-4 from the same seed at once
---- (FLOOR DESYNC on the fold-in floor), and the run desynced six seconds later.
---- So while a hosted mod runs, a returning player waits in the camp and comes in
---- with the next run, which the server already does for a join no transition
---- picks up. `mo_midrunjoin.on` in the pack folder folds them in anyway; without a
---- hosted mod nothing changes.
+-- ------------------------------------------------- bringing a player back
+--
+-- Folding a player back into a run under way (a mid-run join) rebuilds the party at
+-- the next floor from the host's snapshot, and that snapshot is the ENGINE's state. A
+-- hosted content mod keeps the run's history in its own memory, and a game that
+-- rejoins mid-run has none of it: room QZUX's returning player built a different 1-4
+-- from the same seed at once, and the run desynced six seconds later. dev85 made
+-- them wait for the next run instead -- which is the one thing a rejoin mid-run is
+-- for. dev86 brings them back again, when every hosted mod's adapter can hand its run
+-- over (ModHost.captureRunState).
+--
+-- WHEN the run is taken matters as much as what is in it. The others load the floor
+-- from the transition screen and the returning player from the camp, and a mod's load
+-- callbacks read the screen they are leaving: 2.5 carries a ray gun's charge, a
+-- ridden Qilin and its quest items across that way, and on one Ascent route it picks
+-- the floor itself. So the world host that folds them in takes the run at the END of
+-- its own PRE_LOAD_SCREEN for that floor, once the mod's callbacks have read its
+-- transition, and sends it with the floor that load is going to
+-- (module.sendFoldState). The returning player waits in the camp for it, warps there,
+-- and puts it in at the head of their load and again at its tail, over whatever
+-- their own callbacks made of the camp. Nobody else's game is touched.
+--
+-- That floor and the one after it are the returning player's probation: if their
+-- floor comes out different from the host's, or the mod's run does, or they drift
+-- from the host's positions, they go back to the camp and join the next run, and the
+-- others play on as if they had stayed away. A hosted mod nothing here can hand over
+-- still means the next run, as in dev85. `mo_midrunjoin.on` in the pack folder folds
+-- them in regardless.
 module.midRunJoinAllowed = false
 pcall(function()
     local probe = io.open(PackPath("mo_midrunjoin.on"), "r")
@@ -2888,14 +2980,342 @@ pcall(function()
         module.midRunJoinAllowed = true
     end
 end)
+module.pendingRunState = nil -- the host's copy of the hosted mods' run, for this load's head
+module.foldTail = nil        -- ...and for its tail, over what this machine's callbacks did
+module.foldIn = nil          -- { slots, ord, decided, cap }: a fold-in, on probation
+module.foldWait = nil        -- { floor, untilMs }: a returning player, waiting for the run
+module.foldSendTail = false  -- the world host that folded them in: send it from our tail
+module.foldFailed = {}       -- slot -> true: bringing this player back failed this run
+module.joinWaiting = {}      -- slot -> name: returning players a transition will bring in
+--- How long a returning player waits in the camp for the host's copy of the run.
+module.FOLD_WAIT_MS = 10000
 
---- @return boolean
-function module.deferMidRunJoin()
+--- Should a player coming back now wait for the next run instead?
+--- @param slot integer?
+--- @return boolean defer
+--- @return string? why # for the players: what is in the way
+function module.deferMidRunJoin(slot)
+    if slot ~= nil and module.foldFailed[slot] then
+        return true, "bringing them back already failed once this run"
+    end
     if module.midRunJoinAllowed or ModHost == nil or ModHost.hostedPacks == nil then
         return false
     end
     local ok, packs = pcall(ModHost.hostedPacks)
-    return ok and type(packs) == "table" and #packs > 0
+    if not ok or type(packs) ~= "table" or #packs == 0 then
+        return false
+    end
+    if type(ModHost.runStateSupported) ~= "function" then
+        return true, module.hostedModName() .. " can't hand its run over"
+    end
+    local okRun, supported, why = pcall(ModHost.runStateSupported)
+    if okRun and supported == true then
+        return false
+    end
+    return true, string.format("%s can't hand its run over (%s)", module.hostedModName(),
+        tostring(okRun and why or supported))
+end
+
+--- The world host decided a returning player waits for the next run: everyone hears
+--- why, and nobody keeps a pending fold-in a later world host would act on.
+--- @param payload { slots: integer[], names: table<string, string>, why: string }
+function module.onJoinDefer(payload)
+    if type(payload) ~= "table" then
+        return
+    end
+    joinPending = false
+    module.joinWaiting = {}
+    local why = tostring(payload.why or "?")
+    local names = {}
+    local mine = false
+    for _, s in ipairs(type(payload.slots) == "table" and payload.slots or {}) do
+        local slot = math.floor(tonumber(s) or -1)
+        mine = mine or slot == Network.slot
+        names[#names + 1] = tostring(type(payload.names) == "table" and payload.names[tostring(slot)]
+            or ("player " .. slot))
+    end
+    local who = #names > 0 and table.concat(names, ", ") or "A player"
+    if mine then
+        toast("You'll join the next run: " .. why)
+    elseif runActive and Network.isInRun() then
+        toast(string.format("%s is back, and will join the next run: %s", who, why))
+    end
+    if DesyncLog ~= nil then
+        DesyncLog.event("rejoin DEFERRED: %s waits for the next run -- %s", who, why)
+    end
+end
+
+--- World host only: tell everyone the returning players wait for the next run.
+--- @param why string
+function module.deferJoin(why)
+    local slots, names = {}, {}
+    for slot, name in pairs(module.joinWaiting) do
+        slots[#slots + 1] = slot
+        names[tostring(slot)] = name
+    end
+    table.sort(slots)
+    Network.sendEvent("joindefer", { slots = slots, names = names, why = why })
+end
+
+--- Put the world host's copy of the hosted mods' run into this machine's mods: a
+--- returning player's, at the head of the fold-in floor's load and (`again`) at its
+--- tail.
+--- @param states table<string, string>
+--- @param again boolean?
+function module.applyHostedRunState(states, again)
+    if ModHost == nil or type(ModHost.applyRunState) ~= "function" then
+        return
+    end
+    local ok, lines, all = pcall(ModHost.applyRunState, states)
+    if not ok then
+        lines, all = { "FAILED: " .. tostring(lines) }, false
+    end
+    if DesyncLog ~= nil then
+        for _, line in ipairs(lines) do
+            DesyncLog.event("hosted run state from the world host%s: %s",
+                again and " (again, at the end of the load)" or "", tostring(line))
+        end
+    end
+    if all ~= true then
+        errorf("the hosted mods' run was not all put back for this fold-in")
+        -- the one coming back has none of the run without it: say so now, not
+        -- once their floor comes out wrong
+        module.foldVerdict("run")
+    end
+end
+
+--- While a fold-in is on probation, write the hosted mods' run as THIS machine has it
+--- into the log, so two logs can be set side by side. Once for the fold-in, at the
+--- first difference, and never off probation.
+--- @param why string
+function module.logRunState(why)
+    local fold = module.foldIn
+    if fold == nil or fold.logged or DesyncLog == nil or ModHost == nil
+        or type(ModHost.captureRunState) ~= "function" then
+        return
+    end
+    fold.logged = true
+    local ok, states = pcall(ModHost.captureRunState)
+    if not ok or type(states) ~= "table" then
+        return
+    end
+    for packDir, blob in pairs(states) do
+        DesyncLog.event("hosted run state here (%s), %s: %s", tostring(why), tostring(packDir),
+            tostring(blob):sub(1, 6000))
+    end
+end
+
+-- a module field, not a local: this chunk is at Lua's 200-local limit
+module.FOLD_WHY = {
+    floor = "your floor came out different from the host's",
+    run = "the mod's run did not come across",
+    positions = "your game drifted from the host's",
+    late = "the host's game did not send the run in time",
+}
+
+--- A non-host compared what it just checked with the world host's: `problem` names
+--- what differed ("floor", "run", "positions"), or nil for nothing. On the floor a
+--- hosted fold-in brought someone back on and the one after it, a difference that
+--- involves a returning player -- they are the one comparing, or the host they
+--- compare with -- is that fold-in failing: they go back to the camp
+--- (module.onFoldFail). Past those floors, or between two players who were in the
+--- run all along, it is not this.
+--- @param problem string?
+function module.foldVerdict(problem)
+    local fold = module.foldIn
+    if fold == nil or fold.decided then
+        return
+    end
+    if levelOrdinal > fold.ord + 2 then
+        module.foldIn = nil -- the probation is behind us, and it held
+        return
+    end
+    if problem == nil then
+        return
+    end
+    local host = Network.hostSlot()
+    local involved = false
+    for _, slot in ipairs(fold.slots) do
+        if slot == Network.slot or slot == host then
+            involved = true
+        end
+    end
+    if not involved then
+        return
+    end
+    fold.decided = true
+    Network.sendEvent("foldfail", { slots = fold.slots, why = tostring(problem) })
+end
+
+--- A fold-in failed: the players it brought back go back to the camp and join the
+--- next run, and the world host will not try again for them this run.
+--- @param payload { slots: integer[], why: string }
+function module.onFoldFail(payload)
+    if type(payload) ~= "table" or type(payload.slots) ~= "table" then
+        return
+    end
+    local why = tostring(payload.why or "?")
+    local mine, names, fresh = false, {}, false
+    for _, s in ipairs(payload.slots) do
+        local slot = math.floor(tonumber(s) or -1)
+        fresh = fresh or not module.foldFailed[slot]
+        module.foldFailed[slot] = true
+        mine = mine or slot == Network.slot
+        names[#names + 1] = tostring((Network.playerNames or {})[tostring(slot)] or ("player " .. slot))
+    end
+    if not fresh then
+        -- said already: with a returning player as the world host, every other
+        -- player finds the difference and says so
+        return
+    end
+    if DesyncLog ~= nil then
+        DesyncLog.event("fold-in FAILED (%s): %s back to the camp, to join the next run",
+            why, table.concat(names, ", "))
+    end
+    -- the mod's run as this machine has it, beside the other machines' logs
+    module.logRunState("the fold-in failed")
+    module.foldIn = nil
+    if not runActive or not Network.isInRun() then
+        return
+    end
+    if mine then
+        module.backToCamp(why)
+    else
+        toast(string.format("%s couldn't be brought back into this run, and will join the next one",
+            table.concat(names, ", ")))
+    end
+end
+
+--- This machine's player was being brought back, and it did not work: out of the
+--- run and back to the camp, to join the next one.
+--- @param why string
+function module.backToCamp(why)
+    toast("Couldn't bring you back into this run: " .. (module.FOLD_WHY[why] or why)
+        .. ". You'll join the next one.")
+    clearRunState("fold-in failed (" .. why .. ")")
+    InputSync.endSession()
+    Network.endMyRun()
+    moWarp(1, 1, THEME.BASE_CAMP)
+end
+
+--- The world host that folded a player in, at the END of its own PRE_LOAD_SCREEN for
+--- the fold-in floor (module.onFoldTail): the hosted mods' run as their load
+--- callbacks have just left it, and the floor this load is going to, for the
+--- returning player (module.onFoldState). Sent at once: the engine builds the floor
+--- next, and nothing of ours runs until it has.
+function module.sendFoldState()
+    local fold = module.foldIn
+    if fold == nil or fold.decided then
+        return
+    end
+    local st = get_local_state()
+    local dest = { w = st.world_next, l = st.level_next, t = st.theme_next }
+    local states, why = nil, "this build can't hand it over"
+    if ModHost ~= nil and type(ModHost.captureRunState) == "function" then
+        local ok, got, gotWhy = pcall(ModHost.captureRunState)
+        if ok then
+            states, why = got, gotWhy
+        else
+            why = tostring(got)
+        end
+    end
+    if type(states) == "table" then
+        if DesyncLog ~= nil then
+            DesyncLog.event("fold-in: sent the hosted mods' run as this load left it, to %s-%s",
+                tostring(dest.w), tostring(dest.l))
+        end
+        Network.sendEvent("foldstate", { slots = fold.slots, ord = fold.ord, dest = dest,
+            mod = states })
+    else
+        -- nothing to bring them back with after all: they go back to the camp
+        if DesyncLog ~= nil then
+            DesyncLog.event("fold-in: the hosted mods' run could not be taken at the load (%s)",
+                tostring(why))
+        end
+        fold.decided = true
+        Network.sendEvent("foldfail", { slots = fold.slots, why = "run" })
+    end
+    if Network.flushEvents ~= nil then
+        pcall(Network.flushEvents)
+    end
+end
+
+--- A returning player, waiting in the camp: the world host's copy of the run has
+--- come. Keep it for this machine's load, and go to the floor the host's own load
+--- is going to.
+--- @param payload { slots: integer[], ord: integer, dest: table, mod: table<string, string> }
+function module.onFoldState(payload)
+    local wait = module.foldWait
+    if wait == nil or type(payload) ~= "table" or type(payload.mod) ~= "table" then
+        return
+    end
+    local mine = false
+    for _, s in ipairs(type(payload.slots) == "table" and payload.slots or {}) do
+        mine = mine or math.floor(tonumber(s) or -1) == Network.slot
+    end
+    if not mine then
+        return
+    end
+    module.foldWait = nil
+    module.pendingRunState = payload.mod
+    module.foldTail = payload.mod
+    local at = type(payload.dest) == "table" and payload.dest or {}
+    local floor = type(wait.floor) == "table" and wait.floor or {}
+    moWarp(math.floor(tonumber(at.w) or tonumber(floor.w) or 1),
+        math.floor(tonumber(at.l) or tonumber(floor.l) or 1),
+        math.floor(tonumber(at.t) or tonumber(floor.t) or THEME.DWELLING))
+end
+
+--- A returning player who has waited too long for the host's copy of the run goes
+--- back to the camp, and joins the next run. GUI frames: it runs whatever the camp
+--- is doing.
+function module.pollFoldWait()
+    local wait = module.foldWait
+    if wait == nil then
+        return
+    end
+    if not runActive or not Network.isInRun() then
+        module.foldWait = nil
+        return
+    end
+    if get_ms() < wait.untilMs then
+        return
+    end
+    module.foldWait = nil
+    local fold = module.foldIn
+    local slots = fold ~= nil and fold.slots or { Network.slot }
+    if fold ~= nil then
+        fold.decided = true
+    end
+    if DesyncLog ~= nil then
+        DesyncLog.event("fold-in FAILED (late): no run from the host after %d ms",
+            module.FOLD_WAIT_MS)
+    end
+    Network.sendEvent("foldfail", { slots = slots, why = "late" })
+    -- now, not when the event comes back round: it may be the connection that failed
+    module.backToCamp("late")
+end
+
+--- PRE_LOAD_SCREEN, after the hosted mods' own callbacks (a tail, installed by
+--- installRunResetWindow), on the fold-in floor's load: a returning player puts the
+--- host's copy of the run in again, over whatever their own callbacks made of the
+--- camp, and the world host that folded them in sends its own (sendFoldState).
+function module.onFoldTail()
+    if not runActive or not Network.isInRun() then
+        return
+    end
+    if get_local_state().screen_next ~= SCREEN.LEVEL then
+        return
+    end
+    if module.foldTail ~= nil then
+        local states = module.foldTail
+        module.foldTail = nil
+        module.applyHostedRunState(states, true)
+    end
+    if module.foldSendTail then
+        module.foldSendTail = false
+        module.sendFoldState()
+    end
 end
 
 --- The hosted mods' own names, for a toast (InputSync names them the same way).
@@ -2932,7 +3352,32 @@ local function pollJoinAtTransition()
     end
     joinPending = false
     local dest = { w = state.world_next, l = state.level_next, t = state.theme_next }
-    Network.requestJoinFloor(dest, nextFloorSeed, currentFloorOrd + 1, captureStateSync(true))
+    local st = captureStateSync(true)
+    -- the hosted mods' own run comes from this machine's own load of that floor (see
+    -- "bringing a player back"): `cap` says who sends it, so the returning player
+    -- waits for it. One whose run nothing here can hand over means the next run, as
+    -- dev85 had it.
+    local okPacks, packs = pcall(function() return ModHost ~= nil and ModHost.hostedPacks() or {} end)
+    if okPacks and type(packs) == "table" and #packs > 0 then
+        local supported, why = false, "this build can't hand it over"
+        if ModHost.runStateSupported ~= nil then
+            local okSup, got, gotWhy = pcall(ModHost.runStateSupported)
+            if okSup then
+                supported, why = got == true, gotWhy
+            else
+                why = tostring(got)
+            end
+        end
+        if supported then
+            st.cap = Network.slot
+        elseif not module.midRunJoinAllowed then
+            module.deferJoin(string.format("%s can't hand its run over (%s)",
+                module.hostedModName(), tostring(why)))
+            return
+        end
+    end
+    module.joinWaiting = {}
+    Network.requestJoinFloor(dest, nextFloorSeed, currentFloorOrd + 1, st)
 end
 
 -- -------------------------------------------------------------- floor resync
@@ -4587,6 +5032,9 @@ end
 
 Network.onEvent("run_start", onRunStart)
 Network.onEvent("join_pending", onJoinPending)
+Network.onEvent("joindefer", module.onJoinDefer)
+Network.onEvent("foldfail", module.onFoldFail)
+Network.onEvent("foldstate", module.onFoldState)
 Network.onEvent("player_left", onPlayerLeft)
 Network.onEvent("levelseed", onLevelSeed)
 Network.onEvent("resync_req", onResyncReq)
@@ -4599,7 +5047,12 @@ Network.onEvent("tready", module.onTransitionReady)
 
 -- Global infrastructure callbacks, registered once and never cleared: they all
 -- no-op unless a networked session is active.
-set_callback(function()
+--
+-- The load screen's and the generation's are heads of the ordered passes (see
+-- module.ordered): our state sync, seed and reset come before every one of a hosted
+-- mod's callbacks for those events on every machine, which until dev86 only held
+-- where the engine happened to keep ours first.
+module.ordered(ON.PRE_LOAD_SCREEN, "eventSync:preLoadScreen", function()
     -- a mid-run instant-restart vote returns true to SKIP the restart load, so
     -- the presser keeps playing; that also means skipping the seed/roster setup
     local skip = SafeCall("eventSync:interceptInstantRestart", interceptInstantRestart)
@@ -4638,7 +5091,7 @@ set_callback(function()
     if DesyncLog ~= nil then
         DesyncLog.leave("preLoadScreen")
     end
-end, ON.PRE_LOAD_SCREEN)
+end)
 
 -- Out-of-run restart guard, running EVERY frame for as long as the session is
 -- alive. Between a run ending and the next one starting we had no hook that could
@@ -4690,7 +5143,7 @@ if ON.PRE_UPDATE ~= nil then
         end)
     end, ON.PRE_UPDATE)
 end
-set_callback(function()
+module.ordered(ON.PRE_LEVEL_GENERATION, "eventSync:preLevelGeneration", function()
     -- bracketed: set_pre_coffin hooks a ThemeInfo virtual and the seed/roster
     -- enforcement below writes engine state mid-load
     if DesyncLog ~= nil then
@@ -4704,7 +5157,7 @@ set_callback(function()
     if DesyncLog ~= nil then
         DesyncLog.leave("preLevelGeneration")
     end
-end, ON.PRE_LEVEL_GENERATION)
+end)
 set_callback(function()
     if DesyncLog ~= nil then
         DesyncLog.enter("postLevelGeneration")
@@ -4743,6 +5196,7 @@ set_callback(function()
     -- applyPendingWarp consumes it on the same frame
     SafeCall("eventSync:pollDeathRecovery", pollDeathRecovery)
     SafeCall("eventSync:pollJoinAtTransition", pollJoinAtTransition)
+    SafeCall("eventSync:pollFoldWait", module.pollFoldWait)
     SafeCall("eventSync:applyPendingWarp", applyPendingWarp)
     SafeCall("eventSync:pollRestartResend", pollRestartResend)
     SafeCall("eventSync:pollRestartVote", pollRestartVote)

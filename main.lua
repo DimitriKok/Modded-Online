@@ -13,7 +13,7 @@
 
 meta = {
     name = "Modded Online (loader build)",
-    version = "2.0.0-dev85",
+    version = "2.0.0-dev86",
     description = "Play scriptable mods together via a self-hosted server",
     author = "EatYoCake + DoctorPuppy",
     online_safe = false, -- not for the *official* online — that's the point
@@ -178,6 +178,11 @@ local MODULES = {
     -- every registration the modules below make is recorded and can be revived. A
     -- hosted mod shares our callback id space and can destroy ours by accident.
     "src.callbacks",
+    -- The determinism guarantees a hosted mod runs under. Before every module that
+    -- registers one of its callbacks as a head or a tail of the ordered passes
+    -- (eventSync: its load-screen and generation work comes before the hosted mod's,
+    -- in every pass), and before modHost, which installs them into every sandbox.
+    "src.determinism",
     "src.json",
     "src.netCore",
     "src.desyncLog",
@@ -204,9 +209,6 @@ local MODULES = {
     -- The other players in the camp lobby, as puppets (after vanillaUI, which draws
     -- their name tags).
     "src.campPuppets",
-    -- The determinism guarantees a hosted mod runs under. Loaded before modHost,
-    -- which installs them into every sandbox it builds.
-    "src.determinism",
     -- Choosing which mods to host, and arranging the disk so they can be. Loaded
     -- before modHost because modHost reads the flag file this maintains.
     "src.packSetup",
@@ -307,11 +309,12 @@ else
 end
 
 -- The window in which a fresh run's QUEST_FLAG.RESET is shown to the hosted mods
--- (see EventSync.showRunReset). Its closing callbacks must run AFTER the hosted mods'
--- own PRE_LOAD_SCREEN / PRE_LEVEL_GENERATION callbacks and before the engine's load,
--- so it is registered here, after hosting. That assumed callbacks run in registration
--- order, which Overlunky does not promise (it fires them in id-hash order; see
--- HANDOFF section 17): a known gap, not yet seen to bite.
+-- (see EventSync.showRunReset), and the end of a fold-in floor's load (see "bringing
+-- a player back" in eventSync.lua). Both must run AFTER the hosted mods' own
+-- PRE_LOAD_SCREEN / PRE_LEVEL_GENERATION callbacks and before the engine's load.
+-- Overlunky fires callbacks in id-hash order, not registration order (HANDOFF section
+-- 17), so since dev86 these are tails of the ordered passes (determinism.lua, "the
+-- order hosted callbacks run in"), which holds however the engine orders them.
 if EventSync ~= nil and EventSync.installRunResetWindow ~= nil then
     bootStep("eventSync: run start window for the hosted mods")
     SafeCall("main/installRunResetWindow", EventSync.installRunResetWindow)

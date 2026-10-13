@@ -440,6 +440,7 @@ def test_it_draws_nothing_and_changes_nothing():
 
 def test_two_hosted_mods_share_one_probe():
     rt = machine()
+    before = [e for e in rt.eval("registered").values() if int(e["id"]) == 6]
     rt.execute("env2 = setmetatable({}, {__index = _G})")
     rt.eval("Determinism.install")(rt.eval("env2"), rt.eval("{ active = function() return true end }"))
     rt.execute("""
@@ -447,8 +448,9 @@ def test_two_hosted_mods_share_one_probe():
             env2.get_entities_by(ENT_TYPE.FX_WATER_SURFACE, MASK.FX, LAYER.FRONT)
         end, ON.LEVEL)
     """)
-    probes = [e for e in rt.eval("registered").values() if int(e["id"]) == 6]
-    assert len(probes) == 3, "two liquid snapshots and ONE probe at POST_LEVEL_GENERATION"
+    after = [e for e in rt.eval("registered").values() if int(e["id"]) == 6]
+    assert len(after) - len(before) == 1, \
+        "the second mod adds its own liquid snapshot at POST_LEVEL_GENERATION, and no second probe"
     report = floor(rt, at_level=SURFACES)
     assert int(report["wire"]["mq"]) == 2, "both mods' queries, in the order they ran"
 

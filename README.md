@@ -294,11 +294,15 @@ fails the test with the frame it died on, instead of quietly hanging.
   dropped from it altogether. One who was player 1 keeps that slot, hidden, until
   the run ends: renumbering the party mid-run could hand the mod's per-player
   items to the wrong player, and a player who comes back reclaims their slot.
-- **Coming back mid-run**: without a hosted mod, a player who comes back is folded
-  in at the next floor. With one (Spelunky 2.5) they wait in the camp and join the
-  next run: the mod keeps the run's history in its own memory, which a game that
-  rejoins mid-run does not have, so the floors would come out different and the
-  run would desync. Drop `mo_midrunjoin.on` in this folder to fold them in anyway.
+- **Coming back mid-run**: a player who comes back is folded in at the next floor.
+  With a hosted mod (Spelunky 2.5) the host hands the mod's memory of the run over
+  as well -- its plan and quests, which world the run is in, the items being
+  carried -- taken as the host starts loading that floor. The returning player
+  waits a moment in the camp for it, then loads the same floor. For that floor and
+  the next, if their game comes out different from the host's, they go back to the
+  camp and join the next run while everyone else plays on; both sides are told
+  why. A hosted mod Modded Online cannot hand over still means the next run. Drop
+  `mo_midrunjoin.on` in this folder to fold them in without the handover.
 - **Back layers**: any player can take a layer door alone — each machine's
   camera follows its own spelunker's layer (vanilla forces the camera to the
   leader's layer, which made solo layer travel impossible in co-op). Players

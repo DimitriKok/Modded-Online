@@ -172,4 +172,4 @@ def test_the_hd_mod_is_one_of_the_mods_it_applies_to():
     """The posttile-start adapter names the HD mod by its own global."""
     det = DETERMINISM
     assert 'adapter.name == "run-plan" or adapter.name == "posttile-start"' in det
-    assert "set_callback(snapshotLiquid, ON.POST_LEVEL_GENERATION)" in det
+    assert 'module.head(ON.POST_LEVEL_GENERATION, "determinism:snapshotLiquid", snapshotLiquid)' in det

@@ -54,6 +54,9 @@ Network = { isInRun = function() return true end }
 st = { quest_flags = 0, screen_next = SCREEN.LEVEL, world = 1, level = 1, theme = 1 }
 function get_local_state() return st end
 function SafeCall(_, f, ...) return f(...) end
+-- the fold-in's tail, installed with the window (eventSync, "bringing a player back")
+foldTailSaw = nil
+function module.onFoldTail() foldTailSaw = { modSawResetAtLoad = modSawResetAtLoad } end
 
 -- the engine's dispatch: every callback for an event, in registration order
 callbacks = {}
@@ -97,6 +100,8 @@ def runtime(install: bool = True):
     rt.execute(ENV)
     rt.execute(extract("function module.showRunReset()"))
     rt.execute(extract("function module.hideRunReset()"))
+    # without Determinism (none here), an ordered tail is a plain set_callback
+    rt.execute(extract("function module.ordered(event, name, fn, tail)"))
     rt.execute(extract("function module.installRunResetWindow()"))
     if install:
         # 3. ours again, registered from main.lua after hosting: hide
@@ -126,6 +131,12 @@ def test_the_load_callbacks_see_it_too():
     rt.execute("dispatch(ON.PRE_LOAD_SCREEN)")
     assert rt.eval("modSawResetAtLoad") is True
     assert flags(rt) & RESET == 0
+
+
+def test_the_fold_ins_tail_comes_after_the_mods_load_callbacks():
+    rt = runtime()
+    rt.execute("dispatch(ON.PRE_LOAD_SCREEN)")
+    assert rt.eval("foldTailSaw.modSawResetAtLoad") is True, "it ran before the mod's callback"
 
 
 def test_only_on_the_runs_first_load():

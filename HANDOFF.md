@@ -6,7 +6,7 @@ them.
 
 ## Start here
 
-**Build: `2.0.0-dev55` → `dev85`. The server must be redeployed at `1.0.13`.**
+**Build: `2.0.0-dev55` → `dev86`. The server must be redeployed at `1.0.13`.**
 Section 3's fix is half a server fix and does nothing without it (1.0.11 or later).
 Section 6 has a server half too, but its client half works on its own. A client on a
 server other than the one it expects says so in a toast and in the log. Check with
@@ -37,11 +37,12 @@ server other than the one it expects says so in a toast and in the log. Check wi
 | 21 | On Linux (Proton) the mod said "Python is not installed" with Python installed; with that fixed, every connection said "Could not reach the server" | Python: **FIXED** in dev80, confirmed in game (the error went). The connection: dev81 makes the bridge survive a dead console (it died at its first print under Wine when its console had no window, reproduced with Wine 9) and the menu say how far the bridge got; not yet tried in game. The game is a Windows program under Proton and needs the Windows Python inside its prefix; on Proton 9 and older Wine's `where` is a stub, so the mod now also looks where a Windows install puts Python — section 21 |
 | 22 | Room PTHP: 1-2 generated differently on the two machines (a turkey back room on one only) | **CAUSE FOUND; the cure is restarting both games.** Spelunky 2.5 keeps some level hooks from earlier play, and the host's game had been running longer: 64 hosted ON.LEVEL callbacks against 38 at 1-1. dev84 tells every player at 1-1 ("Desync likely") and the log names the hooks that differ; not yet tried in game — section 22 |
 | 23 | Room MGVG: 1-2 built differently on the two machines | **FIXED** in dev85, not yet tried in game. The peer had the host's seed before it began loading and set it before the engine's step, so the floor came from one step too far — section 23 |
-| 24 | Room QZUX: a player who crashed and rejoined desynced at once; a white flag left where a player crashed | **CHANGED / FIXED** in dev85, not yet tried in game. With a hosted mod a returning player now joins the next run, not this one (2.5's run history is not in a rejoined game); the leader's white flag is hidden over a departed player and with one player left — section 24 |
+| 24 | Room QZUX: a player who crashed and rejoined desynced at once; a white flag left where a player crashed | The flag: **FIXED** in dev85, not yet tried in game. The rejoin: dev85 made a returning player wait for the next run with a hosted mod; **dev86 folds them in again**, see 26 — section 24 |
 | 25 | A crash right after 2.5's Quetzalcoatl altar hook (sim 19:2682) | **NOT FIXED: cause not known.** In the engine's update or 2.5's per-entity hooks, on one machine only. Needs the session's logs — section 25 |
+| 26 | Coming back mid-run with 2.5 hosted (dev85 deferred it to the next run) | **NEW** in dev86, not yet tried in game. The host hands 2.5's run over, taken at the end of its own PRE_LOAD_SCREEN for the fold-in floor; the returning player waits in the camp for it and applies it at the head and the tail of their load; two floors of probation send them back to the camp on any difference. Also: a hosted mod's callbacks for every load-time and per-frame event run in registration order in a room — section 26 |
 
-**Git state:** `main` is at dev85; `claude/vigilant-cori-chwlul` stays open for the next
-fixes. `git log --oneline origin/main..HEAD` shows what a branch adds.
+**Git state:** `main` is at dev85; `claude/vigilant-cori-chwlul` is at dev86 and stays
+open for the next fixes. `git log --oneline origin/main..HEAD` shows what a branch adds.
 
 **Before trusting any log in the pack folder**, read "why two captures came back
 empty" in section 2. A stale `desync_log.txt` used to ship *inside the repo* and cost
@@ -1357,6 +1358,11 @@ or floating nearest) on a departed player, and every flag once one player is lef
 it changes, and the leader matters for the camera and layer doors (both ours online)
 and the Olmec/Tiamat cutscene skip (cosmetic). `tests/test_gone_player_flag.py`.
 
+**dev86 reverses the rejoin half:** a returning player is folded in at the next floor
+again, with 2.5's run handed over (section 26). The world-host note above is not moot
+any more: a returning player with the lowest slot becomes the world host at the
+fold-in, so every other player's check involves them (section 26, "probation").
+
 **Still the case:** a departed player 1 stays in the party, hidden, until the run ends.
 Only the last slot can be cut (the party is contiguous); renumbering the others would
 move 2.5's per-player items, if it keys them by slot, and break the rejoin's
@@ -1375,6 +1381,111 @@ run. Not the leak sweep (frame 2682 is off its cadence, and it acts past 1000 pa
 Nothing of ours touches altars, sacrifices or corpses. Needed: both machines'
 `desync_log.txt` from that session (`desync_log.prev.txt` on a machine relaunched since),
 `crash_notes.txt`, and 2.5's altar code (`quetzalcoatlAltar`).
+
+## 26. Coming back mid-run with 2.5 hosted — NEW in dev86, NOT YET TRIED IN GAME
+
+**Why QZUX's rejoin diverged** (section 24): the rejoiner warped in from the camp,
+where Overlunky's `warp()` sets `quest_flags = 1`, and 2.5 reset its whole run on it
+(`game:init(RESET)`, and `PRE_LOAD_SCREEN` on the flag); and a rejoined game's
+callback ids have a different history, so Overlunky's `unordered_map` ran 2.5's
+callbacks in a different order. dev86 answers both.
+
+**1. The order** (`determinism.lua`, "the order hosted callbacks run in"). dev77's
+ON.LEVEL fix, generalised: in a room, the hosted mod's callbacks for the ORDER_KINDS
+(PRE/POST_LOAD_SCREEN, PRE_LOAD_LEVEL_FILES, PRE/POST_LEVEL_GENERATION,
+POST_ROOM_GENERATION, PRE/POST_LEVEL_CREATION and DESTRUCTION, PRE/POST_UPDATE,
+GAMEFRAME, LEVEL, LOADING, SCREEN, TRANSITION, CAMP, START, RESET, DEATH, WIN) run as
+one batch in registration order, from whichever dispatcher the engine reaches first:
+heads (ours), the mod's, tails (ours). Return rules per event: PRE_LOAD_SCREEN and the
+PRE creation/destruction ones stop at the first `true`; PRE_LEVEL_GENERATION and
+PRE_UPDATE OR their results; the rest ignore them. A new pass starts when the frame
+changed, a closing event fired (ORDER_CLOSERS: POST_UPDATE closes PRE_UPDATE, and so
+on), or an entry comes round a second time after the pass completed. An entry
+registered during a pass runs in that pass, last. An error is raised at the entry's
+own turn. Alone, or for an event the mod has no callback for, every callback runs at
+the engine's turn. Heads: eventSync's PRE_LOAD_SCREEN and PRE_LEVEL_GENERATION work,
+inputSync's gate, determinism's own. Tails: the run-start window and the fold-in tail
+(installRunResetWindow, from main.lua), inputSync's late input guard.
+`tests/test_ordered_passes.py`.
+
+**2. What is handed over** (`determinism.lua`, the `spelunky-2.5` adapter). 2.5's game
+object is a local of its main.lua, found through the upvalues of its callbacks (a
+table whose metatable is `Sp25GameClass`): its `globalState` (plain data; every field
+2.5 writes was checked), `sp25World`, `spelunky2World`, `gameRestarted`, the
+transition route. The Custom Entities library's four carry lists, through its
+functions' upvalues, without `_lib_callbacks` (this machine's entity hook ids; the
+library installs fresh ones). And SP25_LOCALS, file-scope locals 2.5's load callbacks
+set from the screen being left, reached through the `initialize` function each item
+file returned to `require` (`ModHost.loadedModuleValue`): `items/rayGun.lua`
+`transitionRestoreBySlot`; `items/qilinQuest.lua` `questRockWasHeld` and the rapid
+Qilin's five; `items/crystalUdjatQuest.lua` `crystalUdjatWasHeld`; `items/wormMeat.lua`
+`wormMeatWasHeld`; and the Summit climbers' chain, nine locals of
+`hooks/summit/climbersquest.lua`'s initialize ("intentionally live outside the
+per-level hook callbacks so the chain can persist across Summit-2, Summit-3, and
+Summit-4"), reached through the handler of its `cleanup-climberchainquest@NOT-Summit`
+hook in 2.5's `Hooks` registry. Every one must be found, and be one local
+(`debug.upvalueid`), or nothing is handed over and the player waits for the next run
+with the reason.
+Encoded as printable ASCII with no quote or backslash (it rides JSON), at most 16000
+characters for all hosted mods together (the client reads 32 KB).
+`tests/test_run_state.py`.
+
+**3. When, and to whom** (`eventSync.lua`, "bringing a player back"). The review of
+2.5's 37 files with load-screen hooks found that most clear per-floor state, but
+`rayGun` (a held gun's charge, a full refill with a powerpack), `qilinQuest` (the
+ridden rapid Qilin), the quest items' carry flags, and `hooks/ascent/depthsSacrifice`
+(which rewrites `world_next`/`level_next`/`theme_next` on the transition to the
+Depths) read the TRANSITION being left. A returning player leaves the camp. So:
+
+- `pollJoinAtTransition` (world host, settled transition): checks
+  `ModHost.runStateSupported()`, else defers as dev85 did; puts `st.cap = Network.slot`
+  in the join's snapshot.
+- `run_start` (join): every machine sets `module.foldIn = {slots, ord, cap}`. The
+  machine with slot `cap` warps and sets `foldSendTail`. A returning player does NOT
+  warp: `foldWait` (10 s), toast "Bringing you back into the run...". Everyone else
+  warps as before.
+- `cap`'s PRE_LOAD_SCREEN TAIL (`onFoldTail` -> `sendFoldState`): captures the run
+  as 2.5's callbacks just left it, sends `foldstate {slots, ord, dest = the engine's
+  *_next now, mod}`, and `Network.flushEvents()` puts it on the wire before the
+  engine blocks (events are otherwise sent on the next GUI frame, after the load). A
+  capture that fails sends `foldfail (run)`.
+- The returning player (`onFoldState`): keeps the run for the head and the tail of
+  its load and warps to `dest`. At the head (`onPreLoadScreen`, after
+  `applyStateSync`, which also clears the RESET bit `warp()` raised) and again at the
+  tail it is applied, so 2.5's own load callbacks run on the host's run and whatever
+  they made of the camp is overwritten. No other machine applies anything.
+- `pollFoldWait`: no `foldstate` after 10 s -> `foldfail (late)`, and back to the
+  camp at once (the connection may be what failed).
+
+**4. Probation** (`foldVerdict`): the fold-in floor (`levelOrdinal == ord + 1`) and the
+next. Any of `floor` (entity digest), `run` (the run fingerprint: 2.5's globalState and
+world, via the adapter's `digestRun` -- not the carry lists, which a machine is in the
+middle of using), `positions` (the desync alarm) that involves a returning player --
+they are comparing, or they are the world host being compared with -- sends
+`foldfail`. Then the returning player `backToCamp`s (toast, `clearRunState`,
+`endSession`, `endMyRun`, warp to the camp), everyone else toasts and plays on, and
+`foldFailed[slot]` makes the world host defer them for the rest of the run. A
+returning player with the lowest slot becomes the world host at the fold-in (as
+before dev85); then every other player finds a difference at once, and the repeats
+are dropped. If they are sent back, `player_left` promotes the next world host.
+
+**What to look for in a log:** on the host `fold-in: sent the hosted mods' run as this
+load left it, to W-L`; on the returning player two `hosted run state from the world
+host: fyi.spelunky-25-2: world N, M run values, K carried custom item(s), 18 of its
+own` lines (the second "again, at the end of the load"); then floors with no `hosted
+run state on seq ... DIFFERS`. A failure: `fold-in FAILED (floor|run|positions|late)`,
+and `hosted run state here (...)` on each machine with its copy, to diff.
+
+**Not covered:** whatever else 2.5 keeps across floors outside these. Its other
+file-scope locals, and the locals of its initialize functions that its callbacks
+write, were checked: they reset per floor (in `Hooks.runWhen` installers, which run at
+every level, or in cleanup hooks on the load screen, level destruction, RESET and
+CAMP), except a few tables keyed by entity uid that 2.5 never clears (e.g.
+`hooks/moonshaft/princeReward.lua`'s `dropped_dogs`): uids recycle every floor, so
+those can already differ between any two machines with different histories.
+Anything that shows within two floors sends the player back; later, it would desync
+as any divergence does.
+`tests/test_fold_in.py`.
 
 ## Diagnostic tooling (flags and the files they write)
 
@@ -1456,7 +1567,7 @@ On a machine whose Python has no pytest or lupa, uv supplies both for the run:
 uv run --no-project --with pytest --with lupa python -m pytest tests/ -q
 ```
 
-1189 passing, none failing, 1 skipped (it needs hdmod next to this pack) (dev85), under Lua 5.4 and 5.5. The 16 long-standing failures went in dev67, with the two
+1311 passing, none failing, 1 skipped (it needs hdmod next to this pack) (dev86), under Lua 5.4 and 5.5. The 16 long-standing failures went in dev67, with the two
 stale test files they came from: `tests/test_world_mailbox.py` (the world mailbox
 deleted in dev44) and `tests/test_seeded_run.py` (the seeded-run flag removed in
 dev46). A failure here now means something broke.

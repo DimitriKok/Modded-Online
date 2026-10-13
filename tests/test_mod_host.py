@@ -1523,3 +1523,47 @@ def test_without_the_flag_the_mod_sees_the_real_game_manager(tmp_path, fake_pack
     """No workaround, no proxy: the mod's view is exactly what it always was."""
     rt, env = _windowed_mod(tmp_path, fake_pack, flag=False)
     assert rt.eval("rawget")(env, "game_manager") is None
+
+
+def test_what_a_file_returned_to_require_can_be_looked_up_by_its_path(fake_pack):
+    """An adapter reads a hosted file's own locals through the function the file hands
+    back to `require` (2.5's item files return their initialize function). Looking it
+    up runs nothing."""
+    fake_pack("main.lua", """
+        SafeImport({ path = "src.items.thing" })
+        SafeImport({ path = "src.hooks.temple.thing" })
+    """)
+    fake_pack("src/items/thing.lua", """
+        local carried = 3
+        RAN = (RAN or 0) + 1
+        return function() return carried end
+    """)
+    fake_pack("src/hooks/temple/thing.lua", """
+        return "the other one"
+    """)
+    rt = runtime()
+    report = rt.eval("ModHost.host")("fake.mod")
+    assert report["ok"], report["err"]
+    env = rt.eval("ModHost.envFor")("fake.mod")
+    lookup = rt.eval("ModHost.loadedModuleValue")
+    fn = lookup(env, "/src/items/thing.lua")
+    assert fn() == 3
+    assert lookup(env, "/src/hooks/temple/thing.lua") == "the other one"
+    assert lookup(env, "/src/items/nothing.lua") is None
+    assert lookup(rt.eval("{}"), "/src/items/thing.lua") is None, "another sandbox's is not it"
+    assert env["RAN"] == 1
+
+
+def test_the_hosted_mods_runs_together_must_fit_one_datagram():
+    rt = runtime()
+    rt.execute("""
+        ModHost.hostedPacks = function() return { "a.mod", "b.mod" } end
+        ModHost.controls["a.mod"] = { captureRun = function() return string.rep("x", 9000) end }
+        ModHost.controls["b.mod"] = { captureRun = function() return string.rep("y", 9000) end }
+    """)
+    states, why = rt.eval("ModHost.captureRunState()")
+    assert states is None
+    assert why == "the hosted mods' run is too big to send (18000 characters)"
+    rt.execute('ModHost.controls["b.mod"].captureRun = function() return "small" end')
+    rt.execute("states, why = ModHost.captureRunState()")
+    assert rt.eval("why") is None and rt.eval("states['b.mod']") == "small"

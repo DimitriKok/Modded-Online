@@ -167,27 +167,30 @@ def test_alone_each_runs_at_the_engines_own_turn():
 def test_the_probe_looks_before_any_of_them_wherever_the_engine_puts_its_own():
     """The probe's ON.LEVEL look is ours, registered first -- which says nothing about
     when the engine reaches it. The batch takes the look before the first mod callback."""
-    rt = machine(salt=7919)
-    rt.execute("""
-        world = { surfaces = 0 }
-        ENT_TYPE = { FX_WATER_SURFACE = 680 }
-        MASK = { FX = 64, LIQUID = 24576 }
-        LAYER = { BOTH = -128 }
-        function get_entities_by(types)
-            local out = {}
-            if types == ENT_TYPE.FX_WATER_SURFACE then
-                for i = 1, world.surfaces do out[i] = 1000 + i end
+    for salt in range(1, 400):
+        rt = machine(salt=salt)
+        rt.execute("""
+            world = { surfaces = 0 }
+            ENT_TYPE = { FX_WATER_SURFACE = 680 }
+            MASK = { FX = 64, LIQUID = 24576 }
+            LAYER = { BOTH = -128 }
+            function get_entities_by(types)
+                local out = {}
+                if types == ENT_TYPE.FX_WATER_SURFACE then
+                    for i = 1, world.surfaces do out[i] = 1000 + i end
+                end
+                return out
             end
-            return out
-        end
-        function get_position(uid) return uid, 5, 0 end
-    """)
-    register(rt, 4, body="world.surfaces = world.surfaces + 1")
-    rt.execute("floor()")
-    mods = {int(v) for v in rt.eval("ids").values()}
-    order = [int(i) for i in rt.eval("reached[ON.LEVEL]").values()]
-    probe_at = next(n for n, cb in enumerate(order) if cb not in mods)
-    assert probe_at > 0, "pick a salt where the engine reaches a mod callback before the probe"
+            function get_position(uid) return uid, 5, 0 end
+        """)
+        register(rt, 4, body="world.surfaces = world.surfaces + 1")
+        rt.execute("floor()")
+        mods = {int(v) for v in rt.eval("ids").values()}
+        order = [int(i) for i in rt.eval("reached[ON.LEVEL]").values()]
+        if next(n for n, cb in enumerate(order) if cb not in mods) > 0:
+            break  # the engine reached a mod callback before the probe: the case
+    else:
+        pytest.fail("no salt has the engine reach a mod callback before the probe")
     assert int(rt.eval("world.surfaces")) == 4
     assert int(rt.eval("Determinism.waterReport().wire.fn")) == 0, \
         "the probe looked after a mod callback had already changed the floor"
@@ -241,18 +244,20 @@ def test_clearing_by_id_still_works_between_floors():
 
 # --------------------------------------------------------------- the other edges
 
-def test_one_registered_during_the_pass_first_runs_on_the_next_floor():
-    """The engine may or may not reach a callback inserted mid-iteration, by where its
-    id hashes. Every machine gives the same answer instead: next floor."""
+def test_one_registered_during_the_pass_runs_in_it_after_the_others():
+    """The engine nearly always reaches a callback inserted mid-iteration -- Microsoft's
+    map puts it at the end of its list -- and may not, by where its id lands. Every
+    machine gives the engine's usual answer instead: this pass, after the others, and
+    once however the engine reaches it."""
     for salt in (0, 31, 7919, 104729):
         rt = machine(salt=salt)
         register(rt, 3, body=(
             "if {n} == 2 and not grew then grew = true;"
             " env.set_callback(function() ran[#ran + 1] = 9 end, ON.LEVEL) end"))
         rt.execute("floor()")
-        assert ran(rt) == [1, 2, 3], f"salt {salt}"
+        assert ran(rt) == [1, 2, 3, 9], f"salt {salt}"
         rt.execute("floor()")
-        assert ran(rt) == [1, 2, 3, 1, 2, 3, 9], f"salt {salt}"
+        assert ran(rt) == [1, 2, 3, 9, 1, 2, 3, 9], f"salt {salt}"
 
 
 def test_an_error_stops_nothing_else_and_is_raised_at_its_own_turn():
@@ -312,7 +317,8 @@ def test_each_one_is_named_in_the_crash_trace_while_it_runs():
     register(rt, 2)
     rt.execute("floor()")
     assert list(rt.eval("marks").values()) == [
-        "IN mod h1.lua:1", "OUT mod h1.lua:1", "IN mod h2.lua:1", "OUT mod h2.lua:1"]
+        "IN mod h1.lua:1 LEVEL", "OUT mod h1.lua:1 LEVEL",
+        "IN mod h2.lua:1 LEVEL", "OUT mod h2.lua:1 LEVEL"]
 
 
 def test_the_floors_order_is_reported_for_the_probe():
