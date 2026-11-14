@@ -1,5 +1,26 @@
 # Changelog
 
+## 2.0.0-dev87
+
+Playlunky's November 2026 update broke every hosted mod. No server change: the server
+stays at **1.0.13**. Every player needs dev87.
+
+### Fixed
+
+- **2.5 failed at once on the new Playlunky (`attempt to index a nil value (global
+  'state')`).** The update makes the global `state` and `prng` "always use the local
+  versions": they are no longer plain globals but are looked up on every read through
+  a fallback on the script's environment. A hosted mod reads engine globals through
+  Modded Online's sandbox, which used a raw lookup that never reaches that fallback,
+  so 2.5 got nil for both. The sandbox now does a normal read when the raw one finds
+  nothing, every time and without caching the result. Older Playlunky builds behave
+  as before. Modded Online's own code read them the normal way and was not affected.
+
+### Tests
+
+`tests/test_mod_host.py`: a global served through a fallback reaches the mod, is read
+afresh every time, and one whose fallback raises is only "not found".
+
 ## 2.0.0-dev86
 
 A player who comes back mid-run is brought in at the next floor again while 2.5 runs.

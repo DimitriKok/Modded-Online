@@ -6,7 +6,7 @@ them.
 
 ## Start here
 
-**Build: `2.0.0-dev55` → `dev86`. The server must be redeployed at `1.0.13`.**
+**Build: `2.0.0-dev55` → `dev87`. The server must be redeployed at `1.0.13`.**
 Section 3's fix is half a server fix and does nothing without it (1.0.11 or later).
 Section 6 has a server half too, but its client half works on its own. A client on a
 server other than the one it expects says so in a toast and in the log. Check with
@@ -41,8 +41,13 @@ server other than the one it expects says so in a toast and in the log. Check wi
 | 25 | A crash right after 2.5's Quetzalcoatl altar hook (sim 19:2682) | **NOT FIXED: cause not known.** In the engine's update or 2.5's per-entity hooks, on one machine only. Needs the session's logs — section 25 |
 | 26 | Coming back mid-run with 2.5 hosted (dev85 deferred it to the next run) | **NEW** in dev86, not yet tried in game. The host hands 2.5's run over, taken at the end of its own PRE_LOAD_SCREEN for the fold-in floor; the returning player waits in the camp for it and applies it at the head and the tail of their load; two floors of probation send them back to the camp on any difference. Also: a hosted mod's callbacks for every load-time and per-frame event run in registration order in a room — section 26 |
 
-**Git state:** `main` is at dev86; `claude/vigilant-cori-chwlul` stays open for the next
-fixes. `git log --oneline origin/main..HEAD` shows what a branch adds.
+**Playlunky 2026-11 (dev87):** `state` and `prng` are now served through a fallback on
+the script's environment, so the sandbox's `__index` (`ModHost.newSandbox`) does a
+normal `_G[key]` read when `rawget` finds nothing, uncached. Without it every hosted
+mod gets nil for both.
+
+**Git state:** `main` is at dev86; `claude/vigilant-cori-chwlul` is at dev87 and stays
+open for the next fixes. `git log --oneline origin/main..HEAD` shows what a branch adds.
 
 **Before trusting any log in the pack folder**, read "why two captures came back
 empty" in section 2. A stale `desync_log.txt` used to ship *inside the repo* and cost

@@ -1567,3 +1567,29 @@ def test_the_hosted_mods_runs_together_must_fit_one_datagram():
     rt.execute('ModHost.controls["b.mod"].captureRun = function() return "small" end')
     rt.execute("states, why = ModHost.captureRunState()")
     assert rt.eval("why") is None and rt.eval("states['b.mod']") == "small"
+
+
+def test_engine_globals_served_through_a_fallback_reach_the_mod(fake_pack):
+    """Playlunky's 2026-11 update serves `state` and `prng` through a fallback on the
+    script's environment, looked up on every read. A raw read gave 2.5 nil."""
+    fake_pack("main.lua", """
+        SEEN_LEVEL = state.level
+        SEEN_PRNG = prng.name
+    """)
+    rt = runtime()
+    rt.execute("""
+        served = 0
+        setmetatable(_G, { __index = function(_, key)
+            if key == "state" then served = served + 1; return { level = served + 2 } end
+            if key == "prng" then return { name = "local" } end
+            if key == "boom" then error("no such global") end
+        end })
+    """)
+    report = rt.eval("ModHost.host")("fake.mod")
+    assert report["ok"], report["err"]
+    env = rt.eval("ModHost.envFor")("fake.mod")
+    assert env["SEEN_LEVEL"] == 3 and env["SEEN_PRNG"] == "local"
+    assert env["state"]["level"] == 4, "read afresh every time, never cached"
+    assert env["boom"] is None, "a fallback that raises is only 'not found'"
+    missing = [str(v) for v in report["missing"].values()]
+    assert "state" not in missing and "prng" not in missing and "boom" in missing

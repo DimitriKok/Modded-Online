@@ -1214,6 +1214,19 @@ function module.newSandbox(report, opts)
     setmetatable(env, {
         __index = function(_, key)
             local v = rawget(_G, key)
+            if v == nil then
+                -- Not every engine global is a plain field. Since Playlunky's 2026-11
+                -- update `state` and `prng` are looked up on every read through a
+                -- fallback on the script's environment ("always use the local
+                -- versions"), which a raw read never reaches: 2.5 got nil and died
+                -- on its first `state.`. So a normal read too -- every time, never
+                -- cached, since the value is chosen per read. Protected: a fallback
+                -- that raises on an unknown name is still only "not found".
+                local ok, got = pcall(function() return _G[key] end)
+                if ok then
+                    v = got
+                end
+            end
             if v == nil and not seen[key] then
                 seen[key] = true
                 report.missing[#report.missing + 1] = tostring(key)
