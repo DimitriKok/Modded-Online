@@ -603,10 +603,13 @@ end
 -- ours run at their own turn too, so nothing changes without a hosted mod.
 --
 -- What the engine does with a callback's answer is kept, event by event:
---   * "stop" (PRE_LOAD_SCREEN, PRE_LEVEL_CREATION, PRE_LEVEL_DESTRUCTION): the
---     engine stops at the first callback that returns true. The batch stops at the
---     first that does in ITS order; the ones after it do not run, and its true
---     reaches the engine at its own turn, which stops the engine there;
+--   * "stop" (PRE_LOAD_SCREEN, PRE_LEVEL_CREATION, PRE_LEVEL_DESTRUCTION, the layer
+--     ones and PRE_HANDLE_ROOM_TILES): the engine stops at the first callback that
+--     returns true. The batch stops at the first that does in ITS order; the ones
+--     after it do not run, and its true reaches the engine at its own turn, which
+--     stops the engine there;
+--   * "first" (PRE_GET_RANDOM_ROOM): the same, for the first that returns a room --
+--     a string that is not empty;
 --   * "any" (PRE_LEVEL_GENERATION, PRE_UPDATE): every callback runs, and a true
 --     from any of them blocks; each hands back its own answer;
 --   * "all": every callback runs, and their answers are not used.
@@ -626,12 +629,41 @@ end
 --     reaches the callback that threw, so Playlunky still reports it.
 --
 -- A pass is one firing of one event. A new one starts when the engine frame has
--- moved on, when an event that always comes between two firings has fired (the
--- update's end between two PRE_UPDATEs, the next update between two loads), or when
--- a callback that already had its turn is reached again after every callback of the
--- pass has had one (or the one that stopped it has): an event firing twice in one
--- frame is two passes. A callback registered during a pass and reached after the
--- others is still in that pass, and is not run twice.
+-- moved on, or when an event that always comes between two firings has fired (the
+-- update's end between two PRE_UPDATEs, the next update between two loads). Nothing
+-- else starts one: a callback the engine reaches again within a pass is handed what
+-- it returned in the batch, and does not run again.
+--
+-- That is the engine's map again. Overlunky walks it with a range-for, and
+-- set_callback inserts into the very map being walked; when an insert makes it
+-- rehash, the walk carries on through the new order and reaches some callbacks a
+-- second time and others not at all, and which depends on each machine's ids. 2.5
+-- registers callbacks from inside its own: about four hundred from its
+-- PRE_LEVEL_GENERATION every floor, more from its ON.LEVEL ones -- and the update
+-- fires ON.LEVEL, GAMEFRAME and the screen events in one walk of the map. dev86 also
+-- began a new pass when a callback that already had its turn was reached again after
+-- every other had had one, for an event firing twice in one frame -- which no event
+-- does without one of the events above between -- and so could run all of the mod's
+-- callbacks for an event a second time, on whichever machine's map rehashed. In rooms
+-- HVRT and EIAS (dev87), from freshly started games and one seed, the two machines
+-- built different 1-1s and ran different numbers of 2.5's ON.LEVEL callbacks (52 and
+-- 47 on the world host, 59 both times on the other). A callback registered during a
+-- pass is still in that pass, and is not run twice either.
+--
+-- Some events fire many times in one frame with nothing between: once for every
+-- room while a floor generates (PRE_GET_RANDOM_ROOM, PRE_HANDLE_ROOM_TILES), once
+-- for each layer as one is made or torn down. For those a firing is told from the
+-- next by what the engine hands the callbacks -- the room's place, layer and
+-- template; the layer -- and a new pass starts when that changes. Should the engine
+-- ask about one room twice in a row, a callback it reaches again with no
+-- set_callback made since the pass began is that second firing: only an insert can
+-- rehash the map under a walk, and without one a walk reaches each callback once
+-- (Callbacks counts every call into the engine's set_callback, ours and the mod's).
+-- Those events were left to the engine until dev88, and they decide the floor: when
+-- two of a mod's callbacks can answer for one room, the one the engine reaches first
+-- picks it, and the engine's order hangs on the callbacks' ids -- which one extra
+-- registration of ours, from a flag file on one machine only, shifts by one for
+-- every callback the mod registers after it.
 
 local LEVEL_NAMES_MAX = 64 -- names in a floor block's `level order` line
 -- Places named in a floor report's census of them (`og`), most callbacks first, and
@@ -654,6 +686,17 @@ local ORDER_KINDS = {
     GAMEFRAME = "all", LEVEL = "all", LOADING = "all", SCREEN = "all",
     TRANSITION = "all", CAMP = "all", START = "all", RESET = "all",
     DEATH = "all", WIN = "all",
+    -- fired more than once in a frame: a pass per firing (ORDER_BY_FIRING)
+    PRE_GET_RANDOM_ROOM = "first", PRE_HANDLE_ROOM_TILES = "stop",
+    PRE_LAYER_CREATION = "stop", POST_LAYER_CREATION = "all",
+    PRE_LAYER_DESTRUCTION = "stop", POST_LAYER_DESTRUCTION = "all",
+}
+--- The events that fire more than once in one frame, with nothing between: a new pass
+--- starts when what the engine hands the callbacks changes (see firingKey).
+local ORDER_BY_FIRING = {
+    PRE_GET_RANDOM_ROOM = true, PRE_HANDLE_ROOM_TILES = true,
+    PRE_LAYER_CREATION = true, POST_LAYER_CREATION = true,
+    PRE_LAYER_DESTRUCTION = true, POST_LAYER_DESTRUCTION = true,
 }
 --- Events that always fire between two firings of the one on the left, in the
 --- engine's update (StateUpdate: PRE_UPDATE, the update with any level load inside
@@ -676,6 +719,10 @@ local ORDER_CLOSERS = {
     SCREEN = { "PRE_UPDATE" }, TRANSITION = { "PRE_UPDATE" }, CAMP = { "PRE_UPDATE" },
     START = { "PRE_UPDATE" }, RESET = { "PRE_UPDATE" }, DEATH = { "PRE_UPDATE" },
     WIN = { "PRE_UPDATE" },
+    PRE_GET_RANDOM_ROOM = { "POST_LEVEL_GENERATION", "PRE_UPDATE" },
+    PRE_HANDLE_ROOM_TILES = { "POST_LEVEL_GENERATION", "PRE_UPDATE" },
+    PRE_LAYER_CREATION = { "PRE_UPDATE" }, POST_LAYER_CREATION = { "PRE_UPDATE" },
+    PRE_LAYER_DESTRUCTION = { "PRE_UPDATE" }, POST_LAYER_DESTRUCTION = { "PRE_UPDATE" },
 }
 
 --- event value -> its kind, and its name for the trace and the log
@@ -852,11 +899,10 @@ local function orderOf(event)
             active = nil,      -- whether the hosted mods are in a room
             pass = 0,          -- passes begun
             frame = nil,       -- the engine frame the current pass began on
-            complete = true,   -- every entry the current pass expected has had its turn
+            key = nil,         -- what the engine handed the pass (ORDER_BY_FIRING only)
+            byFiring = ORDER_BY_FIRING[ORDER_NAME[event] or ""] == true,
+            inserts = nil,     -- engineInserts() when the pass began (ORDER_BY_FIRING)
             closed = false,    -- an event that ends this event's passes fired since
-            expect = 0,        -- entries the current pass expects the engine to reach
-            seen = 0,          -- of those, how many it has
-            stopper = nil,     -- the entry whose true stops the engine this pass
             batching = false,
             dirty = false,     -- entries cleared but still in `entries`
         }
@@ -902,16 +948,6 @@ local function compactOrder(ord)
     ord.dirty = false
 end
 
---- Has every entry this pass expected had its turn? Then the next call the engine
---- makes for this event is a new pass. Never decided inside the batch: the engine
---- has reached nothing of the pass yet but the callback that started it.
---- @param ord table
-local function checkComplete(ord)
-    if not ord.batching and ord.expect > 0 and ord.seen >= ord.expect then
-        ord.complete = true
-    end
-end
-
 --- A hosted entry its mod cleared.
 --- @param entry table
 local function forgetOrdered(entry)
@@ -925,12 +961,6 @@ local function forgetOrdered(entry)
     end
     if entry.mod then
         ord.mods = ord.mods - 1
-    end
-    -- one the pass was still waiting for: the engine will not reach it now
-    if entry.expected == ord.pass and entry.seenPass ~= ord.pass then
-        entry.expected = nil
-        ord.expect = ord.expect - 1
-        checkComplete(ord)
     end
     ord.dirty = true
     compactOrder(ord)
@@ -1102,25 +1132,65 @@ local function runOrderedEntry(entry, ...)
     return ok, err, trace
 end
 
---- A new pass of `ord`'s event: every live entry is one the engine should reach.
+--- Calls into the engine's set_callback so far (Callbacks counts them), or nil when
+--- nothing counts them.
+--- @return integer?
+local function engineInserts()
+    local registry = rawget(_G, "Callbacks")
+    if type(registry) ~= "table" or type(registry.insertCount) ~= "function" then
+        return nil
+    end
+    local ok, n = pcall(registry.insertCount)
+    if ok and type(n) == "number" then
+        return n
+    end
+    return nil
+end
+
+--- A new pass of `ord`'s event.
 --- @param ord table
 --- @param now integer
-local function beginPass(ord, now)
+--- @param key string?
+local function beginPass(ord, now, key)
     compactOrder(ord)
     ord.pass = ord.pass + 1
     ord.frame = now
-    ord.complete = false
+    ord.key = key
     ord.closed = false
-    ord.stopper = nil
-    local expect = 0
-    for i = 1, #ord.entries do
-        local e = ord.entries[i]
-        if not e.cleared then
-            e.expected = ord.pass
-            expect = expect + 1
+    if ord.byFiring then
+        ord.inserts = engineInserts()
+    end
+end
+
+--- Is the engine firing a per-firing event again with what it handed the last firing,
+--- rather than reaching `entry` again within that firing's walk? Only a walk the map
+--- rehashed under reaches a callback twice, and only an insert rehashes it: reached
+--- again with none made since the pass began, it is a new firing. Unsure -- an insert
+--- was made, or nothing counts them -- it is the same firing, where nothing runs twice.
+--- @param ord table
+--- @param entry table
+--- @return boolean
+local function firedAgain(ord, entry)
+    if entry.turnPass ~= ord.pass or ord.inserts == nil then
+        return false
+    end
+    return engineInserts() == ord.inserts
+end
+
+--- What tells one firing of an ORDER_BY_FIRING event from the next: the plain values
+--- the engine hands the callbacks (a room's place, layer and template; a layer). The
+--- room-tiles context, an engine object, is left out.
+--- @return string
+local function firingKey(...)
+    local parts = {}
+    for i = 1, select("#", ...) do
+        local v = select(i, ...)
+        local t = type(v)
+        if t == "number" or t == "string" or t == "boolean" then
+            parts[#parts + 1] = tostring(v)
         end
     end
-    ord.expect, ord.seen = expect, 0
+    return table.concat(parts, ",")
 end
 
 --- The whole pass, in order: our heads, the mod's callbacks, our tails, each in the
@@ -1129,6 +1199,7 @@ end
 local function runPass(ord, ...)
     local pass = ord.pass
     local stopKind = ord.kind == "stop"
+    local firstKind = ord.kind == "first"
     local stopped = false
     if ord.onBatch ~= nil then
         pcall(ord.onBatch)
@@ -1145,9 +1216,9 @@ local function runPass(ord, ...)
                 e.donePass = pass
                 if ok then
                     e.ret, e.err = ret, nil
-                    if stopKind and phase < 3 and ret == true then
+                    if phase < 3 and ((stopKind and ret == true)
+                        or (firstKind and type(ret) == "string" and ret ~= "")) then
                         stopped = true
-                        ord.stopper = e
                     end
                 else
                     e.ret, e.err = nil, ret
@@ -1166,21 +1237,13 @@ local function runPass(ord, ...)
     compactOrder(ord)
 end
 
---- An entry's own turn in the pass: count it, and hand the engine what it returned
---- in the batch -- or raise what it threw, once.
+--- An entry's own turn in the pass: hand the engine what it returned in the batch --
+--- or raise what it threw, once. Reached again in the same pass (the engine's map
+--- rehashed under its walk), it hands back nothing more and runs nothing.
 --- @param ord table
 --- @param entry table
 local function turnOf(ord, entry)
     local pass = ord.pass
-    entry.turnPass = pass
-    if entry.expected == pass and entry.seenPass ~= pass then
-        entry.seenPass = pass
-        ord.seen = ord.seen + 1
-        checkComplete(ord)
-    end
-    if ord.stopper == entry then
-        ord.complete = true -- the engine stops here: the pass is over
-    end
     if entry.donePass ~= pass then
         return -- it did not run in this pass: registered after it, or stopped before it
     end
@@ -1223,10 +1286,15 @@ local function orderedDispatch(entry, ...)
     end
     if not ord.batching then
         local now = enginePassFrame()
-        if ord.frame ~= now or ord.closed or (ord.complete and entry.turnPass == ord.pass) then
+        local key = ord.byFiring and firingKey(...) or nil
+        if ord.frame ~= now or ord.closed or key ~= ord.key
+            or (ord.byFiring and firedAgain(ord, entry)) then
             -- the first of this pass the engine reached: run them all, in order
-            beginPass(ord, now)
+            beginPass(ord, now, key)
             runPass(ord, ...)
+        end
+        if ord.byFiring then
+            entry.turnPass = ord.pass
         end
     end
     return turnOf(ord, entry)
@@ -1339,6 +1407,33 @@ function module.waterReport()
             levelRan.more > 0 and string.format(" (+%d more)", levelRan.more) or "")
     end
     return { wire = wire, lines = #lines > 0 and lines or nil }
+end
+
+--- The ordered events a floor block names (dev88): each with one of the mod's
+--- callbacks, how many it has, and for those fired once a room or a layer, how many
+--- times they fired in a room since the last floor block -- "PRE_GET_RANDOM_ROOM 3
+--- (fired 38)". The same floor gives the same line on every machine. Two of the mod's
+--- callbacks for one room event can both answer for a room, which is why their order
+--- had to be fixed; the other events' firings are not counted, since how often the
+--- per-frame ones fire hangs on how long each machine waited. nil when no event has
+--- one of the mod's callbacks.
+--- @return string?
+function module.orderedCensus()
+    local rows = {}
+    for _, ord in rawPairs(order) do
+        local fired = ord.pass - (ord.censusPass or 0)
+        ord.censusPass = ord.pass
+        if ord.mods > 0 then
+            rows[#rows + 1] = ord.byFiring
+                and string.format("%s %d (fired %d)", ord.name, ord.mods, fired)
+                or string.format("%s %d", ord.name, ord.mods)
+        end
+    end
+    if #rows == 0 then
+        return nil
+    end
+    table.sort(rows)
+    return table.concat(rows, ", ")
 end
 
 --- @param t table

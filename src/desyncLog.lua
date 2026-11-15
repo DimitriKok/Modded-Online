@@ -707,6 +707,17 @@ function module.init()
                 local opts = "?"
                 pcall(function() opts = Network.packOptionHashes() end)
                 f:write("packopts=" .. tostring(opts) .. "\n")
+                -- How this machine's Playlunky hands out the engine's globals. Its
+                -- 2026-11 update serves `state` and `prng` per read and dropped
+                -- `players`: two machines on builds either side of a change like that
+                -- run a hosted mod differently, and nothing else in a log says so.
+                local api = "?"
+                pcall(function()
+                    if ModHost ~= nil and ModHost.engineApi ~= nil then
+                        api = ModHost.engineApi()
+                    end
+                end)
+                f:write("engineapi=" .. tostring(api) .. "\n")
                 -- The lockstep input delay this run is playing on. It is sized
                 -- once, at run start, from the two worst pings in the room, so a
                 -- single bad sample is felt by EVERYONE for the whole run -- and

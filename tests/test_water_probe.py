@@ -566,6 +566,17 @@ def test_the_floor_block_also_says_what_the_hosted_mods_registered():
         "water: here", "hosted registrations since the last floor: set_callback +48"]
 
 
+def test_the_floor_block_names_the_mods_callbacks_by_ordered_event():
+    rt = gate()
+    rt.execute("Determinism.orderedCensus = function() return 'PRE_GET_RANDOM_ROOM 3 (fired 38)' end")
+    rt.execute("module.sendWorldDigest()")
+    assert list(rt.eval("snapshotExtra").values()) == [
+        "water: here", "hosted callbacks by ordered event: PRE_GET_RANDOM_ROOM 3 (fired 38)"]
+    rt.execute("Determinism.orderedCensus = function() error('broken') end")
+    rt.execute("module.sendWorldDigest()")
+    assert list(rt.eval("snapshotExtra").values()) == ["water: here"]
+
+
 def test_a_peer_says_when_the_on_level_order_differs():
     rt = gate()
     rt.execute("""

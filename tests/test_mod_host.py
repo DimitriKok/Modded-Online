@@ -1593,3 +1593,105 @@ def test_engine_globals_served_through_a_fallback_reach_the_mod(fake_pack):
     assert env["boom"] is None, "a fallback that raises is only 'not found'"
     missing = [str(v) for v in report["missing"].values()]
     assert "state" not in missing and "prng" not in missing and "boom" in missing
+
+
+HEARD = """
+    heard = {}
+    DesyncLog = { earlyEvent = function(fmt, ...) heard[#heard + 1] = string.format(fmt, ...) end }
+"""
+
+
+def heard(rt):
+    return [str(v) for v in rt.eval("heard").values()]
+
+
+def test_the_players_global_the_engine_dropped_is_its_own_list_read_afresh(fake_pack):
+    """The same update left the documented `players` global commented out of Overlunky
+    with nothing in its place. The mod gets the engine's list, as it is at each read,
+    and the log says once that it was served."""
+    fake_pack("main.lua", """
+        function COUNT_PLAYERS() return #players end
+    """)
+    rt = runtime()
+    rt.execute(HEARD + """
+        alive = { "p1", "p2" }
+        function get_local_players() return alive end
+    """)
+    report = rt.eval("ModHost.host")("fake.mod")
+    assert report["ok"], report["err"]
+    env = rt.eval("ModHost.envFor")("fake.mod")
+    assert env["COUNT_PLAYERS"]() == 2
+    rt.execute('alive = { "p1" }')
+    assert env["COUNT_PLAYERS"]() == 1, "the engine's list as it is now, never kept"
+    assert heard(rt) == ["hosted mod read a global the engine does not have:"
+                         " players (served from get_local_players)"]
+    assert "players" not in [str(v) for v in report["missing"].values()]
+
+
+def test_an_engine_that_still_has_players_hands_over_its_own(fake_pack):
+    fake_pack("main.lua", """
+        function FIRST_PLAYER() return players[1] end
+    """)
+    rt = runtime()
+    rt.execute(HEARD + """
+        players = { "plain" }
+        function get_local_players() return { "served" } end
+    """)
+    report = rt.eval("ModHost.host")("fake.mod")
+    assert report["ok"], report["err"]
+    assert rt.eval("ModHost.envFor")("fake.mod")["FIRST_PLAYER"]() == "plain"
+    assert heard(rt) == []
+
+
+def test_a_global_found_missing_during_play_is_logged_once(fake_pack):
+    """Missing at load, a global is in the load's own summary. Read during play, long
+    after that was written, the run's log is the only place it can still be seen."""
+    fake_pack("main.lua", """
+        local _ = MISSING_AT_LOAD
+        function READ_IT() return MISSING_IN_PLAY end
+    """)
+    rt = runtime()
+    rt.execute(HEARD)
+    report = rt.eval("ModHost.host")("fake.mod")
+    assert report["ok"], report["err"]
+    env = rt.eval("ModHost.envFor")("fake.mod")
+    assert env["READ_IT"]() is None and env["READ_IT"]() is None
+    assert heard(rt) == ["hosted mod read a global the engine does not have: MISSING_IN_PLAY"]
+    missing = [str(v) for v in report["missing"].values()]
+    assert "MISSING_AT_LOAD" in missing and "MISSING_IN_PLAY" in missing
+    # with no `players` and no list to serve it from, it is one of those too
+    check = rt.eval('load("return players", "=check", "t", ModHost.envFor("fake.mod"))')
+    assert check() is None
+    assert heard(rt)[-1] == "hosted mod read a global the engine does not have: players"
+
+
+def test_globals_missing_in_play_are_named_up_to_a_limit(fake_pack):
+    fake_pack("main.lua", """
+        function READ(name) return _G[name] end
+    """)
+    rt = runtime()
+    rt.execute(HEARD)
+    report = rt.eval("ModHost.host")("fake.mod")
+    assert report["ok"], report["err"]
+    read = rt.eval("ModHost.envFor")("fake.mod")["READ"]
+    for i in range(40):
+        read("MADE_UP_%d" % i)
+    said = heard(rt)
+    assert len(said) == 24
+    assert said[-1].endswith("MADE_UP_23 (the last one named here)")
+
+
+def test_the_log_header_says_how_this_machines_engine_hands_out_its_globals():
+    rt = runtime()
+    assert rt.eval("ModHost.engineApi()") == \
+        "state=none prng=none players=none get_local_players=no"
+    rt.execute("""
+        players = {}
+        setmetatable(_G, { __index = function(_, key)
+            if key == "state" or key == "prng" then return {} end
+            if key == "boom" then error("no such global") end
+        end })
+        function get_local_players() return {} end
+    """)
+    assert rt.eval("ModHost.engineApi()") == \
+        "state=served prng=served players=plain get_local_players=yes"

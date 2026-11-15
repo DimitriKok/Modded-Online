@@ -222,6 +222,15 @@ fails the test with the frame it died on, instead of quietly hanging.
   **"Desync likely: ... differs between your games"**. Restart Spelunky 2 on
   every machine, then start a new run together.
 
+- **Use the same Playlunky build, and the same `mo_*.on` flag files, on every
+  machine.** Playlunky's November 2026 update changed how scripts see some of the
+  engine's globals (`state`, `prng`, `players`). Two machines on builds either side
+  of a change like that run a hosted mod differently. The `engineapi=` line at the
+  top of `desync_log.txt` shows what each machine's Playlunky provides, and it should
+  read the same on every machine. A diagnostic flag such as `mo_trace.on` registers
+  one more callback of Modded Online's. That changes the id of every callback
+  registered after it, and the engine still runs some events in id order.
+
 - **Instant restart is a vote** while online: pressing it mid-run casts a vote
   (your spelunker keeps playing — the local restart is cancelled) and the run
   only restarts once EVERY present player has pressed instant restart, at which

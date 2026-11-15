@@ -1192,6 +1192,76 @@ end
 
 -- ------------------------------------------------------------------ the sandbox
 
+--- How this machine's Playlunky hands scripts the engine's globals, in a few words
+--- for the log header: two players on builds that hand them out differently run a
+--- hosted mod differently. `state`/`prng`/`players` are "plain" (a field of the
+--- script's globals, as before Playlunky's 2026-11 update), "served" (looked up on
+--- every read, as since) or "none".
+--- @return string
+function module.engineApi()
+    local parts = {}
+    for _, name in ipairs({ "state", "prng", "players" }) do
+        local how = "none"
+        if rawget(_G, name) ~= nil then
+            how = "plain"
+        else
+            local ok, v = pcall(function() return _G[name] end)
+            if ok and v ~= nil then
+                how = "served"
+            end
+        end
+        parts[#parts + 1] = name .. "=" .. how
+    end
+    parts[#parts + 1] = "get_local_players=" .. (type(rawget(_G, "get_local_players")) == "function"
+        and "yes" or "no")
+    return table.concat(parts, " ")
+end
+
+--- The engine's list of the players, for a hosted mod whose engine no longer has a
+--- `players` global (see newSandbox). nil when it has no way to give one.
+--- @return any
+function module.enginePlayers()
+    local name = "get_local_players"
+    local get = rawget(_G, name)
+    if type(get) ~= "function" then
+        name = "get_players"
+        get = rawget(_G, name)
+    end
+    if type(get) ~= "function" then
+        return nil
+    end
+    local ok, list = pcall(get)
+    if not ok or (type(list) ~= "table" and type(list) ~= "userdata") then
+        return nil
+    end
+    if not module.playersServed then
+        module.playersServed = true
+        module.noteLateMissing("players (served from " .. name .. ")")
+    end
+    return list
+end
+
+--- Globals found missing after a load that the log names, at most: a mod that looks
+--- globals up by made-up names would otherwise fill it.
+local LATE_MISSING_MAX = 24
+module.lateMissingSaid = 0
+
+--- A global a hosted mod read and found missing after its load: said once, in the
+--- run's log (or held for the next run's header when no run is on).
+--- @param name string
+function module.noteLateMissing(name)
+    local log = rawget(_G, "DesyncLog")
+    if type(log) ~= "table" or module.lateMissingSaid >= LATE_MISSING_MAX then
+        return
+    end
+    local say = type(log.earlyEvent) == "function" and log.earlyEvent or log.event
+    if type(say) == "function" then
+        module.lateMissingSaid = module.lateMissingSaid + 1
+        pcall(say, "hosted mod read a global the engine does not have: %s%s", name,
+            module.lateMissingSaid == LATE_MISSING_MAX and " (the last one named here)" or "")
+    end
+end
+
 --- Build the environment a hosted mod runs in.
 ---
 --- Writes land in the sandbox table, so the mod's globals (Sp25GameClass,
@@ -1227,9 +1297,21 @@ function module.newSandbox(report, opts)
                     v = got
                 end
             end
+            if v == nil and key == "players" then
+                -- The same update left the documented `players` global ("an array of
+                -- Player of the current players") commented out of Overlunky, with
+                -- nothing in its place: a mod written before it that reads `players`
+                -- gets nil. The engine's own list instead, read fresh.
+                v = module.enginePlayers()
+            end
             if v == nil and not seen[key] then
                 seen[key] = true
                 report.missing[#report.missing + 1] = tostring(key)
+                if report.loaded then
+                    -- read during play, long after the load's summary was written: the
+                    -- log is the only place it can still be seen
+                    module.noteLateMissing(tostring(key))
+                end
             end
             return v
         end,
@@ -1936,6 +2018,7 @@ function module.host(packDir, opts)
         module.controls[packDir] = report.determinism
     end
     report.ok = ok
+    report.loaded = true
     if not ok then
         report.err = tostring(err)
     end

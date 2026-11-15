@@ -1,5 +1,93 @@
 # Changelog
 
+## 2.0.0-dev88
+
+Rooms HVRT and EIAS (dev87) desynced on 1-1. Both games had just been started and
+both used the same seed, yet the two machines built different floors: in EIAS one had
+a pool of water with fish and the other had no water at all. No server change: the
+server stays at **1.0.13**. Every player needs dev88.
+
+### Fixed
+
+- **A hosted mod's room callbacks run in the same order on every machine.** While a
+  floor generates, the engine asks the scripts about each room:
+  `PRE_GET_RANDOM_ROOM` can pick the room and `PRE_HANDLE_ROOM_TILES` can change its
+  tiles. It asks again for each layer it makes or tears down. Overlunky keeps a
+  script's callbacks in a hash map, so the order it reaches them in depends on their
+  ids. When two of a mod's callbacks can both answer for one room, the one reached
+  first decides it.
+  - One of the two machines had `mo_trace.on` in its pack folder. That flag makes
+    Modded Online register one extra callback after the mod is hosted. Every callback
+    2.5 registers after that gets an id one higher than on the other machine, which
+    changes the engine's order.
+  - dev86 ran the mod's callbacks in registration order for every load-time and
+    per-frame event, but not for these room and layer events. Now it does, with one
+    pass for each room and each layer.
+  - The engine's rules are kept. The first room a callback returns wins, and the
+    first `true` from a room-tiles or layer callback stops the rest.
+- **A callback the engine reaches twice in one firing no longer runs the mod's
+  callbacks twice.** Overlunky walks that map while the scripts add to it, and every
+  floor 2.5 registers hundreds of callbacks from inside its own. When the map grows
+  enough to rebuild itself mid-walk, the walk reaches some callbacks a second time.
+  - dev86 took that for the event firing again. It could run all of the mod's
+    callbacks for that event a second time, on that machine only. Which machine's map
+    rebuilds, and when, depends on its callback ids.
+  - In HVRT and EIAS the two machines ran different numbers of 2.5's ON.LEVEL
+    callbacks on 1-1: 52 and 47 on the world host, 59 both times on the other
+    machine.
+  - Now a callback reached again within one firing is handed what it returned the
+    first time, and nothing runs twice.
+  - If the engine ever asks about the same room twice in a row, it still gets two
+    answers. A callback reached again with nothing registered in between must be a
+    second request, because only a new registration can rebuild the map. Every call
+    into the engine's `set_callback` is now counted for this.
+- **A hosted mod that reads `players` gets the engine's list of players again.**
+  Playlunky's November update also left out the documented `players` global and put
+  nothing in its place, so such a mod got nil.
+  - When the engine has no `players`, the mod now gets the engine's own list
+    (`get_local_players()`), read fresh each time.
+  - On a Playlunky that still has `players`, the mod gets that, as before.
+  - The log says once when this happens.
+
+### Diagnostics
+
+- The log header has a new `engineapi=` line. It says how this machine's Playlunky
+  hands out `state`, `prng` and `players` (`plain`, `served` or `none`), and whether
+  it has `get_local_players`. Two machines on Playlunky builds either side of a change
+  like November's run a hosted mod differently, and nothing else in a log showed it.
+- A global the hosted mod reads during play and does not find is now named in the
+  log, once each, up to 24 names. Before, only globals missing at load were named.
+- Each floor block has a new `hosted callbacks by ordered event:` line. It lists how
+  many of the mod's callbacks each ordered event has. For the room and layer events
+  it also shows how often they fired since the last floor, for example
+  `PRE_GET_RANDOM_ROOM 3 (fired 38)`. The same floor gives the same line on every
+  machine, and it shows whether a mod has two callbacks that can answer for one room.
+
+### Tests
+
+- `tests/test_ordered_passes.py`:
+  - A floor set up while one engine's map rebuilds mid-walk is set up once. This
+    covers a walk that goes straight through, one that reaches callbacks again, and
+    one that skips some.
+  - A walk that reaches every callback again in the same frame runs them once.
+  - The same event with its closing event in between is two passes.
+  - A room that two callbacks can answer for gets the same room on every machine.
+  - Every room and every layer is a pass of its own.
+  - A room reached again after a registration runs once. With nothing counting
+    registrations, it also runs once.
+  - A room asked about twice in a row is answered twice.
+  - The room-tiles callbacks share the engine's context and stop at a `true`.
+  - A callback that answers with something other than a room string is left to the
+    engine.
+  - The floor block's new census line.
+- `tests/test_mod_host.py`:
+  - The `players` fallback: the list is read fresh, and an engine that still has
+    `players` hands over its own.
+  - A global missing during play is logged once, up to the limit.
+  - The `engineapi` string.
+- `tests/test_log_header.py` (new): the header line.
+- `tests/test_water_probe.py`: the census line in the floor block.
+
 ## 2.0.0-dev87
 
 Playlunky's November 2026 update broke every hosted mod. No server change: the server

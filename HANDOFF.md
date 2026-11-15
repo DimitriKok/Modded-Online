@@ -6,7 +6,7 @@ them.
 
 ## Start here
 
-**Build: `2.0.0-dev55` → `dev87`. The server must be redeployed at `1.0.13`.**
+**Build: `2.0.0-dev55` → `dev88`. The server must be redeployed at `1.0.13`.**
 Section 3's fix is half a server fix and does nothing without it (1.0.11 or later).
 Section 6 has a server half too, but its client half works on its own. A client on a
 server other than the one it expects says so in a toast and in the log. Check with
@@ -40,13 +40,17 @@ server other than the one it expects says so in a toast and in the log. Check wi
 | 24 | Room QZUX: a player who crashed and rejoined desynced at once; a white flag left where a player crashed | The flag: **FIXED** in dev85, not yet tried in game. The rejoin: dev85 made a returning player wait for the next run with a hosted mod; **dev86 folds them in again**, see 26 — section 24 |
 | 25 | A crash right after 2.5's Quetzalcoatl altar hook (sim 19:2682) | **NOT FIXED: cause not known.** In the engine's update or 2.5's per-entity hooks, on one machine only. Needs the session's logs — section 25 |
 | 26 | Coming back mid-run with 2.5 hosted (dev85 deferred it to the next run) | **NEW** in dev86, not yet tried in game. The host hands 2.5's run over, taken at the end of its own PRE_LOAD_SCREEN for the fold-in floor; the returning player waits in the camp for it and applies it at the head and the tail of their load; two floors of probation send them back to the camp on any difference. Also: a hosted mod's callbacks for every load-time and per-frame event run in registration order in a room — section 26 |
+| 27 | Rooms HVRT and EIAS (dev87): two freshly started games built different 1-1s from one seed | **FIXED** in dev88 as far as the logs can show, not yet tried in game. The room and layer events now run in registration order too (one machine's `mo_trace.on` shifted every later callback id), and a callback the engine reaches twice in one walk (its map rehashing under it) no longer re-runs the pass. Unconfirmed: that 2.5 has two callbacks for one room event; the new census line will say — section 27 |
 
-**Playlunky 2026-11 (dev87):** `state` and `prng` are now served through a fallback on
-the script's environment, so the sandbox's `__index` (`ModHost.newSandbox`) does a
-normal `_G[key]` read when `rawget` finds nothing, uncached. Without it every hosted
-mod gets nil for both.
+**Playlunky 2026-11 (dev87, dev88):** `state` and `prng` are now served through a
+fallback on the script's environment, so the sandbox's `__index` (`ModHost.newSandbox`)
+does a normal `_G[key]` read when `rawget` finds nothing, uncached. Without it every
+hosted mod gets nil for both. The update also commented out `players` with nothing in
+its place; since dev88 the sandbox serves `get_local_players()` for it, read fresh, when
+the engine gives nothing (`ModHost.enginePlayers`). The log header's `engineapi=` line
+says what each machine's Playlunky hands out.
 
-**Git state:** `main` is at dev86; `claude/vigilant-cori-chwlul` is at dev87 and stays
+**Git state:** `main` is at dev86; `claude/vigilant-cori-chwlul` is at dev88 and stays
 open for the next fixes. `git log --oneline origin/main..HEAD` shows what a branch adds.
 
 **Before trusting any log in the pack folder**, read "why two captures came back
@@ -1405,8 +1409,9 @@ heads (ours), the mod's, tails (ours). Return rules per event: PRE_LOAD_SCREEN a
 PRE creation/destruction ones stop at the first `true`; PRE_LEVEL_GENERATION and
 PRE_UPDATE OR their results; the rest ignore them. A new pass starts when the frame
 changed, a closing event fired (ORDER_CLOSERS: POST_UPDATE closes PRE_UPDATE, and so
-on), or an entry comes round a second time after the pass completed. An entry
-registered during a pass runs in that pass, last. An error is raised at the entry's
+on), or an entry comes round a second time after the pass completed (dev88 dropped
+that last rule, which re-ran passes when the engine's map rehashed: section 27). An
+entry registered during a pass runs in that pass, last. An error is raised at the entry's
 own turn. Alone, or for an event the mod has no callback for, every callback runs at
 the engine's turn. Heads: eventSync's PRE_LOAD_SCREEN and PRE_LEVEL_GENERATION work,
 inputSync's gate, determinism's own. Tails: the run-start window and the fold-in tail
@@ -1492,6 +1497,68 @@ Anything that shows within two floors sends the player back; later, it would des
 as any divergence does.
 `tests/test_fold_in.py`.
 
+## 27. Rooms HVRT and EIAS: two different 1-1s from one seed — FIXED in dev88, NOT YET TRIED IN GAME
+
+**What the four logs show** (dev87, both games freshly started, same seed, both rooms):
+`gen[pre]`'s ten PRNG streams match, `gen[post]`'s differ (c0 c2 c3 c5 c8, c7 too in
+EIAS), so the floors diverged inside generation. The entities differ wholesale (EIAS:
+the non-host's 1-1 has some 400 water tiles and fish, the host's none). The hosted
+ON.LEVEL callbacks that ran: 52 and 47 on the world host, 59 both times on the other
+machine. `>> preLevelGeneration` appears once per machine, so the PRE_LEVEL_GENERATION
+pass ran once on both. The non-host had `mo_trace.on` (`frametrace=ON` in the header),
+which arms `ModHost.installJournalProbe`: one extra `set_callback` after hosting, so
+every id 2.5 registers after it is one higher there, and Overlunky's `unordered_map`
+orders a different way.
+
+**Two causes, both in `determinism.lua`'s ordered passes:**
+
+1. **The room and layer events were left to the engine.** PRE_GET_RANDOM_ROOM (first
+   non-empty string wins), PRE_HANDLE_ROOM_TILES (first `true` stops; every callback
+   shares the engine's `ctx`), PRE/POST_LAYER_CREATION and DESTRUCTION fire inside
+   one frame many times with nothing between, so the frame and the closers cannot
+   tell one firing from the next. `ORDER_BY_FIRING`: a new pass starts when the plain
+   arguments change (`firingKey`: x, y, layer, template; the layer). Closers:
+   POST_LEVEL_GENERATION or PRE_UPDATE for the room events, PRE_UPDATE for the layer
+   ones. Return kinds: "first" (new) for PRE_GET_RANDOM_ROOM, "stop" for the others'
+   PRE events. **Unconfirmed:** that 2.5 has two callbacks for one room event that
+   can both answer; its source was not at hand to check. The floor block's new
+   `hosted callbacks by ordered event:` line (`Determinism.orderedCensus`) says, with
+   how often each room/layer event fired since the last floor.
+2. **dev86's re-run rule.** A pass also restarted when an entry came round again after
+   every entry had had its turn. Overlunky's range-for walks the map `set_callback`
+   inserts into; a rehash mid-walk revisits some callbacks and skips others, by each
+   machine's ids. 2.5 registers ~400 callbacks inside its PRE_LEVEL_GENERATION and more
+   in its ON.LEVEL ones (the update dispatches LEVEL, GAMEFRAME and the screen events
+   in one walk), so a revisit re-ran a whole pass on one machine. dev88: a pass starts
+   only on a new frame, a closer, or (room/layer events) new arguments; an entry
+   reached again is handed nothing and runs nothing (`turnOf`). The one exception:
+   a room/layer event reached again with **no** engine `set_callback` since the pass
+   began is a genuine second firing with the same arguments (`firedAgain`), since
+   only an insert can rehash the map. `Callbacks.rawSetCallback` now counts every call
+   (`Callbacks.insertCount`); ours go through it via `register`, the hosted mods' via
+   modHost's wrapper. Nothing counting (tests without the registry) means "same
+   firing".
+
+**Engine facts this rests on** (Overlunky main, fetched 2026-11): `callbacks` is a
+`std::unordered_map<int, ScreenCallback>`, every event a range-for over it;
+`set_callback` is its only insert (`callbacks[cbcount] = ...`, ON.LOAD/SAVE go to their
+own maps; timers to `level_timers`/`global_timers`); clears are erased in `update()`
+outside the walks; `level_gen` and the `spawn_transition` hook both fire
+POST_LEVEL_GENERATION after PRE_LEVEL_GENERATION, blocked or not; the room events fire
+from `get_random_room_data` and `spawn_room_from_tile_codes`, between the two.
+
+**Also in dev88:** the `players` fallback (see "Playlunky 2026-11" at the top), a log
+line for each global the hosted mod finds missing during play (`ModHost.noteLateMissing`,
+24 at most), and `engineapi=` in the header (`ModHost.engineApi`).
+
+**What to look for next time:** the same `hosted callbacks by ordered event:` line on
+both machines at every floor, the same `level order` counts, and `engineapi=` equal.
+Ask for 2.5's Lua source to confirm cause 1. Until a run confirms it, both players
+should use the same flag files: any flag that registers a callback (`mo_trace.on`,
+`mo_journalprobe.on`, `mo_nojournalpages.on`, `mo_menuprobe.on`) shifts the ids of
+everything registered after it, and the events not ordered still run in id order.
+`tests/test_ordered_passes.py`, `tests/test_mod_host.py`, `tests/test_log_header.py`.
+
 ## Diagnostic tooling (flags and the files they write)
 
 All flag files live in the pack folder. They are files, not settings, for the reason
@@ -1572,7 +1639,7 @@ On a machine whose Python has no pytest or lupa, uv supplies both for the run:
 uv run --no-project --with pytest --with lupa python -m pytest tests/ -q
 ```
 
-1311 passing, none failing, 1 skipped (it needs hdmod next to this pack) (dev86), under Lua 5.4 and 5.5. The 16 long-standing failures went in dev67, with the two
+1334 passing, none failing, 1 skipped (it needs hdmod next to this pack) (dev88), under Lua 5.4 and 5.5. The 16 long-standing failures went in dev67, with the two
 stale test files they came from: `tests/test_world_mailbox.py` (the world mailbox
 deleted in dev44) and `tests/test_seeded_run.py` (the seeded-run flag removed in
 dev46). A failure here now means something broke.

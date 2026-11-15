@@ -33,10 +33,31 @@
 local module = {}
 
 --- The engine's own functions, captured before the global is replaced.
-local rawSetCallback = set_callback
+local engineSetCallback = set_callback
 local rawClearCallback = clear_callback
+
+--- Calls into the engine's set_callback so far, ours and the hosted mods' alike (theirs
+--- come through `rawSetCallback` too). Each one inserts into the map the engine walks
+--- to fire an event, and only an insert can make that map rehash under a walk: it is
+--- how determinism tells the engine reaching a callback again within one walk from the
+--- engine firing the event again (see its ordered passes).
+local inserts = 0
+
+--- The engine's set_callback, counted.
+--- @param fn any
+--- @param kind any
+--- @return any
+local function rawSetCallback(fn, kind)
+    inserts = inserts + 1
+    return engineSetCallback(fn, kind)
+end
 module.rawSetCallback = rawSetCallback
 module.rawClearCallback = rawClearCallback
+
+--- @return integer # calls into the engine's set_callback so far
+function module.insertCount()
+    return inserts
+end
 
 --- How long each kind may go quiet before we treat it as gone.
 ---

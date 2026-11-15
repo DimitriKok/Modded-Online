@@ -1977,6 +1977,15 @@ function module.sendWorldDigest()
             extra[#extra + 1] = "hosted registrations since the last floor: " .. since
         end
     end
+    -- the mod's callbacks for each event we run in its order, and how often the room
+    -- and layer ones fired (dev88): two machines differing here ran different sets
+    if Determinism ~= nil and Determinism.orderedCensus ~= nil then
+        local okCensus, census = pcall(Determinism.orderedCensus)
+        if okCensus and type(census) == "string" then
+            extra = extra or {}
+            extra[#extra + 1] = "hosted callbacks by ordered event: " .. census
+        end
+    end
     if DesyncLog ~= nil then
         DesyncLog.floorSnapshot(seq, seedHash, entHash, counts, extra)
         DesyncLog.leave("floorDigest+dump")
